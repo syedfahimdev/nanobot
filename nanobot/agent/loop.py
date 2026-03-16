@@ -30,7 +30,7 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, WebSearchConfig
+    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, ToolsDNSConfig, WebSearchConfig
     from nanobot.cron.service import CronService
 
 
@@ -64,6 +64,7 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
+        toolsdns_config: ToolsDNSConfig | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -79,6 +80,7 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+        self._toolsdns_config = toolsdns_config
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -132,6 +134,13 @@ class AgentLoop:
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+        if self._toolsdns_config and self._toolsdns_config.enabled:
+            from nanobot.agent.tools.toolsdns import ToolsDNSTool
+            self.tools.register(ToolsDNSTool(
+                base_url=self._toolsdns_config.url,
+                api_key=self._toolsdns_config.api_key,
+                timeout=self._toolsdns_config.timeout,
+            ))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
