@@ -288,6 +288,7 @@ def onboard():
     console.print("[dim]Config template now uses `maxTokens` + `contextWindowTokens`; `memoryWindow` is no longer a runtime setting.[/dim]")
 
     _onboard_plugins(config_path)
+    _onboard_providers(config_path)
 
     # Create workspace
     workspace = get_workspace_path()
@@ -301,9 +302,13 @@ def onboard():
     console.print(f"\n{__logo__} nanobot is ready!")
     console.print("\nNext steps:")
     console.print("  1. Add your API key to [cyan]~/.nanobot/config.json[/cyan]")
-    console.print("     Get one at: https://openrouter.ai/keys")
+    console.print("     • OpenRouter (any model):  https://openrouter.ai/keys")
+    console.print("     • Kimi Coding (kimi-for-coding):  https://api.kimi.com  → set [cyan]providers.kimi.apiKey[/cyan] and [cyan]providers.kimi.apiBase[/cyan]")
+    console.print("       then set [cyan]agents.defaults.provider: kimi[/cyan], [cyan]model: kimi-for-coding[/cyan], [cyan]maxTokens: 32768[/cyan], [cyan]contextWindowTokens: 262144[/cyan]")
+    console.print("     • Z.AI Coding (GLM models):  https://api.z.ai  → set [cyan]providers.zai.apiKey[/cyan]")
+    console.print("       then set [cyan]agents.defaults.provider: zai[/cyan], [cyan]model: GLM-4.7[/cyan]")
     console.print("  2. Chat: [cyan]nanobot agent -m \"Hello!\"[/cyan]")
-    console.print("\n[dim]Want Telegram/WhatsApp? See: https://github.com/HKUDS/nanobot#-chat-apps[/dim]")
+    console.print("\n[dim]Want Telegram/Discord? See: https://github.com/HKUDS/nanobot#-chat-apps[/dim]")
 
 
 def _merge_missing_defaults(existing: Any, defaults: Any) -> Any:
@@ -318,6 +323,31 @@ def _merge_missing_defaults(existing: Any, defaults: Any) -> Any:
         else:
             merged[key] = _merge_missing_defaults(merged[key], value)
     return merged
+
+
+def _onboard_providers(config_path: Path) -> None:
+    """Pre-populate apiBase for direct providers that have a default_api_base in the registry."""
+    import json
+    from nanobot.providers.registry import PROVIDERS
+
+    with open(config_path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    providers = data.setdefault("providers", {})
+    for spec in PROVIDERS:
+        if not spec.is_direct or not spec.default_api_base:
+            continue
+        # Convert snake_case name to camelCase key (e.g. "kimi" → "kimi", "zai" → "zai")
+        key = "".join(
+            w.capitalize() if i else w
+            for i, w in enumerate(spec.name.split("_"))
+        )
+        entry = providers.setdefault(key, {})
+        if not entry.get("apiBase"):
+            entry["apiBase"] = spec.default_api_base
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
 
 def _onboard_plugins(config_path: Path) -> None:
@@ -344,6 +374,15 @@ def _onboard_plugins(config_path: Path) -> None:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
+def _is_direct_provider(provider_name: str | None) -> bool:
+    """Return True if the provider should use CustomProvider (direct OpenAI-compatible)."""
+    if not provider_name:
+        return False
+    from nanobot.providers.registry import find_by_name
+    spec = find_by_name(provider_name)
+    return bool(spec and spec.is_direct)
+
+
 def _make_provider(config: Config):
     """Create the appropriate LLM provider from config."""
     from nanobot.providers.base import GenerationSettings
@@ -357,8 +396,8 @@ def _make_provider(config: Config):
     # OpenAI Codex (OAuth)
     if provider_name == "openai_codex" or model.startswith("openai-codex/"):
         provider = OpenAICodexProvider(default_model=model)
-    # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
-    elif provider_name == "custom":
+    # Direct OpenAI-compatible endpoint: custom, kimi, zai, etc. — bypasses LiteLLM
+    elif _is_direct_provider(provider_name):
         from nanobot.providers.custom_provider import CustomProvider
         provider = CustomProvider(
             api_key=p.api_key if p else "no-key",
@@ -441,7 +480,8 @@ def gateway(
     port: int | None = typer.Option(None, "--port", "-p", help="Gateway port"),
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
-    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file (JSON or YAML)"),
+    profile: str | None = typer.Option(None, "--profile", help="Activate a named provider profile from config"),
 ):
     """Start the nanobot gateway."""
     from nanobot.agent.loop import AgentLoop
@@ -459,12 +499,29 @@ def gateway(
 
     config = _load_runtime_config(config, workspace)
     _print_deprecated_memory_window_notice(config)
+
+    if profile:
+        try:
+            config = config.apply_profile(profile)
+            console.print(f"[green]Active profile: {profile}[/green]")
+        except ValueError as e:
+            console.print(f"[red]Error: {e}[/red]")
+            raise typer.Exit(1)
+
     port = port if port is not None else config.gateway.port
 
     console.print(f"{__logo__} Starting nanobot gateway version {__version__} on port {port}...")
     sync_workspace_templates(config.workspace_path)
     bus = MessageBus()
     provider = _make_provider(config)
+
+    def _profile_factory(name: str) -> "LLMProvider":
+        return _make_provider(config.apply_profile(name))
+
+    def _profile_save(name: str) -> None:
+        from nanobot.config.loader import save_config
+        save_config(config.apply_profile(name))
+
     session_manager = SessionManager(config.workspace_path)
 
     # Create cron service first (callback set after agent creation)
@@ -488,6 +545,9 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         toolsdns_config=config.tools.toolsdns,
+        profiles=config.profiles,
+        profile_factory=_profile_factory if config.profiles else None,
+        profile_save_callback=_profile_save if config.profiles else None,
     )
 
     # Set cron callback (needs agent)
@@ -637,7 +697,8 @@ def agent(
     message: str = typer.Option(None, "--message", "-m", help="Message to send to the agent"),
     session_id: str = typer.Option("cli:direct", "--session", "-s", help="Session ID"),
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
-    config: str | None = typer.Option(None, "--config", "-c", help="Config file path"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Config file path (JSON or YAML)"),
+    profile: str | None = typer.Option(None, "--profile", help="Activate a named provider profile from config"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
     logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during chat"),
 ):
@@ -651,6 +712,14 @@ def agent(
 
     config = _load_runtime_config(config, workspace)
     _print_deprecated_memory_window_notice(config)
+
+    if profile:
+        try:
+            config = config.apply_profile(profile)
+        except ValueError as e:
+            console.print(f"[red]Error: {e}[/red]")
+            raise typer.Exit(1)
+
     sync_workspace_templates(config.workspace_path)
 
     bus = MessageBus()
@@ -680,6 +749,9 @@ def agent(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         toolsdns_config=config.tools.toolsdns,
+        profiles=config.profiles,
+        profile_factory=(lambda name: _make_provider(config.apply_profile(name))) if config.profiles else None,
+        profile_save_callback=(lambda name: __import__("nanobot.config.loader", fromlist=["save_config"]).save_config(config.apply_profile(name))) if config.profiles else None,
     )
 
     # Shared reference for progress callbacks

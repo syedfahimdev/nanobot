@@ -81,6 +81,49 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         is_direct=True,
     ),
 
+    # === Kimi Coding (Moonshot AI coding endpoint, Anthropic message format) =
+    # Uses https://api.kimi.com/coding with model kimi-for-coding.
+    # LiteLLM routes via anthropic/ prefix → /v1/messages endpoint.
+    # Max output: 32768 tokens, context window: 262144 tokens.
+    ProviderSpec(
+        name="kimi",
+        keywords=("kimi-for-coding",),
+        env_key="KIMI_API_KEY",
+        display_name="Kimi Coding",
+        litellm_prefix="anthropic",  # kimi-for-coding → anthropic/kimi-for-coding
+        skip_prefixes=("anthropic/",),
+        is_direct=False,
+        default_api_base="https://api.kimi.com/coding",
+        detect_by_base_keyword="kimi.com",
+        env_extras=(("ANTHROPIC_API_KEY", "{api_key}"),),
+    ),
+
+    # === Z.AI Coding Plan (OpenAI-compatible, uses /coding/paas endpoint, no per-token billing) =
+    # Requires active GLM Coding Plan subscription at z.ai/subscribe ($3/mo).
+    # Same API key as zai but different base URL — no credit consumption.
+    ProviderSpec(
+        name="zai_coding_plan",
+        keywords=("zai-plan",),
+        env_key="ZAI_API_KEY",
+        display_name="Z.AI Coding Plan",
+        litellm_prefix="",
+        is_direct=True,
+        default_api_base="https://api.z.ai/api/coding/paas/v4",
+        detect_by_base_keyword="coding/paas",
+    ),
+
+    # === Z.AI (Zhipu AI international, OpenAI-compatible, GLM models, pay-per-token) =
+    ProviderSpec(
+        name="zai",
+        keywords=("glm", "zai"),
+        env_key="ZAI_API_KEY",
+        display_name="Z.AI",
+        litellm_prefix="",
+        is_direct=True,
+        default_api_base="https://api.z.ai/api/paas/v4",
+        detect_by_base_keyword="z.ai",
+    ),
+
     # === Azure OpenAI (direct API calls with API version 2024-10-21) =====
     ProviderSpec(
         name="azure_openai",

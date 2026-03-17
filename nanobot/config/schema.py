@@ -67,6 +67,9 @@ class ProvidersConfig(Base):
     """Configuration for LLM providers."""
 
     custom: ProviderConfig = Field(default_factory=ProviderConfig)  # Any OpenAI-compatible endpoint
+    kimi: ProviderConfig = Field(default_factory=ProviderConfig)  # Kimi Coding (https://api.kimi.com/coding/v1)
+    zai_coding_plan: ProviderConfig = Field(default_factory=ProviderConfig)  # Z.AI Coding Plan (https://api.z.ai/api/coding/paas/v4, subscription-based)
+    zai: ProviderConfig = Field(default_factory=ProviderConfig)  # Z.AI (GLM models, https://api.z.ai/api/paas/v4, pay-per-token)
     azure_openai: ProviderConfig = Field(default_factory=ProviderConfig)  # Azure OpenAI (model = deployment name)
     anthropic: ProviderConfig = Field(default_factory=ProviderConfig)
     openai: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -164,6 +167,20 @@ class ToolsConfig(Base):
     toolsdns: ToolsDNSConfig = Field(default_factory=ToolsDNSConfig)
 
 
+class ProfileConfig(Base):
+    """Named agent preset — any field overrides agents.defaults when the profile is activated."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="ignore")
+
+    provider: str | None = None
+    model: str | None = None
+    max_tokens: int | None = None
+    context_window_tokens: int | None = None
+    temperature: float | None = None
+    reasoning_effort: str | None = None
+    max_tool_iterations: int | None = None
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
 
@@ -172,6 +189,28 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    profiles: dict[str, ProfileConfig] = Field(default_factory=dict)
+
+    def apply_profile(self, name: str) -> "Config":
+        """Return a copy of this config with the named profile's fields merged into agents.defaults."""
+        profile = self.profiles.get(name)
+        if profile is None:
+            available = ", ".join(self.profiles) or "(none)"
+            raise ValueError(f"Profile '{name}' not found. Available: {available}")
+        overrides = {
+            k: v for k, v in {
+                "provider": profile.provider,
+                "model": profile.model,
+                "max_tokens": profile.max_tokens,
+                "context_window_tokens": profile.context_window_tokens,
+                "temperature": profile.temperature,
+                "reasoning_effort": profile.reasoning_effort,
+                "max_tool_iterations": profile.max_tool_iterations,
+            }.items() if v is not None
+        }
+        new_defaults = self.agents.defaults.model_copy(update=overrides)
+        new_agents = self.agents.model_copy(update={"defaults": new_defaults})
+        return self.model_copy(update={"agents": new_agents})
 
     @property
     def workspace_path(self) -> Path:
@@ -186,8 +225,11 @@ class Config(BaseSettings):
 
         forced = self.agents.defaults.provider
         if forced != "auto":
-            p = getattr(self.providers, forced, None)
-            return (p, forced) if p else (None, None)
+            import re
+            # Normalize camelCase/kebab-case to snake_case for attribute lookup
+            forced_snake = re.sub(r"(?<=[a-z])([A-Z])", r"_\1", forced).lower().replace("-", "_")
+            p = getattr(self.providers, forced_snake, None) or getattr(self.providers, forced, None)
+            return (p, forced_snake) if p else (None, None)
 
         model_lower = (model or self.agents.defaults.model).lower()
         model_normalized = model_lower.replace("-", "_")

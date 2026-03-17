@@ -30,7 +30,7 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, ToolsDNSConfig, WebSearchConfig
+    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, ProfileConfig, ToolsDNSConfig, WebSearchConfig
     from nanobot.cron.service import CronService
 
 
@@ -65,6 +65,9 @@ class AgentLoop:
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
         toolsdns_config: ToolsDNSConfig | None = None,
+        profiles: "dict[str, ProfileConfig] | None" = None,
+        profile_factory: "Callable[[str], LLMProvider] | None" = None,
+        profile_save_callback: "Callable[[str], None] | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -81,6 +84,10 @@ class AgentLoop:
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self._toolsdns_config = toolsdns_config
+        self._profiles: dict[str, "ProfileConfig"] = profiles or {}
+        self._profile_factory = profile_factory
+        self._profile_save_callback = profile_save_callback
+        self._active_profile: str | None = None
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -351,6 +358,77 @@ class AgentLoop:
                 pass  # MCP SDK cancel scope cleanup is noisy but harmless
             self._mcp_stack = None
 
+    def _handle_profile_cmd(self, msg: InboundMessage) -> OutboundMessage:
+        """Handle /profile [list|<name>] command."""
+        logger.debug("_handle_profile_cmd: content={!r} profiles={}", msg.content, list(self._profiles))
+        parts = msg.content.strip().split(maxsplit=1)
+        sub = parts[1].strip() if len(parts) > 1 else "list"
+
+        if sub == "list" or not sub:
+            if not self._profiles:
+                content = "No profiles configured. Add a 'profiles' section to config.json or config.yaml."
+            else:
+                lines = ["Available profiles:"]
+                for name, p in self._profiles.items():
+                    marker = " ✓ (active)" if name == self._active_profile else ""
+                    model = p.model or "—"
+                    provider = p.provider or "—"
+                    lines.append(f"  {name}{marker}  [{provider} / {model}]")
+                if self._active_profile is None:
+                    lines.append("\nNo profile active (using config defaults).")
+                content = "\n".join(lines)
+            logger.debug("_handle_profile_cmd: returning list response")
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+        name = sub
+        if name not in self._profiles:
+            available = ", ".join(self._profiles) or "(none)"
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content=f"Profile '{name}' not found. Available: {available}",
+            )
+
+        if not self._profile_factory:
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="Profile switching not available in this mode.",
+            )
+
+        try:
+            logger.debug("_handle_profile_cmd: switching to profile {!r}", name)
+            new_provider = self._profile_factory(name)
+            self.provider = new_provider
+            profile = self._profiles[name]
+            if profile.model:
+                self.model = profile.model
+            self._active_profile = name
+            parts_info = []
+            if profile.provider:
+                parts_info.append(f"provider: {profile.provider}")
+            if profile.model:
+                parts_info.append(f"model: {profile.model}")
+            detail = f" ({', '.join(parts_info)})" if parts_info else ""
+            logger.debug("_handle_profile_cmd: switched OK")
+            if self._profile_save_callback:
+                try:
+                    self._profile_save_callback(name)
+                    saved = " (saved to config)"
+                except Exception as save_err:
+                    logger.warning("Failed to save profile to config: {}", save_err)
+                    saved = " (not saved)"
+            else:
+                saved = ""
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content=f"Switched to profile: **{name}**{detail}{saved}",
+            )
+        except BaseException as e:
+            logger.exception("_handle_profile_cmd: error switching to profile {!r}", name)
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content=f"Failed to switch to profile '{name}': {e}",
+            )
+
     def _schedule_background(self, coro) -> None:
         """Schedule a coroutine as a tracked background task (drained on shutdown)."""
         task = asyncio.create_task(coro)
@@ -415,11 +493,14 @@ class AgentLoop:
                 "/new — Start a new conversation",
                 "/stop — Stop the current task",
                 "/restart — Restart the bot",
+                "/profile [name|list] — Switch provider profile",
                 "/help — Show available commands",
             ]
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines),
             )
+        if cmd.startswith("/profile"):
+            return self._handle_profile_cmd(msg)
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))

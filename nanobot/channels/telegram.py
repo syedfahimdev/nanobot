@@ -178,6 +178,7 @@ class TelegramChannel(BaseChannel):
         BotCommand("stop", "Stop the current task"),
         BotCommand("help", "Show available commands"),
         BotCommand("restart", "Restart the bot"),
+        BotCommand("profile", "Switch provider profile — /profile [name|list]"),
     ]
 
     @classmethod
@@ -242,6 +243,7 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("new", self._forward_command))
         self._app.add_handler(CommandHandler("stop", self._forward_command))
         self._app.add_handler(CommandHandler("restart", self._forward_command))
+        self._app.add_handler(CommandHandler("profile", self._forward_command))
         self._app.add_handler(CommandHandler("help", self._on_help))
 
         # Add message handler for text, photos, voice, documents
@@ -375,12 +377,13 @@ class TelegramChannel(BaseChannel):
         if msg.content and msg.content != "[empty message]":
             is_progress = msg.metadata.get("_progress", False)
 
+            # Progress messages are skipped on Telegram — the typing indicator
+            # already signals activity; sending interim chunks causes double-message.
+            if is_progress:
+                return
+
             for chunk in split_message(msg.content, TELEGRAM_MAX_MESSAGE_LEN):
-                # Final response: simulate streaming via draft, then persist
-                if not is_progress:
-                    await self._send_with_streaming(chat_id, chunk, reply_params, thread_kwargs)
-                else:
-                    await self._send_text(chat_id, chunk, reply_params, thread_kwargs)
+                await self._send_with_streaming(chat_id, chunk, reply_params, thread_kwargs)
 
     async def _send_text(
         self,
@@ -454,6 +457,7 @@ class TelegramChannel(BaseChannel):
             "/new — Start a new conversation\n"
             "/stop — Stop the current task\n"
             "/restart — Restart the bot\n"
+            "/profile [name|list] — Switch provider profile\n"
             "/help — Show available commands"
         )
 

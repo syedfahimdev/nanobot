@@ -54,6 +54,7 @@ class DiscordChannel(BaseChannel):
         self._typing_tasks: dict[str, asyncio.Task] = {}
         self._http: httpx.AsyncClient | None = None
         self._bot_user_id: str | None = None
+        self._seen_message_ids: set[str] = set()  # dedup on reconnect
 
     async def start(self) -> None:
         """Start the Discord gateway connection."""
@@ -295,9 +296,18 @@ class DiscordChannel(BaseChannel):
         channel_id = str(payload.get("channel_id", ""))
         content = payload.get("content") or ""
         guild_id = payload.get("guild_id")
+        message_id = str(payload.get("id", ""))
 
         if not sender_id or not channel_id:
             return
+
+        # Deduplicate on gateway reconnect
+        if message_id and message_id in self._seen_message_ids:
+            return
+        if message_id:
+            self._seen_message_ids.add(message_id)
+            if len(self._seen_message_ids) > 500:
+                self._seen_message_ids = set(list(self._seen_message_ids)[-250:])
 
         if not self.is_allowed(sender_id):
             return

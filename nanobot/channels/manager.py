@@ -121,16 +121,21 @@ class ChannelManager:
                     timeout=1.0
                 )
 
-                if msg.metadata.get("_progress"):
-                    if msg.metadata.get("_tool_hint") and not self.config.channels.send_tool_hints:
+                logger.debug("Outbound dispatcher: dequeued msg channel={} chat_id={} is_progress={}",
+                             msg.channel, msg.chat_id, bool((msg.metadata or {}).get("_progress")))
+
+                if (msg.metadata or {}).get("_progress"):
+                    if (msg.metadata or {}).get("_tool_hint") and not self.config.channels.send_tool_hints:
                         continue
-                    if not msg.metadata.get("_tool_hint") and not self.config.channels.send_progress:
+                    if not (msg.metadata or {}).get("_tool_hint") and not self.config.channels.send_progress:
                         continue
 
                 channel = self.channels.get(msg.channel)
                 if channel:
+                    logger.debug("Outbound dispatcher: sending to channel {}", msg.channel)
                     try:
                         await channel.send(msg)
+                        logger.debug("Outbound dispatcher: send completed for channel {}", msg.channel)
                     except Exception as e:
                         logger.error("Error sending to {}: {}", msg.channel, e)
                 else:
@@ -140,6 +145,8 @@ class ChannelManager:
                 continue
             except asyncio.CancelledError:
                 break
+            except Exception as e:
+                logger.exception("Outbound dispatcher unexpected error: {}", e)
 
     def get_channel(self, name: str) -> BaseChannel | None:
         """Get a channel by name."""
