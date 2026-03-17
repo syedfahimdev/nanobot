@@ -54,7 +54,7 @@ class HeartbeatService:
         self,
         workspace: Path,
         provider: LLMProvider,
-        model: str,
+        model: "str | Callable[[], str]",
         on_execute: Callable[[str], Coroutine[Any, Any, str]] | None = None,
         on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = None,
         interval_s: int = 30 * 60,
@@ -62,13 +62,17 @@ class HeartbeatService:
     ):
         self.workspace = workspace
         self.provider = provider
-        self.model = model
+        self._model = model
         self.on_execute = on_execute
         self.on_notify = on_notify
         self.interval_s = interval_s
         self.enabled = enabled
         self._running = False
         self._task: asyncio.Task | None = None
+
+    @property
+    def model(self) -> str:
+        return self._model() if callable(self._model) else self._model
 
     @property
     def heartbeat_file(self) -> Path:

@@ -643,7 +643,7 @@ def gateway(
     heartbeat = HeartbeatService(
         workspace=config.workspace_path,
         provider=provider,
-        model=agent.model,
+        model=lambda: agent.model,
         on_execute=on_heartbeat_execute,
         on_notify=on_heartbeat_notify,
         interval_s=hb_cfg.interval_s,
