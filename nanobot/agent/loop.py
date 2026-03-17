@@ -21,6 +21,7 @@ from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.agent.tools.restart import RestartTool
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
@@ -138,6 +139,7 @@ class AgentLoop:
         self.tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
         self.tools.register(WebFetchTool(proxy=self.web_proxy))
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
+        self.tools.register(RestartTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
@@ -318,9 +320,10 @@ class AgentLoop:
 
         async def _do_restart():
             await asyncio.sleep(1)
-            # Use -m nanobot instead of sys.argv[0] for Windows compatibility
-            # (sys.argv[0] may be just "nanobot" without full path on Windows)
-            os.execv(sys.executable, [sys.executable, "-m", "nanobot"] + sys.argv[1:])
+            try:
+                os.execv(sys.executable, [sys.executable, "-m", "nanobot"] + sys.argv[1:])
+            except Exception as e:
+                logger.error("Restart failed (os.execv): {}", e)
 
         asyncio.create_task(_do_restart())
 
@@ -538,6 +541,13 @@ class AgentLoop:
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
 
+        # Voice channel: route response back through TTS instead of text
+        if msg.channel == "discord_voice":
+            await self.bus.publish_outbound(OutboundMessage(
+                channel="discord_voice", chat_id=msg.chat_id, content=final_content,
+            ))
+            return None
+
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
         return OutboundMessage(
@@ -593,3 +603,4 @@ class AgentLoop:
         msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
         response = await self._process_message(msg, session_key=session_key, on_progress=on_progress)
         return response.content if response else ""
+

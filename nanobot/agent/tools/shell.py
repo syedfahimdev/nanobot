@@ -32,6 +32,9 @@ class ExecTool(Tool):
             r"\bdd\s+if=",                   # dd
             r">\s*/dev/sd",                  # write to disk
             r"\b(shutdown|reboot|poweroff)\b",  # system power
+            r"\bpkill\b",                        # process kill (use restart tool instead)
+            r"\bkillall\b",                      # killall (use restart tool instead)
+            r"\bkill\s+-(?:9|SIGKILL)\b",        # SIGKILL (use restart tool instead)
             r":\(\)\s*\{.*\};\s*:",          # fork bomb
         ]
         self.allow_patterns = allow_patterns or []

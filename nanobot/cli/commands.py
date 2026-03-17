@@ -661,6 +661,31 @@ def gateway(
 
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
 
+    async def _send_restart_notification() -> None:
+        """If a restart context was saved, send a post-boot confirmation message."""
+        import json
+        from pathlib import Path
+        from nanobot.agent.tools.restart import RESTART_CONTEXT_PATH
+        from nanobot.bus.events import OutboundMessage
+
+        await asyncio.sleep(4)  # wait for channels to fully connect
+        if not RESTART_CONTEXT_PATH.exists():
+            return
+        try:
+            ctx = json.loads(RESTART_CONTEXT_PATH.read_text())
+            RESTART_CONTEXT_PATH.unlink(missing_ok=True)
+            channel = ctx.get("channel", "")
+            chat_id = ctx.get("chat_id", "")
+            reason = ctx.get("reason", "no reason specified")
+            if channel and chat_id and channel != "cli":
+                await bus.publish_outbound(OutboundMessage(
+                    channel=channel,
+                    chat_id=chat_id,
+                    content=f"Back online. Restarted because: {reason}",
+                ))
+        except Exception:
+            pass
+
     async def run():
         try:
             await cron.start()
@@ -668,6 +693,7 @@ def gateway(
             await asyncio.gather(
                 agent.run(),
                 channels.start_all(),
+                _send_restart_notification(),
             )
         except KeyboardInterrupt:
             console.print("\nShutting down...")

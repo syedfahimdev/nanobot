@@ -130,7 +130,9 @@ class ChannelManager:
                     if not (msg.metadata or {}).get("_tool_hint") and not self.config.channels.send_progress:
                         continue
 
-                channel = self.channels.get(msg.channel)
+                channel = self.channels.get(msg.channel) or (
+                    self.channels.get("discord") if msg.channel == "discord_voice" else None
+                )
                 if channel:
                     logger.debug("Outbound dispatcher: sending to channel {}", msg.channel)
                     try:

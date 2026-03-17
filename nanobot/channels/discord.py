@@ -10,7 +10,7 @@ from pydantic import Field
 import websockets
 from loguru import logger
 
-from nanobot.bus.events import OutboundMessage
+from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.paths import get_media_dir
@@ -29,7 +29,7 @@ class DiscordConfig(Base):
     token: str = ""
     allow_from: list[str] = Field(default_factory=list)
     gateway_url: str = "wss://gateway.discord.gg/?v=10&encoding=json"
-    intents: int = 37377
+    intents: int = 33281  # Includes GUILDS, GUILD_MESSAGES, MESSAGE_CONTENT
     group_policy: Literal["mention", "open"] = "mention"
 
 
@@ -403,3 +403,4 @@ class DiscordChannel(BaseChannel):
         task = self._typing_tasks.pop(channel_id, None)
         if task:
             task.cancel()
+
