@@ -141,9 +141,11 @@ class AnthropicOAuthProvider(LLMProvider):
 
             if role == "assistant":
                 content_blocks = []
-                # Add thinking blocks if present.
+                # Add thinking blocks if present (only if they have required signature).
                 for tb in (msg.get("thinking_blocks") or []):
-                    content_blocks.append(tb)
+                    if isinstance(tb, dict) and tb.get("signature"):
+                        content_blocks.append(tb)
+                    # Skip thinking blocks without signature — API rejects them.
                 # Text content.
                 text = msg.get("content")
                 if isinstance(text, str) and text:
@@ -212,10 +214,13 @@ class AnthropicOAuthProvider(LLMProvider):
                     arguments=block.input if isinstance(block.input, dict) else {},
                 ))
             elif block.type == "thinking":
-                thinking_blocks.append({
+                tb: dict[str, Any] = {
                     "type": "thinking",
                     "thinking": block.thinking,
-                })
+                }
+                if getattr(block, "signature", None):
+                    tb["signature"] = block.signature
+                thinking_blocks.append(tb)
 
         usage = {}
         if response.usage:
