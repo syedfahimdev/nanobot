@@ -198,6 +198,235 @@ class AgentLoop:
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    # ------------------------------------------------------------------
+    # ToolsDNS pre-flight search (multi-strategy)
+    # ------------------------------------------------------------------
+
+    _TOOLSDNS_SKIP_PATTERNS = re.compile(
+        r"^(/\w|hi\b|hello\b|hey\b|thanks|ok\b|yes\b|no\b|good|how are|what's up)",
+        re.IGNORECASE,
+    )
+
+    _QUERY_CLEAN_RE = re.compile(
+        r"\S+@\S+\.\S+|https?://\S+|\b\d{3}[-.]?\d{3}[-.]?\d{4}\b|\b\d{4}[-/]\d{2}[-/]\d{2}\b",
+    )
+
+    # Intent patterns: natural language → tool-friendly search queries
+    # Each entry: (regex, [list of search queries])
+    # Multiple queries per pattern: descriptive (matches description) + name-style (matches tool name)
+    # ToolsDNS searches both name and description fields, so we hit both angles.
+    _INTENT_MAP = [
+        # Email — send
+        (re.compile(r"\b(send|write|draft|compose|shoot|fire off)\b.*\b(email|mail|message|note)\b", re.I),
+         ["GMAIL_SEND_EMAIL", "gmail send email", "send an email message"]),
+        (re.compile(r"\b(check|read|fetch|get|see|look at)\b.*\b(email|mail|inbox)\b", re.I),
+         ["GMAIL_FETCH_EMAILS", "gmail get inbox emails", "fetch email messages"]),
+        (re.compile(r"\b(reply|respond)\b.*\b(email|mail|thread)\b", re.I),
+         ["GMAIL_REPLY_TO_THREAD", "gmail reply email thread"]),
+        # Slack
+        (re.compile(r"\b(send|post|write|notify|tell|message)\b.*\b(slack|channel|team)\b", re.I),
+         ["SLACK_SEND_MESSAGE", "SLACK_SENDS_A_MESSAGE_TO_A_SLACK", "slack send message channel"]),
+        (re.compile(r"\b(slack)\b", re.I),
+         ["SLACK_SEND_MESSAGE", "slack channel message"]),
+        # Calendar
+        (re.compile(r"\b(schedule|create|book|set up|add)\b.*\b(meeting|event|appointment|call|calendar)\b", re.I),
+         ["GOOGLECALENDAR_CREATE_EVENT", "google calendar create event meeting"]),
+        (re.compile(r"\b(check|show|list|what's on|see)\b.*\b(calendar|schedule|agenda|meetings)\b", re.I),
+         ["GOOGLECALENDAR_FIND_EVENT", "google calendar list events schedule"]),
+        # GitHub
+        (re.compile(r"\b(create|open|file|submit)\b.*\b(issue|bug|ticket)\b", re.I),
+         ["GITHUB_CREATE_AN_ISSUE", "github create issue bug"]),
+        (re.compile(r"\b(create|open|submit)\b.*\b(pr|pull request)\b", re.I),
+         ["GITHUB_CREATE_A_PULL_REQUEST", "github create pull request"]),
+        (re.compile(r"\b(merge|review)\b.*\b(pr|pull request)\b", re.I),
+         ["GITHUB_MERGE_A_PULL_REQUEST", "github merge pull request review"]),
+        (re.compile(r"\b(star|fork|clone)\b.*\b(repo|repository)\b", re.I),
+         ["GITHUB_STAR_A_REPOSITORY", "github star fork repository"]),
+        (re.compile(r"\b(github|repo)\b", re.I),
+         ["GITHUB_LIST_REPOS", "github repository actions"]),
+        # Browser — try name patterns for playwright tools
+        (re.compile(r"\b(open|go to|navigate|visit|browse|check)\b.*\b(website|page|site|url|link)\b", re.I),
+         ["browser_navigate", "playwright navigate open webpage url"]),
+        (re.compile(r"\b(click|press|tap)\b.*\b(button|link|element)\b", re.I),
+         ["browser_click", "playwright click button element"]),
+        (re.compile(r"\b(fill|type|enter|input)\b.*\b(form|field|text|box)\b", re.I),
+         ["browser_fill", "playwright fill form input type"]),
+        (re.compile(r"\b(screenshot|capture|snap)\b", re.I),
+         ["browser_screenshot", "playwright screenshot capture page"]),
+        (re.compile(r"\b(browse|search the web|look up|google)\b", re.I),
+         ["browser_navigate", "web browser search navigate"]),
+        # Salesforce
+        (re.compile(r"\b(salesforce|sfdc|sf)\b.*\b(task|create|check)\b", re.I),
+         ["SALESFORCE_CREATE_TASK", "salesforce create task opportunity"]),
+        (re.compile(r"\b(salesforce|sfdc|sf)\b.*\b(contact|lead|account)\b", re.I),
+         ["SALESFORCE_FETCH_CONTACT", "salesforce contact lead account"]),
+        (re.compile(r"\b(salesforce|sfdc|sf)\b", re.I),
+         ["SALESFORCE", "salesforce CRM"]),
+        # Files & docs
+        (re.compile(r"\b(create|generate|make)\b.*\b(spreadsheet|excel|csv|sheet)\b", re.I),
+         ["GOOGLESHEETS_CREATE_GOOGLE_SHEET", "google sheets create spreadsheet"]),
+        (re.compile(r"\b(create|write|generate|make)\b.*\b(doc|document|report)\b", re.I),
+         ["GOOGLEDOCS_CREATE_DOCUMENT", "google docs create document write"]),
+        (re.compile(r"\b(upload|download|share)\b.*\b(file|document|pdf)\b", re.I),
+         ["GOOGLEDRIVE_UPLOAD_FILE", "google drive upload download file"]),
+        # Tasks / todo
+        (re.compile(r"\b(create|add|make)\b.*\b(task|todo|reminder)\b", re.I),
+         ["create task todo", "TODOIST_CREATE_TASK"]),
+        (re.compile(r"\b(list|show|check)\b.*\b(tasks?|todos?)\b", re.I),
+         ["list tasks", "TODOIST_GET_TASKS"]),
+        # Twitter / social
+        (re.compile(r"\b(tweet|post|publish)\b.*\b(twitter|x\.com|social)\b", re.I),
+         ["TWITTER_CREATION_OF_A_TWEET", "twitter post tweet publish"]),
+        (re.compile(r"\b(tweet|post on twitter)\b", re.I),
+         ["TWITTER_CREATION_OF_A_TWEET", "twitter create tweet"]),
+        # Notion
+        (re.compile(r"\b(notion)\b.*\b(page|create|add|write)\b", re.I),
+         ["NOTION_CREATE_A_PAGE", "notion create page database"]),
+        (re.compile(r"\b(notion)\b", re.I),
+         ["NOTION", "notion page workspace"]),
+        # Linear
+        (re.compile(r"\b(linear)\b.*\b(issue|ticket|bug)\b", re.I),
+         ["LINEAR_CREATE_LINEAR_ISSUE", "linear create issue ticket"]),
+        (re.compile(r"\b(linear)\b", re.I),
+         ["LINEAR", "linear project issue"]),
+        # Report / weekly
+        (re.compile(r"\b(weekly|report|fill)\b.*\b(report|cea|weekly)\b", re.I),
+         ["weekly report", "CEA weekly report fill"]),
+        # Jira
+        (re.compile(r"\b(jira)\b.*\b(issue|ticket|create)\b", re.I),
+         ["JIRA_CREATE_ISSUE", "jira create issue ticket"]),
+        (re.compile(r"\b(jira)\b", re.I),
+         ["JIRA", "jira project issue"]),
+        # Discord
+        (re.compile(r"\b(discord)\b.*\b(send|message|post)\b", re.I),
+         ["DISCORD_SEND_MESSAGE", "discord send message channel"]),
+        (re.compile(r"\b(discord)\b", re.I),
+         ["DISCORD", "discord server channel"]),
+        # Telegram
+        (re.compile(r"\b(telegram)\b.*\b(send|message)\b", re.I),
+         ["TELEGRAM_SEND_MESSAGE", "telegram send message chat"]),
+        (re.compile(r"\b(telegram)\b", re.I),
+         ["TELEGRAM", "telegram bot message"]),
+        # WhatsApp
+        (re.compile(r"\b(whatsapp|whats app)\b", re.I),
+         ["WHATSAPP_SEND_MESSAGE", "whatsapp send message"]),
+        # Generic send/notify — broad fallback
+        (re.compile(r"\b(notify|alert|inform|tell)\b.*\b(someone|team|user|them)\b", re.I),
+         ["send notification", "SLACK_SEND_MESSAGE", "GMAIL_SEND_EMAIL"]),
+    ]
+
+    @staticmethod
+    def _clean_query(text: str) -> str:
+        """Strip user data (emails, URLs, numbers) to get a cleaner tool search query."""
+        cleaned = AgentLoop._QUERY_CLEAN_RE.sub("", text)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned if len(cleaned) >= 8 else text
+
+    @staticmethod
+    def _extract_intent_queries(text: str) -> list[str]:
+        """Extract tool-friendly search queries from natural language using intent patterns.
+
+        Each intent map entry returns multiple queries (name-style + descriptive).
+        We collect from the first matching pattern (most specific) and deduplicate.
+        """
+        queries: list[str] = []
+        seen = set()
+        matched = 0
+        for pattern, query_list in AgentLoop._INTENT_MAP:
+            if pattern.search(text):
+                if isinstance(query_list, str):
+                    query_list = [query_list]
+                for q in query_list:
+                    q_lower = q.lower()
+                    if q_lower not in seen:
+                        seen.add(q_lower)
+                        queries.append(q)
+                matched += 1
+                if matched >= 2 or len(queries) >= 4:
+                    break
+        return queries
+
+    @staticmethod
+    def _compact_schema(schema: dict, max_params: int = 10) -> str:
+        """Build a compact one-line-per-param schema summary."""
+        props = schema.get("properties", {})
+        required = set(schema.get("required", []))
+        if not props:
+            return "    (no parameters)"
+        lines = []
+        for name, info in list(props.items())[:max_params]:
+            ptype = info.get("type", "any")
+            desc = info.get("description", "").split(".")[0].split("\n")[0][:60]
+            req = " [REQUIRED]" if name in required else ""
+            default = f" (default: {info['default']})" if "default" in info else ""
+            lines.append(f"      {name}: {ptype}{req}{default} — {desc}")
+        if len(props) > max_params:
+            lines.append(f"      ... and {len(props) - max_params} more params")
+        return "\n".join(lines)
+
+    async def _toolsdns_preflight(self, user_message: str) -> str | None:
+        """
+        Call ToolsDNS server-side preflight endpoint.
+
+        The /v1/preflight endpoint handles all intelligence:
+        - Query cleaning (strip emails, URLs, dates)
+        - Intent extraction (regex → tool-name + descriptive queries)
+        - Multi-strategy parallel search
+        - Merge, dedup, rank
+        - Context block generation with schemas + call templates
+        """
+        if not self._toolsdns_config or not self._toolsdns_config.enabled:
+            return None
+
+        text = user_message.strip()
+        if len(text) < 10 or self._TOOLSDNS_SKIP_PATTERNS.match(text):
+            return None
+
+        try:
+            import httpx
+            url = self._toolsdns_config.url.rstrip("/")
+            headers = {
+                "Authorization": f"Bearer {self._toolsdns_config.api_key}",
+                "Content-Type": "application/json",
+            }
+
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.post(
+                    f"{url}/v1/preflight",
+                    headers=headers,
+                    json={
+                        "message": text,
+                        "top_k": 5,
+                        "threshold": 0.1,
+                        "max_results": 5,
+                        "include_schemas": True,
+                        "include_call_templates": True,
+                        "include_macros": True,
+                        "agent_id": "mawa",
+                        "format": "context_block",
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+            if not data.get("found"):
+                return None
+
+            context_block = data.get("context_block")
+            if not context_block:
+                return None
+
+            queries = data.get("queries_used", [])
+            tools_count = len(data.get("tools", []))
+            query_info = " + ".join(queries[:3])
+            logger.info("ToolsDNS preflight: {} tools found via {} queries ('{}')",
+                         tools_count, len(queries), query_info[:80])
+            return context_block
+
+        except Exception as e:
+            logger.debug("ToolsDNS preflight failed (non-blocking): {}", e)
+            return None
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
@@ -208,6 +437,8 @@ class AgentLoop:
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        _last_call_sig: str | None = None  # detect repeated identical tool calls
+        _repeat_count = 0
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -241,8 +472,29 @@ class AgentLoop:
 
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
-                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False, sort_keys=True)
+                    call_sig = f"{tool_call.name}|{args_str}"
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
+
+                    # Detect repeated identical calls (infinite loop protection)
+                    if call_sig == _last_call_sig:
+                        _repeat_count += 1
+                        if _repeat_count >= 2:
+                            logger.warning("Breaking repeated tool call loop: {} ({}x)", tool_call.name, _repeat_count + 1)
+                            result = (
+                                f"ERROR: You have called {tool_call.name} with the same arguments "
+                                f"{_repeat_count + 1} times. STOP retrying. "
+                                f"Either provide different arguments or tell the user you cannot "
+                                f"complete this action."
+                            )
+                            messages = self.context.add_tool_result(
+                                messages, tool_call.id, tool_call.name, result
+                            )
+                            continue
+                    else:
+                        _last_call_sig = call_sig
+                        _repeat_count = 0
+
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
@@ -511,10 +763,17 @@ class AgentLoop:
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
+        # ToolsDNS pre-flight: search for relevant tools before LLM starts
+        toolsdns_context = await self._toolsdns_preflight(msg.content)
+
         history = session.get_history(max_messages=0)
+        enriched_content = msg.content
+        if toolsdns_context:
+            enriched_content = f"{msg.content}\n\n{toolsdns_context}"
+
         initial_messages = self.context.build_messages(
             history=history,
-            current_message=msg.content,
+            current_message=enriched_content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
         )

@@ -8,14 +8,29 @@ import httpx
 
 from nanobot.agent.tools.base import Tool
 
+_ALL_ACTIONS = [
+    "search", "list", "get", "call", "skills",
+    "analytics", "macros", "create_macro", "delete_macro",
+    "workflows", "suggest_workflow", "create_workflow", "execute_workflow",
+    "my_usage", "smart_suggest",
+]
+
 
 class ToolsDNSTool(Tool):
     """Search, inspect, and call tools indexed in ToolsDNS."""
+
+    # Parameters that belong to the toolsdns action itself, NOT to the target tool
+    _OWN_PARAMS = frozenset({
+        "action", "query", "top_k", "threshold", "tool_id", "arguments",
+        "macro_name", "macro_description", "steps", "workflow_id", "analytics_type",
+    })
 
     def __init__(self, base_url: str, api_key: str, timeout: float = 30.0) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._timeout = timeout
+        self._turn_calls: list[dict] = []  # tracks tool calls within a turn
+        self._schema_returned_for: set[str] = set()  # tracks tool_ids we already returned schema for
 
     @property
     def name(self) -> str:
@@ -26,7 +41,15 @@ class ToolsDNSTool(Tool):
         return (
             "Search, inspect, and call tools indexed in ToolsDNS. "
             "Actions: search (find tools by intent), list (all tools), "
-            "get (full schema by id), call (execute a tool), skills (list skills)."
+            "get (full schema by id), call (execute a tool), skills (list skills), "
+            "analytics (tool usage stats), macros (list saved macros), "
+            "create_macro (save a reusable multi-tool workflow), "
+            "delete_macro (remove a macro), workflows (list workflows), "
+            "suggest_workflow (get workflow suggestion for a task), "
+            "create_workflow (save a new workflow), "
+            "execute_workflow (run a saved workflow), "
+            "my_usage (your recent tool call history), "
+            "smart_suggest (analyze your usage and suggest macros/workflows to create)."
         )
 
     @property
@@ -36,12 +59,21 @@ class ToolsDNSTool(Tool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["search", "list", "get", "call", "skills"],
-                    "description": "search: semantic search. list: all tools. get: full schema by id. call: execute tool. skills: list skills.",
+                    "enum": _ALL_ACTIONS,
+                    "description": (
+                        "search: semantic search. list: all tools. get: full schema by id. "
+                        "call: execute tool. skills: list skills. analytics: usage stats. "
+                        "macros: list macros. create_macro: save multi-step workflow as macro. "
+                        "delete_macro: remove macro. workflows: list workflows. "
+                        "suggest_workflow: suggest workflow for a query. "
+                        "create_workflow: save a workflow. execute_workflow: run a workflow. "
+                        "my_usage: your recent call history. "
+                        "smart_suggest: analyze usage patterns and suggest macros to save time."
+                    ),
                 },
                 "query": {
                     "type": "string",
-                    "description": "Natural language query (required for search).",
+                    "description": "Natural language query (for search, suggest_workflow, smart_suggest).",
                 },
                 "top_k": {
                     "type": "integer",
@@ -57,11 +89,33 @@ class ToolsDNSTool(Tool):
                 },
                 "tool_id": {
                     "type": "string",
-                    "description": "Tool identifier (required for get and call).",
+                    "description": "Tool identifier (for get, call, delete_macro).",
                 },
                 "arguments": {
                     "type": "object",
-                    "description": "Tool arguments as key-value dict (required for call).",
+                    "description": "Tool arguments (for call, execute_workflow).",
+                },
+                "macro_name": {
+                    "type": "string",
+                    "description": "Name for the macro (for create_macro).",
+                },
+                "macro_description": {
+                    "type": "string",
+                    "description": "Description of what the macro does (for create_macro).",
+                },
+                "steps": {
+                    "type": "array",
+                    "description": "List of steps for create_macro/create_workflow. Each step: {tool_id, arg_template}.",
+                    "items": {"type": "object"},
+                },
+                "workflow_id": {
+                    "type": "string",
+                    "description": "Workflow ID (for execute_workflow).",
+                },
+                "analytics_type": {
+                    "type": "string",
+                    "enum": ["popular", "unused", "agents", "conversion"],
+                    "description": "Type of analytics report (default: popular).",
                 },
             },
             "required": ["action"],
@@ -75,10 +129,22 @@ class ToolsDNSTool(Tool):
         threshold: float = 0.1,
         tool_id: str = "",
         arguments: dict | None = None,
+        macro_name: str = "",
+        macro_description: str = "",
+        steps: list | None = None,
+        workflow_id: str = "",
+        analytics_type: str = "popular",
         **kwargs: Any,
     ) -> str:
+        # Reset turn tracking when a new task starts (search = new intent)
         if action == "search":
+            self._turn_calls.clear()
+            self._schema_returned_for.clear()
             return await self._search(query, top_k, threshold)
+        # Reset on macro creation (task completed, macro saved)
+        if action == "create_macro":
+            self._turn_calls.clear()
+            return await self._create_macro(macro_name, macro_description, steps or [])
         if action == "list":
             return await self._list_tools()
         if action == "get":
@@ -87,7 +153,25 @@ class ToolsDNSTool(Tool):
             return await self._call_tool(tool_id, arguments or {})
         if action == "skills":
             return await self._list_skills()
-        return f"Error: unknown action '{action}'. Choose from: search, list, get, call, skills."
+        if action == "analytics":
+            return await self._analytics(analytics_type)
+        if action == "macros":
+            return await self._list_macros()
+        if action == "delete_macro":
+            return await self._delete_macro(tool_id)
+        if action == "workflows":
+            return await self._list_workflows()
+        if action == "suggest_workflow":
+            return await self._suggest_workflow(query)
+        if action == "create_workflow":
+            return await self._create_workflow(query, steps or [])
+        if action == "execute_workflow":
+            return await self._execute_workflow(workflow_id, arguments or {})
+        if action == "my_usage":
+            return await self._my_usage()
+        if action == "smart_suggest":
+            return await self._smart_suggest(query)
+        return f"Error: unknown action '{action}'. Choose from: {', '.join(_ALL_ACTIONS)}."
 
     # -- HTTP helpers --
 
@@ -105,6 +189,12 @@ class ToolsDNSTool(Tool):
             r = await client.post(f"{self._base_url}{path}", headers=self._headers(), json=body)
             r.raise_for_status()
             return r.json()
+
+    async def _delete(self, path: str) -> dict:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            r = await client.delete(f"{self._base_url}{path}", headers=self._headers())
+            r.raise_for_status()
+            return r.json() if r.text else {}
 
     # -- Action handlers --
 
@@ -186,11 +276,45 @@ class ToolsDNSTool(Tool):
             lines += ["", "Skill instructions:", skill]
         return "\n".join(lines)
 
-    async def _call_tool(self, tool_id: str, arguments: dict) -> str:
+    async def _call_tool(self, tool_id: str, arguments: dict, agent_id: str = "mawa") -> str:
         if not tool_id.strip():
             return "Error: tool_id is required for call."
+
+        # Strip out toolsdns-own parameters that the LLM may have leaked into arguments
+        arguments = {k: v for k, v in arguments.items() if k not in self._OWN_PARAMS}
+
+        # If no arguments provided for a non-skill tool, fetch schema ONCE
+        if not arguments and not tool_id.startswith("macro__") and tool_id not in self._schema_returned_for:
+            safe_id = urllib.parse.quote(tool_id, safe="")
+            try:
+                tool_info = await self._get(f"/v1/tool/{safe_id}")
+                schema = tool_info.get("input_schema", {})
+                source_type = tool_info.get("source_info", {}).get("source_type", "")
+                # Skills don't need arguments — proceed with empty args
+                if "skill" in source_type:
+                    pass  # fall through to call
+                elif schema.get("properties"):
+                    self._schema_returned_for.add(tool_id)
+                    required = schema.get("required", [])
+                    props = schema.get("properties", {})
+                    lines = [f"Tool '{tool_id}' requires arguments. Schema:"]
+                    for pname, pinfo in props.items():
+                        ptype = pinfo.get("type", "any")
+                        req = " [REQUIRED]" if pname in required else ""
+                        desc = pinfo.get("description", "").split(".")[0].split("\n")[0][:60]
+                        lines.append(f"  {pname}: {ptype}{req} — {desc}")
+                    lines.append("")
+                    lines.append("Call again with: toolsdns(action=\"call\", tool_id=\""
+                                 + tool_id + "\", arguments={...})")
+                    return "\n".join(lines)
+            except Exception:
+                pass  # fall through to call anyway
         try:
-            data = await self._post("/v1/call", {"tool_id": tool_id, "arguments": arguments})
+            data = await self._post("/v1/call", {
+                "tool_id": tool_id,
+                "arguments": arguments,
+                "agent_id": agent_id,
+            })
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 return f"Error: tool '{tool_id}' not found in ToolsDNS."
@@ -201,13 +325,47 @@ class ToolsDNSTool(Tool):
         except Exception as e:
             return f"Error: {e}"
 
+        # Track this call for auto-macro detection
+        self._turn_calls.append({"tool_id": tool_id, "arguments": arguments})
+
         result_type = data.get("type", "")
         if result_type == "skill":
             return f"Skill '{data.get('name', '')}' content:\n\n{data.get('content', '')}\n\nInstruction: {data.get('instruction', '')}"
+        if result_type == "macro_result":
+            lines = [f"Macro '{data.get('macro_id', '')}' executed:"]
+            for step in data.get("steps", []):
+                status = step.get("status", "?")
+                tid = step.get("tool_id", "?")
+                lines.append(f"  - {tid}: {status}")
+                if status == "failed":
+                    lines.append(f"    Error: {step.get('error', '')}")
+            return "\n".join(lines)
+
         result = data.get("result", data)
         if isinstance(result, dict):
-            return json.dumps(result, indent=2)
-        return str(result)
+            result_str = json.dumps(result, indent=2)
+        else:
+            result_str = str(result)
+
+        # Auto-macro hint: if 2+ tool calls in this turn, nudge the LLM
+        if len(self._turn_calls) >= 2 and not tool_id.startswith("macro__"):
+            tool_ids = [c["tool_id"] for c in self._turn_calls]
+            arg_templates = []
+            for c in self._turn_calls:
+                tmpl = {}
+                for k, v in c["arguments"].items():
+                    tmpl[k] = f"{{{k}}}" if isinstance(v, str) else v
+                arg_templates.append({"tool_id": c["tool_id"], "arg_template": tmpl})
+            hint = (
+                f"\n\n[AUTO-MACRO HINT] You called {len(self._turn_calls)} tools this turn: "
+                f"{' → '.join(tool_ids)}. "
+                f"Consider saving this as a macro so it's one call next time. "
+                f"Use: action=create_macro, macro_name=<descriptive-name>, "
+                f"macro_description=<what it does>, steps={json.dumps(arg_templates)}"
+            )
+            result_str += hint
+
+        return result_str
 
     async def _list_skills(self) -> str:
         try:
@@ -224,4 +382,322 @@ class ToolsDNSTool(Tool):
         for i, s in enumerate(skills, 1):
             desc = s.get("description", "")
             lines.append(f"{i}. {s.get('name', '')} — {desc}")
+        return "\n".join(lines)
+
+    # -- Analytics --
+
+    async def _analytics(self, report_type: str) -> str:
+        try:
+            data = await self._get(f"/v1/analytics/{report_type}")
+        except httpx.HTTPStatusError as e:
+            return f"Error: HTTP {e.response.status_code}: {e.response.text[:200]}"
+        except Exception as e:
+            return f"Error: {e}"
+
+        if report_type == "popular":
+            tools = data.get("popular_tools", [])
+            if not tools:
+                return "No tool call data yet."
+            lines = [f"Top {len(tools)} most-used tools:", ""]
+            for i, t in enumerate(tools, 1):
+                lines.append(f"{i}. {t.get('tool_name', '?')} — {t.get('call_count', 0)} calls (last: {t.get('last_called', '?')[:10]})")
+            return "\n".join(lines)
+
+        if report_type == "unused":
+            tools = data.get("unused_tools", [])
+            if not tools:
+                return "All indexed tools have been called at least once."
+            lines = [f"{len(tools)} tools never called:", ""]
+            for t in tools[:20]:
+                lines.append(f"  - {t.get('tool_name', '?')}: {t.get('description', '')[:60]}")
+            if len(tools) > 20:
+                lines.append(f"  ...and {len(tools) - 20} more")
+            return "\n".join(lines)
+
+        if report_type == "agents":
+            agents = data.get("agents", data) if isinstance(data, dict) else data
+            if not agents:
+                return "No agent activity recorded yet."
+            return json.dumps(agents, indent=2)[:4000]
+
+        if report_type == "conversion":
+            return json.dumps(data, indent=2)[:4000]
+
+        return json.dumps(data, indent=2)[:4000]
+
+    # -- Macros --
+
+    async def _list_macros(self) -> str:
+        try:
+            data = await self._get("/v1/macros")
+        except httpx.HTTPStatusError as e:
+            return f"Error: HTTP {e.response.status_code}: {e.response.text[:200]}"
+        except Exception as e:
+            return f"Error: {e}"
+
+        macros = data if isinstance(data, list) else data.get("macros", [])
+        if not macros:
+            return "No macros saved yet. Use create_macro to save a reusable multi-tool workflow."
+        lines = [f"{len(macros)} macro(s):", ""]
+        for i, m in enumerate(macros, 1):
+            steps_desc = ", ".join(s.get("tool_id", "?") for s in m.get("steps", []))
+            lines.append(f"{i}. macro__{m.get('name', '?')} — {m.get('description', '')}")
+            lines.append(f"   Steps: {steps_desc}")
+            lines.append(f"   Used {m.get('usage_count', 0)} times")
+            lines.append("")
+        return "\n".join(lines)
+
+    async def _create_macro(self, name: str, description: str, steps: list) -> str:
+        if not name.strip():
+            return "Error: macro_name is required."
+        if not steps:
+            return "Error: steps is required (list of {tool_id, arg_template} objects)."
+        try:
+            data = await self._post("/v1/macros", {
+                "name": name,
+                "description": description,
+                "steps": steps,
+            })
+        except httpx.HTTPStatusError as e:
+            return f"Error: HTTP {e.response.status_code}: {e.response.text[:200]}"
+        except Exception as e:
+            return f"Error: {e}"
+        macro_id = data.get("id", data.get("name", "?"))
+        return f"Macro created: macro__{macro_id}\nCall it with: action=call, tool_id=macro__{name}"
+
+    async def _delete_macro(self, macro_id: str) -> str:
+        if not macro_id.strip():
+            return "Error: tool_id is required (the macro ID to delete)."
+        safe_id = urllib.parse.quote(macro_id, safe="")
+        try:
+            data = await self._delete(f"/v1/macros/{safe_id}")
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return f"Macro '{macro_id}' not found."
+            return f"Error: HTTP {e.response.status_code}: {e.response.text[:200]}"
+        except Exception as e:
+            return f"Error: {e}"
+        return f"Macro '{macro_id}' deleted."
+
+    # -- Workflows --
+
+    async def _list_workflows(self) -> str:
+        try:
+            data = await self._get("/v1/workflows")
+        except httpx.HTTPStatusError as e:
+            return f"Error: HTTP {e.response.status_code}: {e.response.text[:200]}"
+        except Exception as e:
+            return f"Error: {e}"
+
+        workflows = data if isinstance(data, list) else data.get("workflows", [])
+        if not workflows:
+            return "No workflows saved. Use suggest_workflow to get suggestions or create_workflow to make one."
+        lines = [f"{len(workflows)} workflow(s):", ""]
+        for i, w in enumerate(workflows, 1):
+            steps = w.get("steps", [])
+            step_names = ", ".join(s.get("tool_id", "?") for s in steps[:5])
+            lines.append(f"{i}. {w.get('id', '?')} — {w.get('description', w.get('trigger_phrase', ''))[:80]}")
+            lines.append(f"   Steps: {step_names}")
+            lines.append("")
+        out = "\n".join(lines)
+        return out[:6000] + "\n...(truncated)" if len(out) > 6000 else out
+
+    async def _suggest_workflow(self, query: str) -> str:
+        if not query.strip():
+            return "Error: query is required for suggest_workflow."
+        try:
+            data = await self._post("/v1/suggest-workflow", {"query": query, "agent_id": "mawa"})
+        except httpx.HTTPStatusError as e:
+            return f"Error: HTTP {e.response.status_code}: {e.response.text[:200]}"
+        except Exception as e:
+            return f"Error: {e}"
+
+        workflows = data.get("workflows", [])
+        if not workflows:
+            return f"No workflow suggestions for '{query}'. You can create one with create_workflow."
+        lines = [f"Suggested workflow(s) for '{query}':", ""]
+        for w in workflows:
+            lines.append(f"  Workflow: {w.get('id', '?')}")
+            lines.append(f"  Description: {w.get('description', w.get('trigger_phrase', ''))}")
+            for j, s in enumerate(w.get("steps", []), 1):
+                lines.append(f"    Step {j}: {s.get('tool_id', '?')} — args: {json.dumps(s.get('arg_template', {}))}")
+            lines.append(f"  To run: action=execute_workflow, workflow_id={w.get('id', '?')}")
+            lines.append("")
+        return "\n".join(lines)
+
+    async def _create_workflow(self, description: str, steps: list) -> str:
+        if not steps:
+            return "Error: steps is required."
+        try:
+            data = await self._post("/v1/workflows", {
+                "trigger_phrase": description,
+                "steps": steps,
+                "agent_id": "mawa",
+            })
+        except httpx.HTTPStatusError as e:
+            return f"Error: HTTP {e.response.status_code}: {e.response.text[:200]}"
+        except Exception as e:
+            return f"Error: {e}"
+        wf_id = data.get("id", data.get("workflow_id", "?"))
+        return f"Workflow created: {wf_id}\nRun with: action=execute_workflow, workflow_id={wf_id}"
+
+    async def _execute_workflow(self, workflow_id: str, context: dict) -> str:
+        if not workflow_id.strip():
+            return "Error: workflow_id is required."
+        try:
+            data = await self._post("/v1/execute-workflow", {
+                "workflow_id": workflow_id,
+                "context": context,
+                "agent_id": "mawa",
+            })
+        except httpx.HTTPStatusError as e:
+            return f"Error: HTTP {e.response.status_code}: {e.response.text[:200]}"
+        except Exception as e:
+            return f"Error: {e}"
+
+        lines = [f"Workflow {workflow_id} — status: {data.get('overall_status', '?')}", ""]
+        for step in data.get("steps", []):
+            status = step.get("status", "?")
+            tid = step.get("tool_id", "?")
+            lines.append(f"  {tid}: {status}")
+            if status == "failed":
+                lines.append(f"    Error: {step.get('error', '')}")
+            elif step.get("result"):
+                result_str = json.dumps(step["result"]) if isinstance(step["result"], dict) else str(step["result"])
+                lines.append(f"    Result: {result_str[:200]}")
+        return "\n".join(lines)
+
+    # -- Agent usage & smart suggestions --
+
+    async def _my_usage(self) -> str:
+        try:
+            data = await self._get("/v1/analytics/agents")
+        except httpx.HTTPStatusError as e:
+            return f"Error: HTTP {e.response.status_code}: {e.response.text[:200]}"
+        except Exception as e:
+            return f"Error: {e}"
+
+        agents = data.get("agents", data) if isinstance(data, dict) else data
+        mawa = None
+        if isinstance(agents, list):
+            for a in agents:
+                if a.get("agent_id") == "mawa":
+                    mawa = a
+                    break
+        if not mawa:
+            return "No usage data for agent 'mawa' yet. Start calling tools to build history."
+
+        lines = [
+            f"Agent: mawa",
+            f"Total calls: {mawa.get('total_calls', 0)}",
+            "",
+            "Top tools:",
+        ]
+        for t in mawa.get("top_tools", mawa.get("favorite_tools", []))[:10]:
+            if isinstance(t, dict):
+                lines.append(f"  - {t.get('tool_name', t.get('tool_id', '?'))}: {t.get('call_count', '?')} calls")
+            else:
+                lines.append(f"  - {t}")
+        return "\n".join(lines)
+
+    async def _smart_suggest(self, query: str = "") -> str:
+        """Analyze mawa's usage patterns and suggest macros/workflows to create.
+
+        Returns actionable data for the LLM to reason about and auto-create macros.
+        """
+        try:
+            popular = await self._get("/v1/analytics/popular")
+            agent_data = await self._get("/v1/analytics/agents")
+            existing_macros = await self._get("/v1/macros")
+        except Exception as e:
+            return f"Error fetching usage data: {e}"
+
+        popular_tools = popular.get("popular_tools", [])
+        if not popular_tools:
+            return "Not enough usage data yet. Keep using tools and try again later."
+
+        agents = agent_data.get("agents", agent_data) if isinstance(agent_data, dict) else agent_data
+        mawa_data = None
+        if isinstance(agents, list):
+            for a in agents:
+                if a.get("agent_id") == "mawa":
+                    mawa_data = a
+                    break
+
+        macros = existing_macros if isinstance(existing_macros, list) else existing_macros.get("macros", [])
+        existing_macro_names = {m.get("name", "") for m in macros}
+
+        lines = [
+            "=== USAGE INTELLIGENCE REPORT ===",
+            "",
+            "MOST-USED TOOLS:",
+        ]
+        for t in popular_tools[:10]:
+            tid = t.get("tool_id", t.get("tool_name", "?"))
+            lines.append(f"  - {t.get('tool_name', '?')} (id: {tid}) — {t.get('call_count', 0)} calls")
+
+        if mawa_data:
+            lines.append("")
+            lines.append(f"MAWA TOTAL CALLS: {mawa_data.get('total_calls', 0)}")
+            top = mawa_data.get("top_tools", mawa_data.get("favorite_tools", []))
+            if top:
+                lines.append("MAWA'S TOP TOOLS:")
+                for t in top[:8]:
+                    if isinstance(t, dict):
+                        lines.append(f"  - {t.get('tool_name', t.get('tool_id', '?'))}: {t.get('call_count', '?')} calls")
+
+        if existing_macro_names:
+            lines.append("")
+            lines.append(f"ALREADY SAVED MACROS: {', '.join(existing_macro_names)}")
+            lines.append("(Do NOT recreate these — they already exist)")
+
+        # Detect repeated patterns from recent usage
+        detected_patterns = []
+        try:
+            learn_data = await self._post("/v1/learn", {"time_window_hours": 24, "min_occurrences": 2})
+            detected_patterns = learn_data.get("workflows", [])
+        except Exception:
+            pass
+
+        if detected_patterns:
+            lines.append("")
+            lines.append("DETECTED REPEATED SEQUENCES (auto-learned from your usage):")
+            for i, p in enumerate(detected_patterns[:5], 1):
+                steps = p.get("steps", [])
+                step_ids = [s.get("tool_id", "?") for s in steps]
+                lines.append(f"  Pattern {i}: {' → '.join(step_ids)}")
+                # Generate a ready-to-use macro creation command
+                suggested_name = "-then-".join(
+                    s.get("tool_id", "").split("__")[-1].lower().replace("_", "-")[:20]
+                    for s in steps[:3]
+                )
+                macro_steps = []
+                for s in steps:
+                    tmpl = {}
+                    for k in s.get("arg_template", {}):
+                        tmpl[k] = f"{{{k}}}"
+                    macro_steps.append({"tool_id": s["tool_id"], "arg_template": tmpl})
+
+                if suggested_name not in existing_macro_names:
+                    lines.append(f"    → SUGGESTED MACRO: name={suggested_name}")
+                    lines.append(f"      steps={json.dumps(macro_steps)}")
+                else:
+                    lines.append(f"    → Already saved as macro: {suggested_name}")
+
+        lines.append("")
+        lines.append("=== ACTION REQUIRED ===")
+        lines.append(
+            "Based on the data above, you SHOULD create macros for any repeated patterns "
+            "that don't already exist. Use action=create_macro for each one. "
+            "This will save tool calls and tokens in future conversations."
+        )
+
+        if query:
+            lines.append("")
+            lines.append(f"USER CONTEXT: {query}")
+            lines.append(
+                "Also consider whether the user's hint suggests a new macro or workflow "
+                "that should be created proactively."
+            )
+
         return "\n".join(lines)
