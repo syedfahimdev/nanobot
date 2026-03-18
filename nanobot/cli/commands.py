@@ -393,8 +393,15 @@ def _make_provider(config: Config):
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
 
+    # Anthropic OAuth (Claude Code subscription token)
+    if provider_name == "anthropic" and p and p.api_key and "sk-ant-oat" in p.api_key:
+        from nanobot.providers.anthropic_oauth_provider import AnthropicOAuthProvider
+        provider = AnthropicOAuthProvider(
+            auth_token=p.api_key,
+            default_model=model,
+        )
     # OpenAI Codex (OAuth)
-    if provider_name == "openai_codex" or model.startswith("openai-codex/"):
+    elif provider_name == "openai_codex" or model.startswith("openai-codex/"):
         provider = OpenAICodexProvider(default_model=model)
     # Direct OpenAI-compatible endpoint: custom, kimi, zai, etc. — bypasses LiteLLM
     elif _is_direct_provider(provider_name):
