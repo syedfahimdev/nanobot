@@ -283,32 +283,9 @@ class ToolsDNSTool(Tool):
         # Strip out toolsdns-own parameters that the LLM may have leaked into arguments
         arguments = {k: v for k, v in arguments.items() if k not in self._OWN_PARAMS}
 
-        # If no arguments provided for a non-skill tool, fetch schema ONCE
-        if not arguments and not tool_id.startswith("macro__") and tool_id not in self._schema_returned_for:
-            safe_id = urllib.parse.quote(tool_id, safe="")
-            try:
-                tool_info = await self._get(f"/v1/tool/{safe_id}")
-                schema = tool_info.get("input_schema", {})
-                source_type = tool_info.get("source_info", {}).get("source_type", "")
-                # Skills don't need arguments — proceed with empty args
-                if "skill" in source_type:
-                    pass  # fall through to call
-                elif schema.get("properties"):
-                    self._schema_returned_for.add(tool_id)
-                    required = schema.get("required", [])
-                    props = schema.get("properties", {})
-                    lines = [f"Tool '{tool_id}' requires arguments. Schema:"]
-                    for pname, pinfo in props.items():
-                        ptype = pinfo.get("type", "any")
-                        req = " [REQUIRED]" if pname in required else ""
-                        desc = pinfo.get("description", "").split(".")[0].split("\n")[0][:60]
-                        lines.append(f"  {pname}: {ptype}{req} — {desc}")
-                    lines.append("")
-                    lines.append("Call again with: toolsdns(action=\"call\", tool_id=\""
-                                 + tool_id + "\", arguments={...})")
-                    return "\n".join(lines)
-            except Exception:
-                pass  # fall through to call anyway
+        # If no arguments, just attempt the call — let the server return the error.
+        # The preflight already gave the LLM the schema. Don't block with a schema
+        # return that causes retry loops. Skills and macros work with empty args.
         try:
             data = await self._post("/v1/call", {
                 "tool_id": tool_id,
