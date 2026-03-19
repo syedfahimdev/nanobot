@@ -470,7 +470,31 @@ class AgentLoop:
                     thinking_blocks=response.thinking_blocks,
                 )
 
-                for tool_call in response.tool_calls:
+                # Execute tool calls — parallel when multiple, sequential when single
+                if len(response.tool_calls) > 1:
+                    # Parallel execution for multiple independent tool calls
+                    logger.info("Parallel execution: {} tool calls", len(response.tool_calls))
+
+                    async def _run_tool(tc):
+                        args_str = json.dumps(tc.arguments, ensure_ascii=False, sort_keys=True)
+                        logger.info("Tool call (parallel): {}({})", tc.name, args_str[:200])
+                        return await self.tools.execute(tc.name, tc.arguments)
+
+                    results = await asyncio.gather(
+                        *[_run_tool(tc) for tc in response.tool_calls],
+                        return_exceptions=True,
+                    )
+                    for tc, result in zip(response.tool_calls, results):
+                        tools_used.append(tc.name)
+                        if isinstance(result, Exception):
+                            logger.error("Parallel tool call failed: {}: {}", tc.name, result)
+                            result = f"(Tool call failed: {type(result).__name__}: {result})"
+                        messages = self.context.add_tool_result(
+                            messages, tc.id, tc.name, result
+                        )
+                else:
+                    # Single tool call — sequential with retry detection
+                    tool_call = response.tool_calls[0]
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False, sort_keys=True)
                     call_sig = f"{tool_call.name}|{args_str}"
