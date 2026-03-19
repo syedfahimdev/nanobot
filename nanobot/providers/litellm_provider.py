@@ -4,6 +4,7 @@ import hashlib
 import os
 import secrets
 import string
+from collections.abc import AsyncIterator
 from typing import Any
 
 import json_repair
@@ -11,7 +12,7 @@ import litellm
 from litellm import acompletion
 from loguru import logger
 
-from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from nanobot.providers.base import LLMProvider, LLMResponse, LLMStreamChunk, ToolCallRequest
 from nanobot.providers.registry import find_by_model, find_gateway
 
 # Standard chat-completion message keys.
@@ -349,6 +350,146 @@ class LiteLLMProvider(LLMProvider):
             reasoning_content=reasoning_content,
             thinking_blocks=thinking_blocks,
         )
+
+    def _build_chat_kwargs(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        model: str | None,
+        max_tokens: int,
+        temperature: float,
+        reasoning_effort: str | None,
+        tool_choice: str | dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], frozenset[str]]:
+        """Build kwargs dict for acompletion. Returns (kwargs, extra_msg_keys)."""
+        original_model = model or self.default_model
+        resolved = self._resolve_model(original_model)
+        extra_msg_keys = self._extra_msg_keys(original_model, resolved)
+
+        if self._supports_cache_control(original_model):
+            messages, tools = self._apply_cache_control(messages, tools)
+
+        max_tokens = max(1, max_tokens)
+
+        kwargs: dict[str, Any] = {
+            "model": resolved,
+            "messages": self._sanitize_messages(self._sanitize_empty_content(messages), extra_keys=extra_msg_keys),
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+
+        if self._gateway:
+            kwargs.update(self._gateway.litellm_kwargs)
+        self._apply_model_overrides(resolved, kwargs)
+        if self._langsmith_enabled:
+            kwargs.setdefault("callbacks", []).append("langsmith")
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
+        if self.api_base:
+            kwargs["api_base"] = self.api_base
+        if self.extra_headers:
+            kwargs["extra_headers"] = self.extra_headers
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+            kwargs["drop_params"] = True
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = tool_choice or "auto"
+
+        return kwargs, extra_msg_keys
+
+    async def stream_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        """Stream a chat completion response as token chunks."""
+        kwargs, _ = self._build_chat_kwargs(
+            messages, tools, model, max_tokens, temperature,
+            reasoning_effort, tool_choice,
+        )
+        kwargs["stream"] = True
+
+        try:
+            response = await acompletion(**kwargs)
+
+            # Accumulate tool call deltas
+            tc_accum: dict[int, dict[str, Any]] = {}  # index -> {id, name, arguments}
+            full_content = ""
+            reasoning = ""
+
+            async for chunk in response:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                finish = chunk.choices[0].finish_reason if chunk.choices else None
+
+                if not delta and not finish:
+                    continue
+
+                # Content tokens
+                delta_text = getattr(delta, "content", None) if delta else None
+                if delta_text:
+                    full_content += delta_text
+                    yield LLMStreamChunk(delta_content=delta_text)
+
+                # Reasoning content (DeepSeek, etc.)
+                reasoning_delta = getattr(delta, "reasoning_content", None) if delta else None
+                if reasoning_delta:
+                    reasoning += reasoning_delta
+
+                # Tool call deltas
+                if delta and hasattr(delta, "tool_calls") and delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index if hasattr(tc_delta, "index") else 0
+                        if idx not in tc_accum:
+                            tc_accum[idx] = {"id": "", "name": "", "arguments": ""}
+                        if hasattr(tc_delta, "id") and tc_delta.id:
+                            tc_accum[idx]["id"] = tc_delta.id
+                        if hasattr(tc_delta, "function") and tc_delta.function:
+                            if tc_delta.function.name:
+                                tc_accum[idx]["name"] = tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                tc_accum[idx]["arguments"] += tc_delta.function.arguments
+
+                # Final chunk
+                if finish:
+                    tool_calls = []
+                    for _, tc_data in sorted(tc_accum.items()):
+                        args = tc_data["arguments"]
+                        if isinstance(args, str):
+                            args = json_repair.loads(args)
+                        tool_calls.append(ToolCallRequest(
+                            id=_short_tool_id(),
+                            name=tc_data["name"],
+                            arguments=args,
+                        ))
+
+                    usage = {}
+                    if hasattr(chunk, "usage") and chunk.usage:
+                        usage = {
+                            "prompt_tokens": chunk.usage.prompt_tokens or 0,
+                            "completion_tokens": chunk.usage.completion_tokens or 0,
+                            "total_tokens": chunk.usage.total_tokens or 0,
+                        }
+
+                    yield LLMStreamChunk(
+                        delta_content=None,
+                        finish_reason=finish,
+                        tool_calls=tool_calls,
+                        usage=usage,
+                        reasoning_content=reasoning or None,
+                    )
+                    return
+
+        except Exception as e:
+            yield LLMStreamChunk(
+                delta_content=f"Error calling LLM: {str(e)}",
+                finish_reason="error",
+            )
 
     def get_default_model(self) -> str:
         """Get the default model."""

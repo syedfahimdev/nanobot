@@ -555,6 +555,7 @@ def gateway(
         profiles=config.profiles,
         profile_factory=_profile_factory if config.profiles else None,
         profile_save_callback=_profile_save if config.profiles else None,
+        routing_model=config.agents.defaults.routing_model,
     )
 
     # Set cron callback (needs agent)
@@ -785,6 +786,7 @@ def agent(
         profiles=config.profiles,
         profile_factory=(lambda name: _make_provider(config.apply_profile(name))) if config.profiles else None,
         profile_save_callback=(lambda name: __import__("nanobot.config.loader", fromlist=["save_config"]).save_config(config.apply_profile(name))) if config.profiles else None,
+        routing_model=config.agents.defaults.routing_model,
     )
 
     # Shared reference for progress callbacks

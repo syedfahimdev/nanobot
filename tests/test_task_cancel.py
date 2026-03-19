@@ -23,6 +23,8 @@ def _make_loop():
          patch("nanobot.agent.loop.SessionManager"), \
          patch("nanobot.agent.loop.SubagentManager") as MockSubMgr:
         MockSubMgr.return_value.cancel_by_session = AsyncMock(return_value=0)
+        MockSubMgr.return_value.spawn = AsyncMock(return_value="spawned")
+        MockSubMgr.return_value.get_running_tasks.return_value = []
         loop = AgentLoop(bus=bus, provider=provider, workspace=workspace)
     return loop, bus
 
@@ -104,7 +106,8 @@ class TestDispatch:
         assert out.content == "hi"
 
     @pytest.mark.asyncio
-    async def test_processing_lock_serializes(self):
+    async def test_busy_session_auto_spawns(self):
+        """When session is busy, non-conversational messages auto-spawn as subagents."""
         from nanobot.bus.events import InboundMessage, OutboundMessage
 
         loop, bus = _make_loop()
@@ -117,13 +120,43 @@ class TestDispatch:
             return OutboundMessage(channel="test", chat_id="c1", content=m.content)
 
         loop._process_message = mock_process
-        msg1 = InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="a")
-        msg2 = InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="b")
+        msg1 = InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="do task a")
+        msg2 = InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="do task b")
 
         t1 = asyncio.create_task(loop._dispatch(msg1))
+        await asyncio.sleep(0.01)  # Let msg1 acquire lock
         t2 = asyncio.create_task(loop._dispatch(msg2))
         await asyncio.gather(t1, t2)
-        assert order == ["start-a", "end-a", "start-b", "end-b"]
+
+        # msg1 processed normally, msg2 auto-spawned (not processed sequentially)
+        assert order == ["start-do task a", "end-do task a"]
+        loop.subagents.spawn.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_busy_session_queues_conversational(self):
+        """Conversational messages are queued when session is busy, not spawned."""
+        from nanobot.bus.events import InboundMessage, OutboundMessage
+
+        loop, bus = _make_loop()
+
+        async def mock_process(m, **kwargs):
+            await asyncio.sleep(0.05)
+            return OutboundMessage(channel="test", chat_id="c1", content=m.content)
+
+        loop._process_message = mock_process
+        loop.sessions = MagicMock()
+        loop.sessions.get_or_create.return_value = MagicMock()
+
+        msg1 = InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="do a task")
+        msg2 = InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="ok")
+
+        t1 = asyncio.create_task(loop._dispatch(msg1))
+        await asyncio.sleep(0.01)
+        t2 = asyncio.create_task(loop._dispatch(msg2))
+        await asyncio.gather(t1, t2)
+
+        # "ok" should be queued, not spawned
+        loop.subagents.spawn.assert_not_called()
 
 
 class TestSubagentCancellation:

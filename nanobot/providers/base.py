@@ -3,6 +3,7 @@
 import asyncio
 import json
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -49,6 +50,17 @@ class LLMResponse:
     def has_tool_calls(self) -> bool:
         """Check if response contains tool calls."""
         return len(self.tool_calls) > 0
+
+
+@dataclass
+class LLMStreamChunk:
+    """A single chunk from a streaming LLM response."""
+    delta_content: str | None = None
+    finish_reason: str | None = None
+    # Accumulated tool calls (only set on final chunk with finish_reason)
+    tool_calls: list[ToolCallRequest] = field(default_factory=list)
+    usage: dict[str, int] = field(default_factory=dict)
+    reasoning_content: str | None = None
 
 
 @dataclass(frozen=True)
@@ -282,6 +294,35 @@ class LLMProvider(ABC):
             await asyncio.sleep(delay)
 
         return await self._safe_chat(**kw)
+
+    async def stream_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        """Stream a chat completion response as chunks.
+
+        Default implementation falls back to non-streaming chat() and yields
+        the full response as a single chunk. Subclasses can override for
+        true token-by-token streaming.
+        """
+        response = await self.chat(
+            messages=messages, tools=tools, model=model,
+            max_tokens=max_tokens, temperature=temperature,
+            reasoning_effort=reasoning_effort, tool_choice=tool_choice,
+        )
+        yield LLMStreamChunk(
+            delta_content=response.content,
+            finish_reason=response.finish_reason,
+            tool_calls=response.tool_calls,
+            usage=response.usage,
+            reasoning_content=response.reasoning_content,
+        )
 
     @abstractmethod
     def get_default_model(self) -> str:

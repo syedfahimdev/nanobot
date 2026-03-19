@@ -14,8 +14,10 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
+
+_SENTENCE_RE = re.compile(r'(?<=[.!?])\s+|(?<=\n)')
 from nanobot.agent.memory import MemoryConsolidator
-from nanobot.agent.subagent import SubagentManager
+from nanobot.agent.subagent import PreflightCache, SubagentManager
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -69,6 +71,7 @@ class AgentLoop:
         profiles: "dict[str, ProfileConfig] | None" = None,
         profile_factory: "Callable[[str], LLMProvider] | None" = None,
         profile_save_callback: "Callable[[str], None] | None" = None,
+        routing_model: str | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -77,6 +80,7 @@ class AgentLoop:
         self.provider = provider
         self.workspace = workspace
         self.model = model or provider.get_default_model()
+        self.routing_model = routing_model  # Fast model for first iteration routing
         self.max_iterations = max_iterations
         self.context_window_tokens = context_window_tokens
         self.web_search_config = web_search_config or WebSearchConfig()
@@ -93,6 +97,7 @@ class AgentLoop:
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
+        self._preflight_cache = PreflightCache()
         self.subagents = SubagentManager(
             provider=provider,
             workspace=workspace,
@@ -103,6 +108,8 @@ class AgentLoop:
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
             toolsdns_config=toolsdns_config,
+            session_manager=self.sessions,
+            preflight_cache=self._preflight_cache,
         )
 
         self._running = False
@@ -113,6 +120,7 @@ class AgentLoop:
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._background_tasks: list[asyncio.Task] = []
         self._session_locks: dict[str, asyncio.Lock] = {}  # per-session locks
+        self._pending_messages: dict[str, list[InboundMessage]] = {}  # queued conversational msgs
         self.memory_consolidator = MemoryConsolidator(
             workspace=workspace,
             provider=provider,
@@ -392,6 +400,13 @@ class AgentLoop:
         if len(text) < 10 or self._TOOLSDNS_SKIP_PATTERNS.match(text):
             return None
 
+        # Check preflight cache first
+        cached = self._preflight_cache.get(text)
+        if cached is not PreflightCache._MISS:
+            if cached:
+                logger.info("ToolsDNS preflight cache hit for: '{}'", text[:60])
+            return cached
+
         try:
             import httpx
             url = self._toolsdns_config.url.rstrip("/")
@@ -420,10 +435,12 @@ class AgentLoop:
                 data = resp.json()
 
             if not data.get("found"):
+                self._preflight_cache.set(text, None)
                 return None
 
             context_block = data.get("context_block")
             if not context_block:
+                self._preflight_cache.set(text, None)
                 return None
 
             queries = data.get("queries_used", [])
@@ -431,6 +448,7 @@ class AgentLoop:
             query_info = " + ".join(queries[:3])
             logger.info("ToolsDNS preflight: {} tools found via {} queries ('{}')",
                          tools_count, len(queries), query_info[:80])
+            self._preflight_cache.set(text, context_block)
             return context_block
 
         except Exception as e:
@@ -455,10 +473,13 @@ class AgentLoop:
 
             tool_defs = self.tools.get_definitions()
 
+            # Use fast routing model for first iteration if configured
+            current_model = self.routing_model if (iteration == 1 and self.routing_model) else self.model
+
             response = await self.provider.chat_with_retry(
                 messages=messages,
                 tools=tool_defs,
-                model=self.model,
+                model=current_model,
             )
 
             if response.has_tool_calls:
@@ -563,6 +584,157 @@ class AgentLoop:
 
         return final_content, tools_used, messages
 
+    async def _run_agent_loop_streaming(
+        self,
+        initial_messages: list[dict],
+        on_sentence: Callable[[str], Awaitable[None]] | None = None,
+        on_progress: Callable[..., Awaitable[None]] | None = None,
+    ) -> tuple[str | None, list[str], list[dict]]:
+        """Streaming variant of agent loop — fires on_sentence as sentences complete.
+
+        Used by voice channels for low-latency TTS: each sentence is sent to TTS
+        as soon as it's accumulated from the token stream, rather than waiting for
+        the full response.
+        """
+        messages = initial_messages
+        iteration = 0
+        final_content = None
+        tools_used: list[str] = []
+        _last_call_sig: str | None = None
+        _repeat_count = 0
+
+        while iteration < self.max_iterations:
+            iteration += 1
+            tool_defs = self.tools.get_definitions()
+            current_model = self.routing_model if (iteration == 1 and self.routing_model) else self.model
+
+            # Stream tokens from the LLM
+            accumulated_content = ""
+            sentence_buffer = ""
+            all_tool_calls: list = []
+            finish_reason = None
+            usage = {}
+            reasoning_content = None
+
+            try:
+                async for chunk in self.provider.stream_chat(
+                    messages=messages,
+                    tools=tool_defs,
+                    model=current_model,
+                ):
+                    if chunk.delta_content:
+                        accumulated_content += chunk.delta_content
+                        sentence_buffer += chunk.delta_content
+
+                        # Check for sentence boundaries and fire TTS
+                        if on_sentence:
+                            while True:
+                                match = _SENTENCE_RE.search(sentence_buffer)
+                                if not match:
+                                    break
+                                sentence = sentence_buffer[:match.end()].strip()
+                                sentence_buffer = sentence_buffer[match.end():]
+                                if len(sentence) >= 3:
+                                    await on_sentence(sentence)
+
+                    if chunk.finish_reason:
+                        finish_reason = chunk.finish_reason
+                        all_tool_calls = chunk.tool_calls
+                        usage = chunk.usage
+                        reasoning_content = chunk.reasoning_content
+
+            except Exception as e:
+                logger.error("Streaming error: {}", e)
+                # Fall back to non-streaming
+                return await self._run_agent_loop(initial_messages, on_progress)
+
+            # Flush remaining sentence buffer
+            if on_sentence and sentence_buffer.strip() and len(sentence_buffer.strip()) >= 3:
+                await on_sentence(sentence_buffer.strip())
+
+            if finish_reason == "error":
+                logger.error("LLM stream error: {}", accumulated_content[:200])
+                final_content = accumulated_content or "Sorry, I encountered an error calling the AI model."
+                break
+
+            if all_tool_calls:
+                # Tool calls detected — process them
+                if on_progress:
+                    thought = self._strip_think(accumulated_content)
+                    if thought:
+                        await on_progress(thought)
+                    tool_hint = self._tool_hint(all_tool_calls)
+                    tool_hint = self._strip_think(tool_hint)
+                    await on_progress(tool_hint, tool_hint=True)
+
+                tool_call_dicts = [tc.to_openai_tool_call() for tc in all_tool_calls]
+                messages = self.context.add_assistant_message(
+                    messages, accumulated_content or None, tool_call_dicts,
+                    reasoning_content=reasoning_content,
+                )
+
+                # Execute tools (same logic as non-streaming)
+                if len(all_tool_calls) > 1:
+                    async def _run_tool(tc):
+                        args_str = json.dumps(tc.arguments, ensure_ascii=False, sort_keys=True)
+                        logger.info("Tool call (parallel): {}({})", tc.name, args_str[:200])
+                        return await self.tools.execute(tc.name, tc.arguments)
+
+                    results = await asyncio.gather(
+                        *[_run_tool(tc) for tc in all_tool_calls],
+                        return_exceptions=True,
+                    )
+                    for tc, result in zip(all_tool_calls, results):
+                        tools_used.append(tc.name)
+                        if isinstance(result, Exception):
+                            result = f"(Tool call failed: {type(result).__name__}: {result})"
+                        if on_progress:
+                            preview = str(result)[:300]
+                            await on_progress(f"[{tc.name}] → {preview}", tool_hint=True)
+                        messages = self.context.add_tool_result(messages, tc.id, tc.name, result)
+                else:
+                    tool_call = all_tool_calls[0]
+                    tools_used.append(tool_call.name)
+                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False, sort_keys=True)
+                    call_sig = f"{tool_call.name}|{args_str}"
+                    logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
+
+                    if call_sig == _last_call_sig:
+                        _repeat_count += 1
+                        if _repeat_count >= 2:
+                            logger.warning("Breaking repeated tool call loop: {}", tool_call.name)
+                            result = (
+                                f"ERROR: You have called {tool_call.name} with the same arguments "
+                                f"{_repeat_count + 1} times. STOP retrying."
+                            )
+                            messages = self.context.add_tool_result(messages, tool_call.id, tool_call.name, result)
+                            continue
+                    else:
+                        _last_call_sig = call_sig
+                        _repeat_count = 0
+
+                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    if on_progress:
+                        preview = str(result)[:300]
+                        await on_progress(f"[{tool_call.name}] → {preview}", tool_hint=True)
+                    messages = self.context.add_tool_result(messages, tool_call.id, tool_call.name, result)
+            else:
+                # Final text response
+                clean = self._strip_think(accumulated_content)
+                messages = self.context.add_assistant_message(
+                    messages, clean, reasoning_content=reasoning_content,
+                )
+                final_content = clean
+                break
+
+        if final_content is None and iteration >= self.max_iterations:
+            final_content = (
+                f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
+                "without completing the task."
+            )
+
+        return final_content, tools_used, messages
+
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         self._running = True
@@ -638,15 +810,45 @@ class AgentLoop:
             self._session_locks[session_key] = asyncio.Lock()
         return self._session_locks[session_key]
 
+    # Common conversational words that should NOT spawn a subagent
+    _CONVERSATIONAL_WORDS = frozenset({
+        "ok", "okay", "thanks", "thank you", "yes", "no", "sure",
+        "cool", "great", "nice", "got it", "alright", "fine",
+        "good", "perfect", "awesome", "bye", "hi", "hello",
+        "hey", "yep", "nope", "right", "yeah", "nah", "hmm",
+    })
+
+    def _is_conversational(self, text: str) -> bool:
+        """Check if message is conversational (not a task worth spawning)."""
+        stripped = text.strip()
+        # Short messages matching common conversational patterns
+        if len(stripped) < 15 and self._TOOLSDNS_SKIP_PATTERNS.match(stripped):
+            return True
+        # Single/two word acknowledgments
+        normalized = stripped.lower().rstrip(".!?,")
+        if len(normalized.split()) <= 2 and normalized in self._CONVERSATIONAL_WORDS:
+            return True
+        return False
+
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process a message under a per-session lock.
 
-        If the session is busy, auto-spawn a subagent for the new message
-        so it runs in parallel without corrupting the main conversation.
+        If the session is busy:
+        - Conversational messages ("ok", "thanks") are queued and appended to
+          session history after the current task completes.
+        - Task messages are auto-spawned as subagents for parallel execution.
         """
         lock = self._get_session_lock(msg.session_key)
 
         if lock.locked():
+            text = msg.content.strip()
+
+            if self._is_conversational(text):
+                logger.info("Session {} busy, queuing conversational: '{}'",
+                            msg.session_key, text[:40])
+                self._pending_messages.setdefault(msg.session_key, []).append(msg)
+                return
+
             logger.info("Session {} busy, auto-spawning for: '{}'",
                         msg.session_key, msg.content[:60])
             # Notify the channel
@@ -684,6 +886,17 @@ class AgentLoop:
                     channel=msg.channel, chat_id=msg.chat_id,
                     content="Sorry, I encountered an error.",
                 ))
+            finally:
+                # Process queued conversational messages — add to session history
+                pending = self._pending_messages.pop(msg.session_key, [])
+                if pending:
+                    key = msg.session_key
+                    session = self.sessions.get_or_create(key)
+                    for pending_msg in pending:
+                        session.add_message("user", pending_msg.content)
+                        logger.info("Appended queued conversational msg to session: '{}'",
+                                    pending_msg.content[:40])
+                    self.sessions.save(session)
 
     async def close_mcp(self) -> None:
         """Drain pending background archives, then close MCP connections."""
@@ -800,12 +1013,41 @@ class AgentLoop:
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
-            final_content, _, all_msgs = await self._run_agent_loop(messages)
+
+            # Voice channels: use streaming TTS for subagent summaries too
+            _sys_is_voice = channel in ("discord_voice", "web_voice")
+            if _sys_is_voice:
+                async def _sys_on_sentence(sentence: str) -> None:
+                    from nanobot.channels.web_voice import _strip_markdown
+                    clean = _strip_markdown(sentence)
+                    if clean and len(clean) >= 3:
+                        await self.bus.publish_outbound(OutboundMessage(
+                            channel=channel, chat_id=chat_id,
+                            content=clean,
+                            metadata={"_tts_sentence": True},
+                        ))
+
+                final_content, _, all_msgs = await self._run_agent_loop_streaming(
+                    messages, on_sentence=_sys_on_sentence,
+                )
+            else:
+                final_content, _, all_msgs = await self._run_agent_loop(messages)
+
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
             self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
+
+            final_content = final_content or "Background task completed."
+            if _sys_is_voice:
+                # Already TTS'd via streaming — just send text for display (no _subagent_result to avoid double TTS)
+                logger.info("Voice response (system) to {}:{}: {}", channel, chat_id, final_content[:120])
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=channel, chat_id=chat_id, content=final_content,
+                ))
+                return None
+
             return OutboundMessage(channel=channel, chat_id=chat_id,
-                                  content=final_content or "Background task completed.")
+                                  content=final_content)
 
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
@@ -884,9 +1126,29 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        final_content, _, all_msgs = await self._run_agent_loop(
-            initial_messages, on_progress=on_progress or _bus_progress,
-        )
+        # Voice channels use streaming for low-latency TTS
+        _is_voice_channel = msg.channel in ("discord_voice", "web_voice")
+
+        if _is_voice_channel:
+            # Streaming: fire TTS per sentence as tokens arrive
+            async def _on_sentence(sentence: str) -> None:
+                from nanobot.channels.web_voice import _strip_markdown
+                clean = _strip_markdown(sentence)
+                if clean and len(clean) >= 3:
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=msg.channel, chat_id=msg.chat_id,
+                        content=clean,
+                        metadata={"_tts_sentence": True},
+                    ))
+
+            final_content, _, all_msgs = await self._run_agent_loop_streaming(
+                initial_messages, on_sentence=_on_sentence,
+                on_progress=on_progress or _bus_progress,
+            )
+        else:
+            final_content, _, all_msgs = await self._run_agent_loop(
+                initial_messages, on_progress=on_progress or _bus_progress,
+            )
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
@@ -899,7 +1161,7 @@ class AgentLoop:
             return None
 
         # Voice channel: route response back through TTS
-        if msg.channel in ("discord_voice", "web_voice"):
+        if _is_voice_channel:
             preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
             logger.info("Voice response to {}:{}: {}", msg.channel, msg.sender_id, preview)
             await self.bus.publish_outbound(OutboundMessage(

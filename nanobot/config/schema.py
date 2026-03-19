@@ -42,6 +42,7 @@ class AgentDefaults(Base):
     # Deprecated compatibility field: accepted from old configs but ignored at runtime.
     memory_window: int | None = Field(default=None, exclude=True)
     reasoning_effort: str | None = None  # low / medium / high — enables LLM thinking mode
+    routing_model: str | None = None  # Fast model for routing/delegation (e.g. "groq/llama-3.3-70b-versatile")
 
     @property
     def should_warn_deprecated_memory_window(self) -> bool:
@@ -179,6 +180,7 @@ class ProfileConfig(Base):
     temperature: float | None = None
     reasoning_effort: str | None = None
     max_tool_iterations: int | None = None
+    routing_model: str | None = None
 
 
 class Config(BaseSettings):

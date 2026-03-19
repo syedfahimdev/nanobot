@@ -2,7 +2,13 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Jarvis">
+<meta name="theme-color" content="#1a1a2e">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <title>Jarvis Voice</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -62,6 +68,13 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 }
 .btn-listen:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 20px rgba(0,212,255,0.3); }
 .btn-listen.recording { background: linear-gradient(135deg, #ff4757, #cc0022); color: #fff; }
+.btn-sleep {
+  background: #1a1a2e; color: #888; border: 1px solid #2a2a4a;
+  padding: 10px 16px; font-size: 0.85rem;
+}
+.btn-sleep:hover:not(:disabled) { background: #222240; color: #aaa; }
+.btn-sleep.sleeping { background: #1a1a2e; color: #555; border-color: #1a1a2e; }
+.btn-sleep.wake-word-active { background: linear-gradient(135deg, #2a1a4e, #1a2a4e); color: #a371f7; border-color: #3a2a6a; }
 .gate-control { display: flex; align-items: center; gap: 6px; }
 
 .visualizer { height: 36px; background: #12121f; border-radius: 8px; overflow: hidden; flex-shrink: 0; }
@@ -358,12 +371,13 @@ canvas { width: 100%; height: 100%; }
   <div class="conv-panel">
     <div class="controls">
       <button class="btn-listen" id="btnListen" onclick="toggleVoice()">Start Listening</button>
+      <button class="btn-sleep" id="btnSleep" onclick="toggleSleep()">Sleep</button>
       <div class="gate-control">
         <label for="gateSlider" style="font-size:0.7rem;color:#666;">Noise Gate</label>
-        <input type="range" id="gateSlider" min="0" max="80" value="15"
+        <input type="range" id="gateSlider" min="0" max="100" value="30"
           style="width:100px;accent-color:#00d4ff;vertical-align:middle;"
           oninput="noiseGateThreshold=this.value/1000; document.getElementById('gateVal').textContent=(this.value/10).toFixed(1)+'%'">
-        <span id="gateVal" style="font-size:0.65rem;color:#555;min-width:30px;">1.5%</span>
+        <span id="gateVal" style="font-size:0.65rem;color:#555;min-width:30px;">3.0%</span>
       </div>
     </div>
     <div class="visualizer"><canvas id="visualizer"></canvas></div>
@@ -392,15 +406,34 @@ let processor = null;
 let analyser = null;
 let animFrame = null;
 let isListening = false;
+let isDeepgramActive = false; // Whether Deepgram STT is connected (costs money)
+let speechFrames = 0; // Consecutive frames with voice activity
+let VAD_TRIGGER_FRAMES = 5; // Frames of speech needed to activate Deepgram (higher = less false triggers)
 let ttsQueue = [];
 let isPlayingTTS = false;
 let currentTTSSource = null;
 let ttsCtx = null; // persistent AudioContext for TTS playback
-let noiseGateThreshold = 0.015;
+let noiseGateThreshold = 0.03; // Higher default = less background noise pickup
 let silenceFrames = 0;
 let pttActive = false; // push-to-talk state
+let useOpus = false; // Opus codec detection
+let isSleeping = false; // Sleep mode — all listening stopped
+let appName = 'Mawa'; // Configurable app name
+let keepAliveCtx = null; // Silent audio context to prevent iOS suspension
+let keepAliveSource = null;
 
 const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+
+// Persistent client ID — survives page refreshes, reconnects, and PWA restarts
+function getClientId() {
+  let id = localStorage.getItem('jarvis_client_id');
+  if (!id) {
+    id = 'voice_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    localStorage.setItem('jarvis_client_id', id);
+  }
+  return id;
+}
+const CLIENT_ID = getClientId();
 
 function setStatus(text, state) {
   document.getElementById('statusText').textContent = text;
@@ -549,7 +582,11 @@ function connectWS() {
   if (ws && ws.readyState <= 1) return;
   ws = new WebSocket(WS_URL);
   ws.binaryType = 'arraybuffer';
-  ws.onopen = () => setStatus('Connected', 'active');
+  ws.onopen = () => {
+    // Send persistent client ID so server reuses session across reconnects
+    ws.send(JSON.stringify({ action: 'identify', client_id: CLIENT_ID }));
+    setStatus('Connected', 'active');
+  };
   ws.onmessage = (event) => handleMessage(JSON.parse(event.data));
   ws.onerror = () => setStatus('Error', '');
   ws.onclose = () => { setStatus('Disconnected', ''); setTimeout(connectWS, 2000); };
@@ -561,10 +598,22 @@ async function toggleVoice() {
 }
 
 async function startListening() {
+  // Guard: clean up any existing listening state first
+  if (isListening) {
+    stopListening();
+    await new Promise(r => setTimeout(r, 200));
+  }
+  // Clean up any leftover audio from wake word mode
+  cleanupAudio();
+
   try {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       connectWS();
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      setStatus('Cannot connect', '');
+      return;
     }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       alert('Mic requires HTTPS. Access via https://<tailscale-hostname>:' + location.port);
@@ -574,6 +623,10 @@ async function startListening() {
       audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true }
     });
     audioContext = new AudioContext({ sampleRate: 16000 });
+    // iOS: resume suspended AudioContext
+    if (audioContext.state === 'suspended') {
+      await audioContext.resume();
+    }
     const source = audioContext.createMediaStreamSource(mediaStream);
     analyser = audioContext.createAnalyser();
     analyser.fftSize = 256;
@@ -583,37 +636,59 @@ async function startListening() {
     source.connect(processor);
     processor.connect(audioContext.destination);
     processor.onaudioprocess = (e) => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        const f = e.inputBuffer.getChannelData(0);
-        let sum = 0;
-        for (let i = 0; i < f.length; i++) sum += f[i] * f[i];
-        const rms = Math.sqrt(sum / f.length);
-        const i16 = new Int16Array(f.length);
-        if (rms >= noiseGateThreshold) {
-          silenceFrames = 0;
-          for (let i = 0; i < f.length; i++) i16[i] = Math.max(-32768, Math.min(32767, Math.round(f[i] * 32767)));
-          ws.send(i16.buffer);
-        } else {
-          silenceFrames++;
-          // Send silent frames to keep Deepgram alive, but zeros won't transcribe
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const f = e.inputBuffer.getChannelData(0);
+      let sum = 0;
+      for (let i = 0; i < f.length; i++) sum += f[i] * f[i];
+      const rms = Math.sqrt(sum / f.length);
+      const i16 = new Int16Array(f.length);
+
+      if (rms >= noiseGateThreshold) {
+        silenceFrames = 0;
+        for (let i = 0; i < f.length; i++) i16[i] = Math.max(-32768, Math.min(32767, Math.round(f[i] * 32767)));
+
+        // Auto-wake: voice detected, connect Deepgram if not active
+        if (!isDeepgramActive) {
+          speechFrames++;
+          if (speechFrames >= VAD_TRIGGER_FRAMES) {
+            activateDeepgram();
+          }
+          return; // Buffer these frames until Deepgram is ready
+        }
+        ws.send(i16.buffer);
+      } else {
+        silenceFrames++;
+        speechFrames = 0;
+        // Send silent frames to keep Deepgram alive while active
+        if (isDeepgramActive) {
           ws.send(i16.buffer);
         }
       }
     };
-    ws.send(JSON.stringify({ action: 'start' }));
+    // Start in idle mode — mic open, Deepgram OFF until speech detected by VAD
+    startKeepAlive();
     isListening = true;
+    isDeepgramActive = false;
+    speechFrames = 0;
     const btn = document.getElementById('btnListen');
-    btn.textContent = 'Listening...';
+    btn.textContent = 'Stop';
     btn.classList.add('recording');
-    setStatus('Listening', 'listening');
+    setStatus('Mic open — speak to activate', 'active');
   } catch (err) {
-    alert('Mic access error: ' + err.message);
+    console.error('startListening error:', err);
+    cleanupAudio();
+    setStatus('Mic error: ' + err.message, '');
   }
 }
 
 function stopListening() {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ action: 'stop' }));
+  if (isDeepgramActive && ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ action: 'stop' }));
+  }
+  isDeepgramActive = false;
+  speechFrames = 0;
   cleanupAudio();
+  stopKeepAlive();
   isListening = false;
   const btn = document.getElementById('btnListen');
   btn.textContent = 'Start Listening';
@@ -631,10 +706,14 @@ function cleanupAudio() {
 function handleMessage(data) {
   switch (data.type) {
     case 'started':
-      setStatus('Listening (' + data.model + ')', 'listening');
+      setStatus('Listening', 'listening');
       break;
     case 'stopped':
-      setStatus('Connected', 'active');
+      if (isListening) {
+        setStatus('Mic open — speak to activate', 'active');
+      } else {
+        setStatus('Connected', 'active');
+      }
       break;
     case 'transcript':
       if (!data.is_final) updateInterim(data.text);
@@ -667,8 +746,9 @@ function handleMessage(data) {
       }
       break;
     case 'response_text':
+      if (data.subagent_result) playChime();
       addMessage('assistant', data.text);
-      setStatus(isListening ? 'Listening' : 'Connected', isListening ? 'listening' : 'active');
+      setStatus(isListening ? 'Mic open — speak to activate' : 'Connected', 'active');
       break;
     case 'tts_audio':
       queueTTS(data.audio_b64, data.sample_rate);
@@ -678,6 +758,15 @@ function handleMessage(data) {
       break;
     case 'profile_switched':
       addActivity('tool', 'Switched to profile: ' + data.name);
+      break;
+    case 'status':
+      // Deepgram reconnection status messages
+      addActivity('tool', data.message);
+      setStatus(data.message, 'processing');
+      break;
+    case 'config':
+      // Server config — app name, etc.
+      if (data.app_name) appName = data.app_name;
       break;
     case 'error':
       console.error('Server error:', data.message);
@@ -692,7 +781,11 @@ function queueTTS(b64, sampleRate) {
 }
 
 function playNextTTS() {
-  if (ttsQueue.length === 0) { isPlayingTTS = false; return; }
+  if (ttsQueue.length === 0) {
+    isPlayingTTS = false;
+    onAllTTSDone();
+    return;
+  }
   isPlayingTTS = true;
   const { b64, sampleRate } = ttsQueue.shift();
   const rate = sampleRate || 24000;
@@ -774,6 +867,103 @@ function switchProfile(name) {
   ws.send(JSON.stringify({ action: 'profile', name }));
 }
 
+// ── Subagent completion chime (#6) ──
+function playChime() {
+  try {
+    const ctx = new AudioContext({ sampleRate: 24000 });
+    const duration = 0.3;
+    const samples = Math.floor(ctx.sampleRate * duration);
+    const buffer = ctx.createBuffer(1, samples, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    // Generate a pleasant two-tone chime (C5 + E5)
+    for (let i = 0; i < samples; i++) {
+      const t = i / ctx.sampleRate;
+      const envelope = Math.exp(-t * 8); // Fast decay
+      data[i] = envelope * 0.3 * (
+        Math.sin(2 * Math.PI * 523.25 * t) +  // C5
+        0.6 * Math.sin(2 * Math.PI * 659.25 * t)  // E5
+      );
+    }
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+    source.start();
+    source.onended = () => ctx.close();
+  } catch(e) { console.debug('Chime failed:', e); }
+}
+
+// ── Sleep / Idle mode ──
+function toggleSleep() {
+  if (isSleeping) {
+    isSleeping = false;
+    updateSleepButton();
+    setStatus('Connected', 'active');
+  } else {
+    goToSleep();
+  }
+}
+
+function goToSleep() {
+  isSleeping = true;
+  if (isListening) stopListening();
+  stopAllTTS();
+  stopKeepAlive();
+  updateSleepButton();
+  setStatus('Sleeping (tap to wake)', '');
+}
+
+function updateSleepButton() {
+  const btn = document.getElementById('btnSleep');
+  if (isSleeping) {
+    btn.textContent = 'Wake Up';
+    btn.className = 'btn-sleep sleeping';
+  } else {
+    btn.textContent = 'Sleep';
+    btn.className = 'btn-sleep';
+  }
+}
+
+// ── Auto-wake / auto-sleep: activate/deactivate Deepgram on demand ──
+function activateDeepgram() {
+  if (isDeepgramActive) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  isDeepgramActive = true;
+  speechFrames = 0;
+  ws.send(JSON.stringify({ action: 'start' }));
+  setStatus('Hearing you...', 'listening');
+}
+
+function deactivateDeepgram() {
+  if (!isDeepgramActive) return;
+  isDeepgramActive = false;
+  speechFrames = 0;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ action: 'stop' }));
+  }
+  if (isListening) {
+    setStatus('Mic open — speak to activate', 'active');
+  }
+}
+
+// After TTS finishes: disconnect Deepgram, go back to VAD-only idle
+function onAllTTSDone() {
+  try {
+    if (isSleeping) return;
+    if (isListening && isDeepgramActive) {
+      deactivateDeepgram();
+    }
+  } catch(e) { console.debug('onAllTTSDone error:', e); }
+}
+
+// ── Opus codec detection (#9) ──
+function detectOpusSupport() {
+  try {
+    useOpus = typeof MediaRecorder !== 'undefined' &&
+              MediaRecorder.isTypeSupported('audio/webm;codecs=opus');
+    if (useOpus) addActivity('tool', 'Opus codec available — lower bandwidth');
+  } catch(e) { useOpus = false; }
+}
+
 // ── Push-to-talk (spacebar) ──
 document.addEventListener('keydown', (e) => {
   if (e.code !== 'Space' || e.repeat) return;
@@ -783,6 +973,7 @@ document.addEventListener('keydown', (e) => {
   if (!pttActive) {
     pttActive = true;
     if (!isListening) startListening();
+    else if (!isDeepgramActive) activateDeepgram();
   }
 });
 
@@ -801,6 +992,58 @@ document.addEventListener('keyup', (e) => {
 
 connectWS();
 loadProfiles();
+detectOpusSupport();
+
+// ── iOS keep-alive: silent audio loop prevents Safari from suspending JS ──
+function startKeepAlive() {
+  // iOS requires user gesture to create AudioContext — only call from tap handlers
+  if (keepAliveCtx) return;
+  try {
+    keepAliveCtx = new AudioContext({ sampleRate: 8000 });
+    if (keepAliveCtx.state === 'suspended') {
+      keepAliveCtx.resume().catch(() => {});
+    }
+    const buf = keepAliveCtx.createBuffer(1, 8000, 8000);
+    keepAliveSource = keepAliveCtx.createBufferSource();
+    keepAliveSource.buffer = buf;
+    keepAliveSource.loop = true;
+    const gain = keepAliveCtx.createGain();
+    gain.gain.value = 0.001;
+    keepAliveSource.connect(gain);
+    gain.connect(keepAliveCtx.destination);
+    keepAliveSource.start();
+    console.debug('Keep-alive audio started');
+  } catch(e) { console.debug('Keep-alive failed (needs user gesture):', e); }
+}
+
+function stopKeepAlive() {
+  if (keepAliveSource) { try { keepAliveSource.stop(); } catch(e) {} keepAliveSource = null; }
+  if (keepAliveCtx) { try { keepAliveCtx.close(); } catch(e) {} keepAliveCtx = null; }
+}
+
+// Also use Page Visibility API to resume audio context if iOS paused it
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    if (keepAliveCtx && keepAliveCtx.state === 'suspended') {
+      keepAliveCtx.resume();
+    }
+    if (audioContext && audioContext.state === 'suspended') {
+      audioContext.resume();
+    }
+    // Reconnect WS if it dropped while backgrounded
+    if (!ws || ws.readyState > 1) {
+      connectWS();
+    }
+  }
+});
+
+// ── PWA Service Worker registration ──
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').then(
+    (reg) => console.debug('SW registered:', reg.scope),
+    (err) => console.debug('SW registration failed:', err)
+  );
+}
 </script>
 </body>
 </html>

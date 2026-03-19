@@ -133,6 +133,7 @@ class WebVoiceConfig(Base):
     tailscale_only: bool = False
     tts_model: str = "aura-2-luna-en"
     stt_model: str = "nova-3"
+    app_name: str = "Mawa"  # Display name for the assistant
 
 
 class WebVoiceChannel(BaseChannel):
@@ -177,6 +178,11 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/ws", self._ws_handler)
         self._app.router.add_get("/health", self._health_handler)
         self._app.router.add_get("/api/profiles", self._profiles_handler)
+        # PWA assets
+        self._app.router.add_get("/manifest.json", self._pwa_asset_handler)
+        self._app.router.add_get("/sw.js", self._pwa_asset_handler)
+        self._app.router.add_get("/icon-192.png", self._pwa_asset_handler)
+        self._app.router.add_get("/icon-512.png", self._pwa_asset_handler)
 
         ssl_ctx = None
         ts_dns = _get_tailscale_dns() if self.config.tailscale_only else None
@@ -230,6 +236,11 @@ class WebVoiceChannel(BaseChannel):
             await ws.send_json({"type": "parallel", "text": msg.content})
             return
 
+        # Streaming TTS sentence — enqueue for TTS immediately (no display yet)
+        if meta.get("_tts_sentence"):
+            self._enqueue_tts(session_id, msg.content)
+            return
+
         if is_progress:
             now = time.time()
             prev = self._activity_ts.get(session_id, now)
@@ -248,8 +259,13 @@ class WebVoiceChannel(BaseChannel):
             return
 
         # Final response
+        is_subagent = meta.get("_subagent_result", False)
         self._streamed_text.pop(session_id, None)
-        await ws.send_json({"type": "response_text", "text": msg.content})
+        await ws.send_json({
+            "type": "response_text",
+            "text": msg.content,
+            "subagent_result": is_subagent,
+        })
 
         # Update pending count
         count = self._pending_count.get(session_id, 0)
@@ -259,14 +275,17 @@ class WebVoiceChannel(BaseChannel):
             if remaining > 0:
                 await ws.send_json({"type": "queue_status", "pending": remaining})
 
-        # TTS the full response in sentence chunks (ordered)
-        clean = _strip_markdown(msg.content)
-        if not clean:
-            return
-        sentences = _split_sentences(clean)
-        for sentence in sentences:
-            if len(sentence) >= 3:
-                self._enqueue_tts(session_id, sentence)
+        # TTS: subagent results and non-streamed responses need sentence-based TTS here.
+        # When streaming was active, sentences were already sent via _tts_sentence messages,
+        # so we only TTS if this is a subagent result (skip-summarization path) or
+        # the response came from a non-streaming path.
+        if is_subagent:
+            clean = _strip_markdown(msg.content)
+            if clean:
+                sentences = _split_sentences(clean)
+                for sentence in sentences:
+                    if len(sentence) >= 3:
+                        self._enqueue_tts(session_id, sentence)
 
     def _enqueue_tts(self, session_id: str, text: str) -> None:
         """Add a sentence to the ordered TTS queue for this session."""
@@ -311,6 +330,22 @@ class WebVoiceChannel(BaseChannel):
     async def _index_handler(self, request: web.Request) -> web.Response:
         return web.Response(text=_load_dashboard_html(), content_type="text/html")
 
+    async def _pwa_asset_handler(self, request: web.Request) -> web.Response:
+        """Serve PWA assets (manifest, service worker, icons)."""
+        filename = request.path.lstrip("/")
+        filepath = _UI_DIR / filename
+        if not filepath.exists():
+            return web.Response(status=404, text="Not found")
+        content_types = {
+            ".json": "application/json",
+            ".js": "application/javascript",
+            ".png": "image/png",
+        }
+        ct = content_types.get(filepath.suffix, "application/octet-stream")
+        if filepath.suffix == ".png":
+            return web.Response(body=filepath.read_bytes(), content_type=ct)
+        return web.Response(text=filepath.read_text(), content_type=ct)
+
     async def _health_handler(self, request: web.Request) -> web.Response:
         return web.json_response({
             "status": "ok",
@@ -338,7 +373,7 @@ class WebVoiceChannel(BaseChannel):
         ws = web.WebSocketResponse()
         await ws.prepare(request)
 
-        session_id = f"webvoice_{id(ws)}"
+        session_id = f"webvoice_{id(ws)}"  # Default; overridden by identify action
         self._clients[session_id] = ws
         self._utterance_buffer[session_id] = []
         self._pending_count[session_id] = 0
@@ -348,16 +383,59 @@ class WebVoiceChannel(BaseChannel):
 
         logger.info("Web Voice client connected: {}", session_id)
 
+        # Send initial config to frontend
+        await ws.send_json({
+            "type": "config",
+            "app_name": self.config.app_name,
+        })
+
         try:
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     data = json.loads(msg.data)
                     action = data.get("action")
 
+                    # Client identification — reuse session across reconnects
+                    if action == "identify":
+                        client_id = data.get("client_id", "").strip()
+                        if client_id:
+                            old_id = session_id
+                            session_id = client_id
+                            # Close any existing WS for this client (other tab/reconnect)
+                            old_ws = self._clients.get(session_id)
+                            if old_ws and old_ws is not ws and not old_ws.closed:
+                                logger.info("Web Voice: closing old connection for {}", session_id)
+                                try:
+                                    await old_ws.close()
+                                except Exception:
+                                    pass
+                            # Migrate from temp ID to persistent ID
+                            self._clients.pop(old_id, None)
+                            self._utterance_buffer.pop(old_id, None)
+                            self._pending_count.pop(old_id, None)
+                            self._clients[session_id] = ws
+                            self._utterance_buffer.setdefault(session_id, [])
+                            self._pending_count.setdefault(session_id, 0)
+                            logger.info("Web Voice client identified: {} (was {})", session_id, old_id)
+                        continue
+
                     if action == "start":
+                        # Close any existing Deepgram connection first
                         if dg_ws:
-                            await ws.send_json({"type": "error", "message": "Already streaming"})
-                            continue
+                            logger.info("Web Voice: closing existing STT for {}", session_id)
+                            try:
+                                await dg_ws.send(json.dumps({"type": "CloseStream"}))
+                                await dg_ws.close()
+                            except Exception:
+                                pass
+                            dg_ws = None
+                        if recv_task:
+                            recv_task.cancel()
+                            recv_task = None
+
+                        # Support client-specified encoding (for Opus codec)
+                        client_encoding = data.get("encoding", "linear16")
+                        client_sample_rate = data.get("sample_rate", "16000")
 
                         params = {
                             "model": self.config.stt_model,
@@ -367,62 +445,69 @@ class WebVoiceChannel(BaseChannel):
                             "interim_results": "true",
                             "utterance_end_ms": "1200",
                             "vad_events": "true",
-                            "encoding": "linear16",
-                            "sample_rate": "16000",
+                            "encoding": client_encoding,
+                            "sample_rate": client_sample_rate,
                             "channels": "1",
                             "endpointing": "300",
                         }
-                        qs = "&".join(f"{k}={v}" for k, v in params.items())
-                        url = f"wss://api.deepgram.com/v1/listen?{qs}"
 
                         try:
-                            import websockets
-                            dg_ws = await websockets.connect(
-                                url,
-                                additional_headers={"Authorization": f"Token {self.config.deepgram_api_key}"},
-                                ping_interval=20,
-                            )
+                            dg_ws = await self._connect_deepgram(params, ws)
+                            stt_params = params  # Store for reconnection
                             self._utterance_buffer[session_id] = []
 
                             async def forward_transcripts():
-                                try:
-                                    async for dg_msg in dg_ws:
-                                        result = json.loads(dg_msg)
-                                        msg_type = result.get("type", "")
+                                nonlocal dg_ws
+                                while True:
+                                    try:
+                                        async for dg_msg in dg_ws:
+                                            result = json.loads(dg_msg)
+                                            msg_type = result.get("type", "")
 
-                                        if msg_type == "Results":
-                                            channel_data = result.get("channel", {})
-                                            alts = channel_data.get("alternatives", [])
-                                            is_final = result.get("is_final", False)
-                                            if alts:
-                                                text = alts[0].get("transcript", "").strip()
-                                                confidence = alts[0].get("confidence", 0)
-                                                if text:
-                                                    await ws.send_json({
-                                                        "type": "transcript",
-                                                        "is_final": is_final,
-                                                        "text": text,
-                                                        "confidence": round(confidence, 3),
-                                                    })
-                                                    if is_final and confidence > 0.5:
-                                                        self._utterance_buffer[session_id].append(text)
+                                            if msg_type == "Results":
+                                                channel_data = result.get("channel", {})
+                                                alts = channel_data.get("alternatives", [])
+                                                is_final = result.get("is_final", False)
+                                                if alts:
+                                                    text = alts[0].get("transcript", "").strip()
+                                                    confidence = alts[0].get("confidence", 0)
+                                                    if text:
+                                                        await ws.send_json({
+                                                            "type": "transcript",
+                                                            "is_final": is_final,
+                                                            "text": text,
+                                                            "confidence": round(confidence, 3),
+                                                        })
+                                                        if is_final and confidence > 0.5:
+                                                            self._utterance_buffer[session_id].append(text)
 
-                                        elif msg_type == "SpeechStarted":
-                                            await ws.send_json({"type": "speech_started"})
+                                            elif msg_type == "SpeechStarted":
+                                                await ws.send_json({"type": "speech_started"})
 
-                                        elif msg_type == "UtteranceEnd":
-                                            await ws.send_json({"type": "utterance_end"})
-                                            buf = self._utterance_buffer.get(session_id, [])
-                                            if buf:
-                                                full_text = " ".join(buf)
-                                                self._utterance_buffer[session_id] = []
-                                                self._enqueue_message(session_id, full_text)
+                                            elif msg_type == "UtteranceEnd":
+                                                await ws.send_json({"type": "utterance_end"})
+                                                buf = self._utterance_buffer.get(session_id, [])
+                                                if buf:
+                                                    full_text = " ".join(buf)
+                                                    self._utterance_buffer[session_id] = []
+                                                    self._enqueue_message(session_id, full_text)
 
-                                        elif msg_type == "Error":
-                                            await ws.send_json({"type": "error", "message": str(result)})
-                                except Exception as e:
-                                    if not ws.closed:
-                                        await ws.send_json({"type": "error", "message": f"Stream ended: {e}"})
+                                            elif msg_type == "Error":
+                                                await ws.send_json({"type": "error", "message": str(result)})
+                                        # Normal end of stream — no reconnect needed
+                                        break
+                                    except asyncio.CancelledError:
+                                        return
+                                    except Exception as e:
+                                        if ws.closed:
+                                            return
+                                        logger.warning("Deepgram connection lost: {}, reconnecting...", e)
+                                        await ws.send_json({"type": "status", "message": "Speech service disconnected, reconnecting..."})
+                                        try:
+                                            dg_ws = await self._connect_deepgram(stt_params, ws)
+                                        except ConnectionError:
+                                            await ws.send_json({"type": "error", "message": "Speech service unavailable"})
+                                            return
 
                             recv_task = asyncio.create_task(forward_transcripts())
                             await ws.send_json({"type": "started", "model": self.config.stt_model})
@@ -602,6 +687,46 @@ class WebVoiceChannel(BaseChannel):
         except Exception as e:
             logger.warning("Web Voice intel failed: {}", e)
             return None
+
+    # ── Deepgram connection ─────────────────────────────────────────
+
+    async def _connect_deepgram(
+        self,
+        params: dict[str, str],
+        ws: web.WebSocketResponse,
+    ):
+        """Connect to Deepgram STT with exponential backoff retry."""
+        import websockets
+
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        url = f"wss://api.deepgram.com/v1/listen?{qs}"
+        delays = [1, 2, 4, 8, 16]
+        max_retries = 5
+
+        for attempt in range(max_retries):
+            try:
+                dg_ws = await websockets.connect(
+                    url,
+                    additional_headers={"Authorization": f"Token {self.config.deepgram_api_key}"},
+                    ping_interval=20,
+                )
+                if attempt > 0:
+                    logger.info("Deepgram reconnected after {} attempts", attempt + 1)
+                    if not ws.closed:
+                        await ws.send_json({"type": "status", "message": "Speech service reconnected"})
+                return dg_ws
+            except Exception as e:
+                delay = delays[min(attempt, len(delays) - 1)]
+                logger.warning("Deepgram connect attempt {}/{} failed: {}, retrying in {}s",
+                              attempt + 1, max_retries, e, delay)
+                if not ws.closed:
+                    await ws.send_json({
+                        "type": "status",
+                        "message": f"Reconnecting to speech service... (attempt {attempt + 1})",
+                    })
+                await asyncio.sleep(delay)
+
+        raise ConnectionError("Failed to connect to Deepgram after max retries")
 
     # ── Deepgram APIs ──────────────────────────────────────────────
 

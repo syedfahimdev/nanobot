@@ -113,6 +113,7 @@ class TestMessageToolSuppressLogic:
         assert progress == [
             ("Visible", False),
             ('read_file("foo.txt")', True),
+            ('[read_file] → ok', True),
         ]
 
 
