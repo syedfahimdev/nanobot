@@ -160,24 +160,199 @@ canvas { width: 100%; height: 100%; }
 .intel-tag.intent { background: #1a1533; color: #a371f7; }
 .intel-tag.topic { background: #0d1b2a; color: #58a6ff; }
 
+/* Profile switcher */
+.profile-select {
+  background: #12121f; color: #e0e0e0; border: 1px solid #2a2a4a;
+  border-radius: 6px; padding: 6px 10px; font-size: 0.75rem;
+  outline: none; cursor: pointer;
+}
+.profile-select:focus { border-color: #00d4ff; }
+.profile-select option { background: #12121f; color: #e0e0e0; }
+
+/* Push-to-talk hint */
+.ptt-hint {
+  font-size: 0.6rem; color: #555; text-align: center;
+  flex-shrink: 0; padding: 2px 0;
+}
+.ptt-hint kbd {
+  background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 3px;
+  padding: 1px 5px; font-family: monospace; color: #888;
+}
+
 @media (max-width: 900px) {
   .layout { flex-direction: column; }
   .activity-panel { width: 100%; max-height: 220px; border-left: none; border-top: 1px solid #1a1a2e; }
+}
+
+@media (max-width: 600px) {
+  /* Header adjustments */
+  .header {
+    padding: 12px 16px;
+  }
+  .header h1 {
+    font-size: 1.2rem;
+  }
+  .header-right {
+    gap: 10px;
+  }
+  .status {
+    font-size: 0.75rem;
+  }
+  
+  /* Main layout - hide activity panel on small screens, show toggle instead */
+  .layout {
+    position: relative;
+  }
+  
+  .conv-panel {
+    padding: 10px;
+    gap: 8px;
+  }
+  
+  /* Controls - full width buttons */
+  .controls {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  
+  .btn-listen {
+    width: 100%;
+    padding: 16px 24px;
+    font-size: 1.1rem;
+    min-height: 56px;
+  }
+  
+  .gate-control {
+    justify-content: center;
+    padding: 8px 0;
+  }
+  
+  /* Larger touch targets */
+  button {
+    min-height: 44px;
+    padding: 12px 20px;
+  }
+  
+  /* Conversation - more compact */
+  .conversation {
+    padding: 10px;
+    gap: 8px;
+  }
+  
+  .msg {
+    max-width: 92%;
+    padding: 10px 12px;
+    font-size: 0.95rem;
+  }
+  
+  /* Text input - larger for mobile typing */
+  .text-input-row input {
+    padding: 14px 16px;
+    font-size: 16px; /* Prevents zoom on iOS */
+  }
+  
+  .text-input-row button {
+    padding: 14px 20px;
+  }
+  
+  /* Activity panel as overlay on mobile */
+  .activity-panel {
+    position: fixed;
+    top: 0;
+    right: -100%;
+    width: 85%;
+    max-width: 320px;
+    height: 100vh;
+    max-height: 100vh;
+    z-index: 1000;
+    transition: right 0.3s ease;
+    border-top: none;
+    border-left: 1px solid #1a1a2e;
+  }
+  
+  .activity-panel.open {
+    right: 0;
+  }
+  
+  /* Activity overlay backdrop */
+  .activity-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.5);
+    z-index: 999;
+  }
+  
+  .activity-overlay.open {
+    display: block;
+  }
+  
+  /* Activity toggle button in header */
+  .profile-select { font-size: 0.7rem; }
+
+  .activity-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    background: #1a1a2e;
+    border: 1px solid #2a2a4a;
+    border-radius: 6px;
+    color: #888;
+    font-size: 0.75rem;
+    cursor: pointer;
+  }
+  
+  .activity-toggle::before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    background: #7b2ff7;
+    border-radius: 50%;
+  }
+  
+  /* Visualizer height */
+  .visualizer {
+    height: 48px;
+  }
+}
+
+@media (max-width: 600px) {
+  .activity-toggle {
+    display: flex;
+  }
+}
+
+@media (min-width: 601px) {
+  .activity-toggle,
+  .activity-overlay {
+    display: none !important;
+  }
 }
 </style>
 </head>
 <body>
 
-<div class="header">
-  <h1>JARVIS</h1>
-  <div class="header-right">
-    <span class="queue-badge" id="queueBadge"></span>
-    <div class="status">
-      <div class="status-dot" id="statusDot"></div>
-      <span id="statusText">Ready</span>
+  <div class="header">
+    <h1>JARVIS</h1>
+    <div class="header-right">
+      <select class="profile-select" id="profileSelect" onchange="switchProfile(this.value)" title="LLM Profile">
+        <option value="">Loading...</option>
+      </select>
+      <button class="activity-toggle" onclick="toggleActivityPanel()">Activity</button>
+      <span class="queue-badge" id="queueBadge"></span>
+      <div class="status">
+        <div class="status-dot" id="statusDot"></div>
+        <span id="statusText">Ready</span>
+      </div>
     </div>
   </div>
-</div>
+  
+  <div class="activity-overlay" id="activityOverlay" onclick="toggleActivityPanel()"></div>
 
 <div class="layout">
   <div class="conv-panel">
@@ -192,6 +367,7 @@ canvas { width: 100%; height: 100%; }
       </div>
     </div>
     <div class="visualizer"><canvas id="visualizer"></canvas></div>
+    <div class="ptt-hint">Hold <kbd>Space</kbd> to push-to-talk (releases immediately)</div>
     <div class="conversation" id="conversation"></div>
     <div class="text-input-row">
       <input type="text" id="textInput" placeholder="Or type a message..." onkeydown="if(event.key==='Enter')sendText()">
@@ -219,9 +395,10 @@ let isListening = false;
 let ttsQueue = [];
 let isPlayingTTS = false;
 let currentTTSSource = null;
-let currentTTSCtx = null;
+let ttsCtx = null; // persistent AudioContext for TTS playback
 let noiseGateThreshold = 0.015;
 let silenceFrames = 0;
+let pttActive = false; // push-to-talk state
 
 const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 
@@ -322,6 +499,13 @@ function clearActivity() {
   document.getElementById('activityFeed').innerHTML = '';
 }
 
+function toggleActivityPanel() {
+  const panel = document.querySelector('.activity-panel');
+  const overlay = document.getElementById('activityOverlay');
+  panel.classList.toggle('open');
+  overlay.classList.toggle('open');
+}
+
 function esc(s) {
   const d = document.createElement('div');
   d.textContent = s;
@@ -351,10 +535,14 @@ function stopAllTTS() {
     try { currentTTSSource.stop(); } catch(e) {}
     currentTTSSource = null;
   }
-  if (currentTTSCtx) {
-    try { currentTTSCtx.close(); } catch(e) {}
-    currentTTSCtx = null;
-  }
+  // Don't close ttsCtx — it's persistent and reused
+}
+
+function getTTSContext(sampleRate) {
+  if (ttsCtx && ttsCtx.sampleRate === sampleRate && ttsCtx.state !== 'closed') return ttsCtx;
+  if (ttsCtx) { try { ttsCtx.close(); } catch(e) {} }
+  ttsCtx = new AudioContext({ sampleRate });
+  return ttsCtx;
 }
 
 function connectWS() {
@@ -465,6 +653,12 @@ function handleMessage(data) {
       pending.querySelector('.msg-body').style.opacity = '0.4';
       setStatus('Thinking...', 'processing');
       break;
+    case 'parallel':
+      // Task auto-spawned in parallel — remove extra pending bubble
+      const pendingBubble = document.querySelector('.msg.assistant.pending');
+      if (pendingBubble) pendingBubble.remove();
+      addActivity('tool', `Running in parallel: "${data.text}"`);
+      break;
     case 'activity':
       addActivity(data.kind, data.text, data.data, data.latency_ms);
       if (data.kind === 'thinking') {
@@ -482,6 +676,9 @@ function handleMessage(data) {
     case 'queue_status':
       updateQueueBadge(data.pending);
       break;
+    case 'profile_switched':
+      addActivity('tool', 'Switched to profile: ' + data.name);
+      break;
     case 'error':
       console.error('Server error:', data.message);
       addActivity('tool', 'Error: ' + data.message);
@@ -498,23 +695,22 @@ function playNextTTS() {
   if (ttsQueue.length === 0) { isPlayingTTS = false; return; }
   isPlayingTTS = true;
   const { b64, sampleRate } = ttsQueue.shift();
+  const rate = sampleRate || 24000;
   const binary = atob(b64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   const int16 = new Int16Array(bytes.buffer);
   const float32 = new Float32Array(int16.length);
   for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
-  currentTTSCtx = new AudioContext({ sampleRate: sampleRate || 24000 });
-  const buffer = currentTTSCtx.createBuffer(1, float32.length, sampleRate || 24000);
+  const ctx = getTTSContext(rate);
+  const buffer = ctx.createBuffer(1, float32.length, rate);
   buffer.getChannelData(0).set(float32);
-  currentTTSSource = currentTTSCtx.createBufferSource();
+  currentTTSSource = ctx.createBufferSource();
   currentTTSSource.buffer = buffer;
-  currentTTSSource.connect(currentTTSCtx.destination);
+  currentTTSSource.connect(ctx.destination);
   currentTTSSource.start();
   currentTTSSource.onended = () => {
-    if (currentTTSCtx) { try { currentTTSCtx.close(); } catch(e) {} }
     currentTTSSource = null;
-    currentTTSCtx = null;
     playNextTTS();
   };
 }
@@ -553,7 +749,58 @@ function drawVisualizer() {
   draw();
 }
 
+// ── Profile switcher ──
+async function loadProfiles() {
+  try {
+    const resp = await fetch('/api/profiles');
+    const data = await resp.json();
+    const sel = document.getElementById('profileSelect');
+    sel.innerHTML = '';
+    for (const [name, info] of Object.entries(data.profiles || {})) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = `${name} (${info.model})`;
+      sel.appendChild(opt);
+    }
+    // Default selection from config
+    if (sel.querySelector('option[value="default"]')) sel.value = 'default';
+  } catch(e) {
+    console.error('Failed to load profiles:', e);
+  }
+}
+
+function switchProfile(name) {
+  if (!name || !ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ action: 'profile', name }));
+}
+
+// ── Push-to-talk (spacebar) ──
+document.addEventListener('keydown', (e) => {
+  if (e.code !== 'Space' || e.repeat) return;
+  // Don't capture if typing in text input
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  e.preventDefault();
+  if (!pttActive) {
+    pttActive = true;
+    if (!isListening) startListening();
+  }
+});
+
+document.addEventListener('keyup', (e) => {
+  if (e.code !== 'Space') return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  e.preventDefault();
+  if (pttActive) {
+    pttActive = false;
+    // Immediately submit whatever is buffered — skip utterance_end wait
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ action: 'submit_now' }));
+    }
+  }
+});
+
 connectWS();
+loadProfiles();
 </script>
 </body>
 </html>

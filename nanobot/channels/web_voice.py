@@ -155,9 +155,6 @@ class WebVoiceChannel(BaseChannel):
         self._clients: dict[str, web.WebSocketResponse] = {}
         self._utterance_buffer: dict[str, list[str]] = {}
         self._streamed_text: dict[str, str] = {}
-        # Per-session message queue to serialize agent requests
-        self._msg_queues: dict[str, asyncio.Queue] = {}
-        self._msg_workers: dict[str, asyncio.Task] = {}
         # Per-session TTS queue to preserve sentence order
         self._tts_queues: dict[str, asyncio.Queue] = {}
         self._tts_workers: dict[str, asyncio.Task] = {}
@@ -179,6 +176,7 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/", self._index_handler)
         self._app.router.add_get("/ws", self._ws_handler)
         self._app.router.add_get("/health", self._health_handler)
+        self._app.router.add_get("/api/profiles", self._profiles_handler)
 
         ssl_ctx = None
         ts_dns = _get_tailscale_dns() if self.config.tailscale_only else None
@@ -207,9 +205,6 @@ class WebVoiceChannel(BaseChannel):
             if not ws.closed:
                 await ws.close()
         self._clients.clear()
-        for task in self._msg_workers.values():
-            task.cancel()
-        self._msg_workers.clear()
         for task in self._tts_workers.values():
             task.cancel()
         self._tts_workers.clear()
@@ -230,6 +225,11 @@ class WebVoiceChannel(BaseChannel):
         is_progress = meta.get("_progress", False)
         is_tool_hint = meta.get("_tool_hint", False)
 
+        # Parallel task spawned — resolve pending bubble, show in activity
+        if meta.get("_parallel"):
+            await ws.send_json({"type": "parallel", "text": msg.content})
+            return
+
         if is_progress:
             now = time.time()
             prev = self._activity_ts.get(session_id, now)
@@ -245,23 +245,6 @@ class WebVoiceChannel(BaseChannel):
                     await ws.send_json({"type": "activity", "kind": "tool", "text": text, "latency_ms": delta_ms})
             else:
                 await ws.send_json({"type": "activity", "kind": "thinking", "text": msg.content, "latency_ms": delta_ms})
-
-                # Stream TTS for complete sentences
-                prev = self._streamed_text.get(session_id, "")
-                full = prev + " " + msg.content if prev else msg.content
-                clean = _strip_markdown(full)
-                sentences = _split_sentences(clean)
-
-                if sentences and not clean.rstrip().endswith((".", "!", "?")):
-                    ready = sentences[:-1]
-                    self._streamed_text[session_id] = sentences[-1]
-                else:
-                    ready = sentences
-                    self._streamed_text[session_id] = ""
-
-                for sentence in ready:
-                    if len(sentence) >= 3:
-                        self._enqueue_tts(session_id, sentence)
             return
 
         # Final response
@@ -333,6 +316,21 @@ class WebVoiceChannel(BaseChannel):
             "status": "ok",
             "active_sessions": len(self._clients),
         })
+
+    async def _profiles_handler(self, request: web.Request) -> web.Response:
+        """Return available LLM profiles for the UI switcher."""
+        try:
+            from nanobot.config.loader import load_config
+            config = load_config()
+            profiles = {}
+            for name, p in (config.profiles or {}).items():
+                profiles[name] = {
+                    "provider": p.provider or "—",
+                    "model": p.model or "—",
+                }
+            return web.json_response({"profiles": profiles})
+        except Exception as e:
+            return web.json_response({"profiles": {}, "error": str(e)})
 
     # ── WebSocket handler ──────────────────────────────────────────
 
@@ -452,6 +450,20 @@ class WebVoiceChannel(BaseChannel):
                             self._enqueue_message(session_id, full_text)
                         await ws.send_json({"type": "stopped"})
 
+                    elif action == "profile":
+                        profile_name = data.get("name", "").strip()
+                        if profile_name:
+                            self._enqueue_message(session_id, f"/profile {profile_name}")
+                            await ws.send_json({"type": "profile_switched", "name": profile_name})
+
+                    elif action == "submit_now":
+                        # Push-to-talk release: immediately submit buffered utterance
+                        buf = self._utterance_buffer.get(session_id, [])
+                        if buf:
+                            full_text = " ".join(buf)
+                            self._utterance_buffer[session_id] = []
+                            self._enqueue_message(session_id, full_text)
+
                     elif action == "text":
                         text = data.get("text", "").strip()
                         if text:
@@ -479,10 +491,6 @@ class WebVoiceChannel(BaseChannel):
             self._streamed_text.pop(session_id, None)
             self._pending_count.pop(session_id, None)
             self._activity_ts.pop(session_id, None)
-            worker = self._msg_workers.pop(session_id, None)
-            if worker:
-                worker.cancel()
-            self._msg_queues.pop(session_id, None)
             tts_worker = self._tts_workers.pop(session_id, None)
             if tts_worker:
                 tts_worker.cancel()
@@ -494,50 +502,25 @@ class WebVoiceChannel(BaseChannel):
     # ── Message queue (serialize per session) ──────────────────────
 
     def _enqueue_message(self, session_id: str, text: str) -> None:
-        """Queue a message for processing, start worker if needed.
+        """Submit a message to the agent immediately (no queuing).
 
-        If the message looks like an interrupt ('no', 'stop', 'wait', etc.),
-        flush the pending queue and send /stop to cancel any running agent task
-        before submitting the new message.
+        The agent loop handles concurrency: if it's already busy on this session,
+        the message gets live-injected into the running conversation so the LLM
+        sees it on its next iteration.
+
+        Interrupt patterns ('no', 'stop', 'wait') still cancel via /stop.
         """
-        if session_id not in self._msg_queues:
-            self._msg_queues[session_id] = asyncio.Queue()
-
         is_interrupt = bool(_INTERRUPT_PATTERNS.search(text.strip()))
 
         if is_interrupt:
-            # Flush any queued messages — user changed their mind
-            q = self._msg_queues[session_id]
-            flushed = 0
-            while not q.empty():
-                try:
-                    q.get_nowait()
-                    flushed += 1
-                except asyncio.QueueEmpty:
-                    break
-
-            if flushed > 0:
-                logger.info("Web Voice: interrupt '{}' flushed {} queued messages", text, flushed)
-
-            # Cancel the current agent task via /stop
             asyncio.create_task(self._send_stop(session_id))
-
             self._pending_count[session_id] = 0
             ws = self._clients.get(session_id)
             if ws and not ws.closed:
                 asyncio.create_task(ws.send_json({"type": "queue_status", "pending": 0}))
 
-        self._msg_queues[session_id].put_nowait(text)
-
-        count = self._pending_count.get(session_id, 0) + 1
-        self._pending_count[session_id] = count
-
-        ws = self._clients.get(session_id)
-        if ws and not ws.closed and count > 1:
-            asyncio.create_task(ws.send_json({"type": "queue_status", "pending": count}))
-
-        if session_id not in self._msg_workers or self._msg_workers[session_id].done():
-            self._msg_workers[session_id] = asyncio.create_task(self._msg_worker(session_id))
+        # Fire directly to the agent — no channel-level queue
+        asyncio.create_task(self._submit_to_agent(session_id, text))
 
     async def _send_stop(self, session_id: str) -> None:
         """Send /stop command to cancel any running agent task for this session."""
@@ -555,20 +538,6 @@ class WebVoiceChannel(BaseChannel):
             logger.info("Web Voice: sent /stop for session {}", session_id)
         except Exception as e:
             logger.warning("Web Voice: failed to send /stop: {}", e)
-
-    async def _msg_worker(self, session_id: str) -> None:
-        """Process queued messages one at a time for a session."""
-        q = self._msg_queues.get(session_id)
-        if not q:
-            return
-        while True:
-            try:
-                text = await asyncio.wait_for(q.get(), timeout=60.0)
-            except asyncio.TimeoutError:
-                break
-            except asyncio.CancelledError:
-                break
-            await self._submit_to_agent(session_id, text)
 
     # ── Agent integration ──────────────────────────────────────────
 

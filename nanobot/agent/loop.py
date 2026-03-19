@@ -23,7 +23,7 @@ from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.restart import RestartTool
 from nanobot.agent.tools.shell import ExecTool
-from nanobot.agent.tools.spawn import SpawnTool
+from nanobot.agent.tools.spawn import ListSubagentsTool, SpawnTool, UpdateSubagentTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
@@ -102,6 +102,7 @@ class AgentLoop:
             web_proxy=web_proxy,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
+            toolsdns_config=toolsdns_config,
         )
 
         self._running = False
@@ -111,7 +112,7 @@ class AgentLoop:
         self._mcp_connecting = False
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._background_tasks: list[asyncio.Task] = []
-        self._processing_lock = asyncio.Lock()
+        self._session_locks: dict[str, asyncio.Lock] = {}  # per-session locks
         self.memory_consolidator = MemoryConsolidator(
             workspace=workspace,
             provider=provider,
@@ -141,6 +142,8 @@ class AgentLoop:
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(RestartTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
+        self.tools.register(UpdateSubagentTool(manager=self.subagents))
+        self.tools.register(ListSubagentsTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
         if self._toolsdns_config and self._toolsdns_config.enabled:
@@ -629,9 +632,40 @@ class AgentLoop:
 
         asyncio.create_task(_do_restart())
 
+    def _get_session_lock(self, session_key: str) -> asyncio.Lock:
+        """Get or create a per-session lock."""
+        if session_key not in self._session_locks:
+            self._session_locks[session_key] = asyncio.Lock()
+        return self._session_locks[session_key]
+
     async def _dispatch(self, msg: InboundMessage) -> None:
-        """Process a message under the global lock."""
-        async with self._processing_lock:
+        """Process a message under a per-session lock.
+
+        If the session is busy, auto-spawn a subagent for the new message
+        so it runs in parallel without corrupting the main conversation.
+        """
+        lock = self._get_session_lock(msg.session_key)
+
+        if lock.locked():
+            logger.info("Session {} busy, auto-spawning for: '{}'",
+                        msg.session_key, msg.content[:60])
+            # Notify the channel
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content=msg.content,
+                metadata={"_parallel": True},
+            ))
+            # Spawn as a subagent — runs in parallel with its own context
+            await self.subagents.spawn(
+                task=msg.content,
+                label=msg.content[:30],
+                origin_channel=msg.channel,
+                origin_chat_id=msg.chat_id,
+                session_key=msg.session_key,
+            )
+            return
+
+        async with lock:
             try:
                 response = await self._process_message(msg)
                 if response is not None:
@@ -823,6 +857,15 @@ class AgentLoop:
         enriched_content = msg.content
         if voice_hint := (msg.metadata or {}).get("voice_instruction"):
             enriched_content = f"{voice_hint}\n\n{enriched_content}"
+
+        # Inject running subagent context so the main agent can route updates
+        running = self.subagents.get_running_tasks()
+        if running:
+            lines = ["[ACTIVE SUBAGENTS]"]
+            for t in running:
+                lines.append(f"- id={t['id']} label=\"{t['label']}\" task=\"{t['task'][:80]}\"")
+            enriched_content = f"{enriched_content}\n\n" + "\n".join(lines)
+
         if toolsdns_context:
             enriched_content = f"{enriched_content}\n\n{toolsdns_context}"
 

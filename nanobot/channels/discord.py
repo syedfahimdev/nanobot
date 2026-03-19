@@ -101,6 +101,11 @@ class DiscordChannel(BaseChannel):
             logger.warning("Discord HTTP client not initialized")
             return
 
+        # Skip progress/activity messages — these are for activity feeds, not chat
+        meta = msg.metadata or {}
+        if meta.get("_progress") or meta.get("_parallel"):
+            return
+
         url = f"{DISCORD_API_BASE}/channels/{msg.chat_id}/messages"
         headers = {"Authorization": f"Bot {self.config.token}"}
 
