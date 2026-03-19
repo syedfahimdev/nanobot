@@ -6,6 +6,22 @@ from typing import Any
 
 from nanobot.agent.tools.base import Tool
 
+# Filenames that should never be read/written by agents (secrets, credentials)
+_BLOCKED_FILENAMES = {".env", ".env.local", ".env.production", ".env.staging",
+                      "credentials.json", "service-account.json", "id_rsa",
+                      "id_ed25519", ".npmrc", ".pypirc", ".netrc"}
+
+# Path fragments that indicate sensitive directories
+_BLOCKED_PATH_FRAGMENTS = {"/etc/shadow", "/etc/gshadow"}
+
+
+def _is_sensitive_path(resolved: Path) -> bool:
+    """Check if a resolved path points to a sensitive file."""
+    if resolved.name in _BLOCKED_FILENAMES:
+        return True
+    resolved_str = str(resolved)
+    return any(frag in resolved_str for frag in _BLOCKED_PATH_FRAGMENTS)
+
 
 def _resolve_path(
     path: str,
@@ -18,6 +34,8 @@ def _resolve_path(
     if not p.is_absolute() and workspace:
         p = workspace / p
     resolved = p.resolve()
+    if _is_sensitive_path(resolved):
+        raise PermissionError(f"Access denied: {path} is a sensitive file")
     if allowed_dir:
         all_dirs = [allowed_dir] + (extra_allowed_dirs or [])
         if not any(_is_under(resolved, d) for d in all_dirs):

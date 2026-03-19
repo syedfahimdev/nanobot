@@ -36,6 +36,10 @@ class ExecTool(Tool):
             r"\bkillall\b",                      # killall (use restart tool instead)
             r"\bkill\s+-(?:9|SIGKILL)\b",        # SIGKILL (use restart tool instead)
             r":\(\)\s*\{.*\};\s*:",          # fork bomb
+            r"\.env\b",                      # block access to .env files (secrets)
+            r"\bprintenv\b",                 # block printing env vars
+            r"\b(env|set)\s*$",              # block dumping all env vars
+            r"/etc/(shadow|passwd)",          # block reading system auth files
         ]
         self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace
