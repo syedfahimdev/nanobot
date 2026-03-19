@@ -203,7 +203,10 @@ class AgentLoop:
     # ------------------------------------------------------------------
 
     _TOOLSDNS_SKIP_PATTERNS = re.compile(
-        r"^(/\w|hi\b|hello\b|hey\b|thanks|ok\b|yes\b|no\b|good|how are|what's up)",
+        r"^(/\w|hi\b|hello\b|hey\b|thanks|ok\b|yes\b|no\b|good|how are|what's up"
+        r"|why\b|what do you|who are you|tell me about yourself|how do you|are you"
+        r"|do you|can you help|what can you|nice|cool|great|sure|alright|bye|see you"
+        r"|sorry|excuse me|never ?mind|forget it|stop|wait|hold on|go ahead)",
         re.IGNORECASE,
     )
 
@@ -364,7 +367,7 @@ class AgentLoop:
             lines.append(f"      ... and {len(props) - max_params} more params")
         return "\n".join(lines)
 
-    async def _toolsdns_preflight(self, user_message: str) -> str | None:
+    async def _toolsdns_preflight(self, user_message: str, timeout: float = 8.0) -> str | None:
         """
         Call ToolsDNS server-side preflight endpoint.
 
@@ -374,7 +377,11 @@ class AgentLoop:
         - Multi-strategy parallel search
         - Merge, dedup, rank
         - Context block generation with schemas + call templates
+
+        Can be disabled via NANOBOT_TOOLSDNS_PREFLIGHT=0|false env var.
         """
+        if os.environ.get("NANOBOT_TOOLSDNS_PREFLIGHT", "1").lower() in ("0", "false", "off", "no"):
+            return None
         if not self._toolsdns_config or not self._toolsdns_config.enabled:
             return None
 
@@ -390,7 +397,7 @@ class AgentLoop:
                 "Content-Type": "application/json",
             }
 
-            async with httpx.AsyncClient(timeout=8.0) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(
                     f"{url}/v1/preflight",
                     headers=headers,
@@ -489,6 +496,9 @@ class AgentLoop:
                         if isinstance(result, Exception):
                             logger.error("Parallel tool call failed: {}: {}", tc.name, result)
                             result = f"(Tool call failed: {type(result).__name__}: {result})"
+                        if on_progress:
+                            preview = str(result)[:300]
+                            await on_progress(f"[{tc.name}] → {preview}", tool_hint=True)
                         messages = self.context.add_tool_result(
                             messages, tc.id, tc.name, result
                         )
@@ -520,6 +530,9 @@ class AgentLoop:
                         _repeat_count = 0
 
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    if on_progress:
+                        preview = str(result)[:300]
+                        await on_progress(f"[{tool_call.name}] → {preview}", tool_hint=True)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
@@ -589,13 +602,26 @@ class AgentLoop:
         ))
 
     async def _handle_restart(self, msg: InboundMessage) -> None:
-        """Restart the process in-place via os.execv."""
+        """Restart the process — use systemd if available, else os.execv."""
         await self.bus.publish_outbound(OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content="Restarting...",
         ))
 
         async def _do_restart():
             await asyncio.sleep(1)
+            try:
+                # Try systemd restart first (if running as a service)
+                import subprocess
+                result = subprocess.run(
+                    ["systemctl", "restart", "nanobot"],
+                    capture_output=True, timeout=10,
+                )
+                if result.returncode == 0:
+                    return  # systemd will handle the restart
+                logger.warning("systemctl restart failed (rc={}), falling back to execv", result.returncode)
+            except Exception:
+                pass
+            # Fallback: in-place restart
             try:
                 os.execv(sys.executable, [sys.executable, "-m", "nanobot"] + sys.argv[1:])
             except Exception as e:
@@ -787,13 +813,18 @@ class AgentLoop:
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
-        # ToolsDNS pre-flight: search for relevant tools before LLM starts
-        toolsdns_context = await self._toolsdns_preflight(msg.content)
+        # ToolsDNS pre-flight + speech intel run in parallel for voice channels
+        _is_voice = msg.channel in ("discord_voice", "web_voice")
+        toolsdns_context = await self._toolsdns_preflight(
+            msg.content, timeout=3.0 if _is_voice else 8.0,
+        )
 
         history = session.get_history(max_messages=0)
         enriched_content = msg.content
+        if voice_hint := (msg.metadata or {}).get("voice_instruction"):
+            enriched_content = f"{voice_hint}\n\n{enriched_content}"
         if toolsdns_context:
-            enriched_content = f"{msg.content}\n\n{toolsdns_context}"
+            enriched_content = f"{enriched_content}\n\n{toolsdns_context}"
 
         initial_messages = self.context.build_messages(
             history=history,
@@ -824,10 +855,12 @@ class AgentLoop:
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
 
-        # Voice channel: route response back through TTS instead of text
-        if msg.channel == "discord_voice":
+        # Voice channel: route response back through TTS
+        if msg.channel in ("discord_voice", "web_voice"):
+            preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
+            logger.info("Voice response to {}:{}: {}", msg.channel, msg.sender_id, preview)
             await self.bus.publish_outbound(OutboundMessage(
-                channel="discord_voice", chat_id=msg.chat_id, content=final_content,
+                channel=msg.channel, chat_id=msg.chat_id, content=final_content,
             ))
             return None
 
