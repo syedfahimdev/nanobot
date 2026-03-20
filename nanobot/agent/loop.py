@@ -1563,9 +1563,10 @@ class AgentLoop:
         mark_turn_started(key, msg.channel)
         _turn_t0 = __import__("time").monotonic()
 
-        # ToolsDNS pre-flight disabled for speed testing
         _is_voice = msg.channel in ("discord_voice", "web_voice")
-        toolsdns_context = None  # await self._toolsdns_preflight(msg.content, timeout=3.0 if _is_voice else 8.0)
+        toolsdns_context = await self._toolsdns_preflight(
+            msg.content, timeout=2.0 if _is_voice else 5.0,
+        )
 
         history = session.get_history(max_messages=0)
         enriched_content = msg.content
