@@ -337,6 +337,19 @@ class MemoryConsolidator:
                     session.key,
                     unconsolidated_count,
                 )
+                # Force-consolidate the first batch of messages (bypass token check)
+                end_idx = session.last_consolidated + self._MSG_COUNT_THRESHOLD
+                end_idx = min(end_idx, len(session.messages))
+                chunk = session.messages[session.last_consolidated:end_idx]
+                if chunk:
+                    logger.info("Force consolidating {} messages for {}", len(chunk), session.key)
+                    if await self.consolidate_messages(chunk):
+                        session.last_consolidated = end_idx
+                        self.sessions.save(session)
+                        logger.info("Force consolidation done for {}, last_consolidated={}", session.key, end_idx)
+                    else:
+                        logger.warning("Force consolidation failed for {}", session.key)
+                return
 
             for round_num in range(self._MAX_CONSOLIDATION_ROUNDS):
                 if estimated <= target:
