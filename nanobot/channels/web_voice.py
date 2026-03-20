@@ -192,6 +192,7 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/api/files/{path:.*}", self._file_download_handler)
         self._app.router.add_post("/api/inbox/upload", self._inbox_upload_handler)
         self._app.router.add_get("/api/inbox", self._inbox_list_handler)
+        self._app.router.add_get("/api/toolsdns/health", self._toolsdns_health_handler)
         # Serve React build from /root/mawabot/dist (if exists), fallback to inline HTML
         _react_dist = Path("/root/mawabot/dist")
         if _react_dist.exists():
@@ -1000,6 +1001,24 @@ class WebVoiceChannel(BaseChannel):
         except Exception as e:
             logger.warning("Inbox list error: {}", e)
             return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _toolsdns_health_handler(self, request: web.Request) -> web.Response:
+        """Return ToolsDNS health status + cache stats."""
+        try:
+            from nanobot.config.loader import load_config
+            config = load_config()
+            td = getattr(getattr(config, "tools", None), "toolsdns", None)
+            if not td or not td.url:
+                return web.json_response({"status": "not_configured"})
+
+            from nanobot.agent.tools.toolsdns_cache import get_cache
+            cache = get_cache(td.url, td.api_key)
+            health = await cache.check_health()
+            stats = cache.get_stats()
+            return web.json_response({**health, **stats})
+        except Exception as e:
+            logger.warning("ToolsDNS health error: {}", e)
+            return web.json_response({"status": "error", "error": str(e)})
 
     def _get_active_profile_name(self) -> str:
         """Get the name of the currently active LLM profile."""

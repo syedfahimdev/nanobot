@@ -618,8 +618,10 @@ class AgentLoop:
                     if app_tools:
                         all_results = app_tools
 
-                # Sort by confidence and take top 5
-                all_results.sort(key=lambda t: t.get("confidence", 0), reverse=True)
+                # Filter low-confidence results and sort
+                from nanobot.agent.tools.toolsdns_cache import ToolsDNSCache
+                all_results = ToolsDNSCache.filter_by_confidence(all_results, min_confidence=0.3)
+                all_results.sort(key=lambda t: t.get("confidence", t.get("score", 0)), reverse=True)
                 if all_results:
                     result_block = self._build_context_block(all_results[:5])
                     result_block = await self._enrich_with_hints(result_block)
@@ -1045,6 +1047,11 @@ class AgentLoop:
         self._running = True
         await self._connect_mcp()
         self._schedule_background(self._start_memory_indexer())
+        # Start ToolsDNS health monitor
+        if self._toolsdns_config and self._toolsdns_config.enabled:
+            from nanobot.agent.tools.toolsdns_cache import get_cache
+            cache = get_cache(self._toolsdns_config.url, self._toolsdns_config.api_key)
+            self._schedule_background(cache.start_health_monitor())
         from nanobot.hooks.builtin.backup import start_backup_loop
         self._schedule_background(start_backup_loop(self.workspace))
         logger.info("Agent loop started")

@@ -208,10 +208,18 @@ class MemoryIndexer:
         return count
 
     async def index_all(self) -> int:
-        """Full scan — index all memory files. Skips unchanged ones."""
+        """Full scan — index all memory files. Skips unchanged ones. Detects deletes."""
         files = self._scan_files()
+        current_paths = {str(f) for f in files}
         total = 0
         all_chunks: list[dict] = []
+
+        # Detect deleted files — remove from state
+        deleted = [p for p in list(self._state["file_hashes"]) if p not in current_paths]
+        if deleted:
+            for p in deleted:
+                del self._state["file_hashes"][p]
+            logger.info("Memory indexer: {} files deleted, removed from index state", len(deleted))
 
         for f in files:
             content = f.read_text(encoding="utf-8")
@@ -232,6 +240,8 @@ class MemoryIndexer:
             total = await self._push_chunks(all_chunks)
             self._save_state()
             logger.info("Memory indexer: indexed {} chunks from {} files", total, len(set(c["file_path"] for c in all_chunks)))
+        elif deleted:
+            self._save_state()
 
         return total
 

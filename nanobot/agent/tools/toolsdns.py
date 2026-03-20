@@ -31,6 +31,9 @@ class ToolsDNSTool(Tool):
         self._timeout = timeout
         self._turn_calls: list[dict] = []  # tracks tool calls within a turn
         self._schema_returned_for: set[str] = set()  # tracks tool_ids we already returned schema for
+        # Use shared cache for schemas and hints
+        from nanobot.agent.tools.toolsdns_cache import get_cache
+        self._cache = get_cache(base_url, api_key)
 
     @property
     def name(self) -> str:
@@ -296,10 +299,9 @@ class ToolsDNSTool(Tool):
             if not (isinstance(v, str) and self._PLACEHOLDER_RE.match(v))
         }
 
-        # Step 3: fetch schema and strip unknown params
+        # Step 3: fetch schema (cached) and strip unknown params
         try:
-            data = await self._get(f"/v1/tool/{tool_id}")
-            schema = data.get("input_schema", data.get("inputSchema", {}))
+            schema = await self._cache.get_schema(tool_id)
             valid_params = set(schema.get("properties", {}).keys())
             if valid_params:
                 stripped = {k: v for k, v in arguments.items() if k in valid_params}
