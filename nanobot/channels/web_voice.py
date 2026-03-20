@@ -438,10 +438,19 @@ class WebVoiceChannel(BaseChannel):
                 },
             })
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            logger.warning("API error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    # Allowlisted voice models for input validation
+    _VALID_TTS = frozenset({
+        "aura-2-luna-en", "aura-2-asteria-en", "aura-2-zeus-en",
+        "aura-2-orion-en", "aura-2-stella-en", "aura-2-hera-en",
+        "aura-asteria-en", "aura-luna-en", "aura-zeus-en", "aura-orion-en",
+    })
+    _VALID_STT = frozenset({"nova-3", "nova-2", "nova", "enhanced", "base"})
 
     async def _config_update_handler(self, request: web.Request) -> web.Response:
-        """Update config values from the settings UI."""
+        """Update config values from the settings UI. Only whitelisted fields accepted."""
         try:
             import json as _json
             body = await request.json()
@@ -449,12 +458,12 @@ class WebVoiceChannel(BaseChannel):
             cfg = _json.loads(config_path.read_text())
 
             changed = []
-            # Update voice settings
-            if "ttsModel" in body:
+            # Update voice settings — validated against allowlist
+            if "ttsModel" in body and body["ttsModel"] in self._VALID_TTS:
                 cfg.setdefault("channels", {}).setdefault("web_voice", {})["ttsModel"] = body["ttsModel"]
                 self.config.tts_model = body["ttsModel"]
                 changed.append("ttsModel")
-            if "sttModel" in body:
+            if "sttModel" in body and body["sttModel"] in self._VALID_STT:
                 cfg.setdefault("channels", {}).setdefault("web_voice", {})["sttModel"] = body["sttModel"]
                 self.config.stt_model = body["sttModel"]
                 changed.append("sttModel")
@@ -464,7 +473,8 @@ class WebVoiceChannel(BaseChannel):
 
             return web.json_response({"ok": True, "changed": changed})
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            logger.warning("API error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
 
     def _get_active_profile_name(self) -> str:
         """Get the name of the currently active LLM profile."""
@@ -490,7 +500,8 @@ class WebVoiceChannel(BaseChannel):
                 }
             return web.json_response({"profiles": profiles})
         except Exception as e:
-            return web.json_response({"profiles": {}, "error": str(e)})
+            logger.warning("Profiles API error: {}", e)
+            return web.json_response({"profiles": {}}, status=500)
 
     # ── WebSocket handler ──────────────────────────────────────────
 
