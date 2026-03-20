@@ -453,6 +453,15 @@ class AgentLoop:
         text = user_message.strip()
         if len(text) < 10 or self._TOOLSDNS_SKIP_PATTERNS.match(text):
             return None
+        # Skip conversational messages that have no action intent
+        # (saves 1-2s per message on voice channels)
+        if not re.search(
+            r"\b(check|send|create|search|find|get|show|list|open|set|book|schedule|fetch|"
+            r"delete|update|remove|add|play|read|write|call|email|calendar|weather|stock|"
+            r"news|reddit|github|slack|salesforce|browse|navigate|report|remind|task)\b",
+            text, re.I,
+        ):
+            return None
 
         # Check preflight cache first
         cached = self._preflight_cache.get(text)
@@ -1554,11 +1563,9 @@ class AgentLoop:
         mark_turn_started(key, msg.channel)
         _turn_t0 = __import__("time").monotonic()
 
-        # ToolsDNS pre-flight + speech intel run in parallel for voice channels
+        # ToolsDNS pre-flight disabled for speed testing
         _is_voice = msg.channel in ("discord_voice", "web_voice")
-        toolsdns_context = await self._toolsdns_preflight(
-            msg.content, timeout=3.0 if _is_voice else 8.0,
-        )
+        toolsdns_context = None  # await self._toolsdns_preflight(msg.content, timeout=3.0 if _is_voice else 8.0)
 
         history = session.get_history(max_messages=0)
         enriched_content = msg.content

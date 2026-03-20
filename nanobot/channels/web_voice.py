@@ -485,12 +485,12 @@ class WebVoiceChannel(BaseChannel):
                             "smart_format": "true",
                             "punctuate": "true",
                             "interim_results": "true",
-                            "utterance_end_ms": "2000",
+                            "utterance_end_ms": "1200",
                             "vad_events": "true",
                             "encoding": client_encoding,
                             "sample_rate": client_sample_rate,
                             "channels": "1",
-                            "endpointing": "800",
+                            "endpointing": "500",
                         }
 
                         try:
@@ -595,6 +595,13 @@ class WebVoiceChannel(BaseChannel):
                         text = data.get("text", "").strip()
                         if text:
                             self._enqueue_message(session_id, text)
+
+                    # Forward Deepgram keepalive to STT WebSocket
+                    elif data.get("type") == "KeepAlive" and dg_ws:
+                        try:
+                            await dg_ws.send('{"type": "KeepAlive"}')
+                        except Exception:
+                            pass
 
                 elif msg.type == aiohttp.WSMsgType.BINARY:
                     if dg_ws:
