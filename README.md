@@ -1551,6 +1551,57 @@ remember_media(
 
 Media files are copied to `memory/media/` for persistence. Summaries in `MEDIA.md` are automatically indexed by ToolsDNS for semantic search.
 
+### RAG Inbox
+
+Upload documents into categorized folders and Mawa uses them as context when writing emails, answering questions, or doing research.
+
+```
+~/.nanobot/workspace/inbox/
+├── work/          ← Work docs, policies, client info
+├── personal/      ← Personal docs, receipts, references
+└── general/       ← General knowledge
+```
+
+**Hybrid indexing pipeline:**
+1. Text files (MD, TXT, CSV, JSON) → chunked and indexed directly
+2. Binary files (PDF, DOCX, XLSX) → text extracted + LLM summary generated + both indexed
+3. All chunks pushed to ToolsDNS semantic embeddings for search
+
+**Supported formats:** PDF (PyMuPDF), DOCX (python-docx), XLSX (openpyxl), CSV, TXT, MD, JSON, Python, JavaScript, HTML
+
+**How it helps:**
+- "Draft an email to Ross about expense policy" → agent searches `work/` inbox → finds company handbook → drafts with accurate policy details
+- "What was on that receipt?" → agent searches `personal/` inbox → finds receipt summary
+
+Upload via the web UI (drag-and-drop) or drop files directly into the folders.
+
+### Frontend (Mawabot)
+
+The web dashboard provides a full control center:
+
+| View | What it shows |
+|------|-------------|
+| **Home** | Dashboard with greeting, editable quick actions, goals preview, memory health, activity timeline, connection status |
+| **Chat** | Markdown-rendered messages, generative UI tool cards (email, calendar, weather, news), file attachment detection, streaming with cursor |
+| **Goals** | Interactive task list — tap to complete, add new goals/subtasks, delete items |
+| **Schedule** | Briefing toggles (morning/evening/weekly) + cron jobs with status |
+| **Tools** | Full catalog with type badges, call counts, success rates |
+| **Activity** | Detailed timeline from HISTORY.md — every tool call with name/status/duration + conversation summaries |
+| **Inbox** | Drag-and-drop file upload to work/personal/general folders |
+| **Agents** | Live boardroom — active subagent progress, tool usage pills, completed tasks |
+| **Settings** | Profile, Memory (search + export), Avatar, Voice, Appearance (theme/accent/notifications), Connection |
+
+**Mobile features:**
+- Collapsible sidebar (hamburger menu in bottom-left)
+- Visual viewport handling — keyboard doesn't hide input or messages
+- Bottom tab bar: Home, Chat, Goals, Settings + More menu
+
+**Persistence:**
+- Chat history (last 200 messages) saved to localStorage
+- Activity log (last 100 entries) saved to localStorage
+- Tool result cards preserved across refreshes
+- Settings, quick actions, theme all persisted
+
 ### API Endpoints
 
 | Endpoint | Method | Description |
@@ -1558,9 +1609,18 @@ Media files are copied to `memory/media/` for persistence. Summaries in `MEDIA.m
 | `/api/config` | GET | Full safe config for settings UI |
 | `/api/config` | POST | Update voice settings |
 | `/api/memory` | GET | Memory layer stats + tool scores |
+| `/api/memory/search` | POST | Semantic search across all memory via ToolsDNS |
+| `/api/memory/export` | GET | Download all memory files as JSON |
 | `/api/memory/clear-short-term` | POST | Archive and clear today's memory |
-| `/api/events` | POST | Ingest external events via webhook |
+| `/api/events` | POST | Ingest external events via webhook (HMAC-secured) |
 | `/api/goals` | GET | Goal list and progress |
+| `/api/goals` | POST | Add, complete, or remove goals |
+| `/api/inbox` | GET | List all inbox files across folders |
+| `/api/inbox/upload` | POST | Upload files to inbox (multipart, 50MB max) |
+| `/api/activity` | GET | Detailed tool calls + summaries from HISTORY.md |
+| `/api/cron` | GET | Scheduled cron jobs with status |
+| `/api/tools` | GET | Full tool catalog with success rates |
+| `/api/files/{path}` | GET | Download/preview workspace files |
 | `/api/profiles` | GET | Available LLM profiles |
 | `/health` | GET | Health check |
 
