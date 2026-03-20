@@ -242,17 +242,36 @@ All config in `/root/.nanobot/config.json`. Key sections:
 - `agent.model` — LLM model (via LiteLLM)
 - `agent.routing_model` — Fast model for iteration 1
 
+## Token Budget
+
+System prompt optimized for minimal token usage (~2.2K voice, ~2.0K text):
+
+| Component | Tokens | Notes |
+|-----------|--------|-------|
+| Identity | 289 | Core nanobot boilerplate |
+| Voice Mode | 189 | Voice channels only |
+| SOUL.md | ~200 | Personality + delegation rules (merged with AGENTS.md) |
+| AGENTS.md | ~100 | Cron/heartbeat only (delegation merged into SOUL.md) |
+| USER.md | ~250 | Core profile only (car/stock rules in separate files) |
+| TOOLS.md | ~80 | Minimal — most rules enforced by code |
+| Memory | ~25 | MEMORY.md content |
+| Skills | ~1000 | Active skills + summary |
+
+Task-specific rules (car buying, stock market) are in `rules/*.md` — only loaded when the agent reads them for a relevant task, not injected every turn.
+
 ## Workspace Files
 
 Located at `/root/.nanobot/workspace/`:
 
 | File | Purpose |
 |------|---------|
-| `SOUL.md` | Agent personality and delegation model |
-| `USER.md` | User profile, preferences, rules |
-| `AGENTS.md` | Operating rules and workflows |
-| `TOOLS.md` | Tool usage notes and ToolsDNS policy |
+| `SOUL.md` | Personality, delegation model, core rules |
+| `USER.md` | Core user profile (name, timezone, email rules) |
+| `AGENTS.md` | Cron and heartbeat instructions |
+| `TOOLS.md` | Minimal tool routing rules |
 | `HEARTBEAT.md` | Periodic tasks |
+| `rules/car-buying.md` | Car research rules (loaded on demand) |
+| `rules/stock-market.md` | Stock analysis rules (loaded on demand) |
 | `memory/MEMORY.md` | Long-term facts |
 | `memory/HISTORY.md` | Time-indexed activity log |
 | `activity.jsonl` | Turn lifecycle data |
