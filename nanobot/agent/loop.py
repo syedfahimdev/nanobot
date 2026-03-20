@@ -324,10 +324,25 @@ class AgentLoop:
         # WhatsApp
         (re.compile(r"\b(whatsapp|whats app)\b", re.I),
          ["WHATSAPP_SEND_MESSAGE", "whatsapp send message"]),
+        # Weather
+        (re.compile(r"\b(weather|temperature|forecast|rain|snow|humid|wind)\b", re.I),
+         ["WEATHERMAP_WEATHER", "WEATHERMAP_GEOCODE_LOCATION", "weather temperature forecast"]),
         # Generic send/notify — broad fallback
         (re.compile(r"\b(notify|alert|inform|tell)\b.*\b(someone|team|user|them)\b", re.I),
          ["send notification", "SLACK_SEND_MESSAGE", "GMAIL_SEND_EMAIL"]),
     ]
+
+    # ── Meta-tools to filter from preflight results ──
+    _META_TOOL_PREFIXES = frozenset({
+        "COMPOSIO_SEARCH_TOOLS",
+        "COMPOSIO_GET_TOOL_SCHEMAS",
+        "COMPOSIO_MANAGE_CONNECTIONS",
+        "COMPOSIO_MULTI_EXECUTE_TOOL",
+        "COMPOSIO_CHECK_CONNECTION",
+    })
+
+    # ── App prefix pattern: Composio tools follow APPNAME_TOOLACTION ──
+    _APP_PREFIX_RE = re.compile(r"^([A-Z][A-Z0-9]+)_")
 
     @staticmethod
     def _clean_query(text: str) -> str:
@@ -378,18 +393,38 @@ class AgentLoop:
             lines.append(f"      ... and {len(props) - max_params} more params")
         return "\n".join(lines)
 
+    @staticmethod
+    def _extract_app_prefix(tool_name: str) -> str | None:
+        """Extract app prefix from tool name (e.g., GMAIL_SEND_EMAIL → GMAIL)."""
+        m = AgentLoop._APP_PREFIX_RE.match(tool_name)
+        return m.group(1) if m else None
+
+    @staticmethod
+    def _detect_dominant_app(tools: list[dict]) -> str | None:
+        """Find the most common app prefix among non-meta tools."""
+        from collections import Counter
+        prefixes = []
+        for t in tools:
+            name = t.get("name", "")
+            if name in AgentLoop._META_TOOL_PREFIXES:
+                continue
+            prefix = AgentLoop._extract_app_prefix(name)
+            if prefix and prefix != "COMPOSIO":
+                prefixes.append(prefix)
+        if not prefixes:
+            return None
+        # Return the most common prefix
+        counts = Counter(prefixes)
+        return counts.most_common(1)[0][0]
+
     async def _toolsdns_preflight(self, user_message: str, timeout: float = 8.0) -> str | None:
         """
-        Call ToolsDNS server-side preflight endpoint.
+        Two-tier ToolsDNS preflight with app-aware fallback.
 
-        The /v1/preflight endpoint handles all intelligence:
-        - Query cleaning (strip emails, URLs, dates)
-        - Intent extraction (regex → tool-name + descriptive queries)
-        - Multi-strategy parallel search
-        - Merge, dedup, rank
-        - Context block generation with schemas + call templates
-
-        Can be disabled via NANOBOT_TOOLSDNS_PREFLIGHT=0|false env var.
+        Tier 1: Standard preflight search across all tools.
+        Tier 2: If results only contain meta-tools (COMPOSIO_SEARCH_TOOLS etc.),
+                 detect the app from user intent and do a targeted search
+                 within that app's tools.
         """
         if os.environ.get("NANOBOT_TOOLSDNS_PREFLIGHT", "1").lower() in ("0", "false", "off", "no"):
             return None
@@ -416,6 +451,7 @@ class AgentLoop:
             }
 
             async with httpx.AsyncClient(timeout=timeout) as client:
+                # ── Tier 1: Preflight with context_block format ──
                 resp = await client.post(
                     f"{url}/v1/preflight",
                     headers=headers,
@@ -434,26 +470,171 @@ class AgentLoop:
                 resp.raise_for_status()
                 data = resp.json()
 
-            if not data.get("found"):
-                self._preflight_cache.set(text, None)
-                return None
+            # Check tool names in context_block for meta-tools
+            context_block = data.get("context_block", "")
+            has_meta = any(meta in context_block for meta in self._META_TOOL_PREFIXES)
 
-            context_block = data.get("context_block")
-            if not context_block:
-                self._preflight_cache.set(text, None)
-                return None
+            # Check if intent map detects a specific app for this query
+            app_prefix = None
+            intent_queries = self._extract_intent_queries(text)
+            for iq in intent_queries:
+                prefix = self._extract_app_prefix(iq)
+                if prefix and prefix != "COMPOSIO":
+                    app_prefix = prefix
+                    break
 
-            queries = data.get("queries_used", [])
-            tools_count = len(data.get("tools", []))
-            query_info = " + ".join(queries[:3])
-            logger.info("ToolsDNS preflight: {} tools found via {} queries ('{}')",
-                         tools_count, len(queries), query_info[:80])
-            self._preflight_cache.set(text, context_block)
-            return context_block
+            # If intent map detected an app, check if tier 1 results contain it
+            app_missing = False
+            if app_prefix and context_block:
+                app_missing = (app_prefix + "_") not in context_block
+
+            if data.get("found") and context_block and not has_meta and not app_missing:
+                # Tier 1 found relevant tools — use as-is
+                queries = data.get("queries_used", [])
+                logger.info("ToolsDNS preflight: tools found via '{}'",
+                             " + ".join(queries[:3])[:80])
+                self._preflight_cache.set(text, context_block)
+                return context_block
+
+            # ── Tier 2: Targeted search to find real tools ──
+            # Triggered when: meta-tools detected, or expected app missing from results
+
+            logger.info("ToolsDNS tier 2: {} for '{}'",
+                         f"app={app_prefix}" if app_prefix else "broad re-search",
+                         text[:60])
+            try:
+                all_results: list[dict] = []
+                seen_ids: set[str] = set()
+
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    # Strategy A: Fetch exact tools by ID from intent map
+                    # (bypasses semantic search — guaranteed to find the right tools)
+                    exact_tool_names = [
+                        iq for iq in intent_queries
+                        if self._extract_app_prefix(iq) is not None
+                    ]
+                    for tool_name in exact_tool_names:
+                        tool_id = f"tooldns__{tool_name}"
+                        if tool_id in seen_ids:
+                            continue
+                        try:
+                            resp_t = await client.get(
+                                f"{url}/v1/tool/{tool_id}",
+                                headers=headers,
+                            )
+                            if resp_t.status_code == 200:
+                                tool_data = resp_t.json()
+                                tool_data["confidence"] = 0.95  # high confidence — exact match
+                                seen_ids.add(tool_id)
+                                all_results.append(tool_data)
+                        except Exception:
+                            pass
+
+                    # Strategy B: Semantic search as supplement
+                    cleaned = self._clean_query(text)
+                    search_queries = []
+                    if app_prefix:
+                        search_queries.append(f"{app_prefix} {cleaned}")
+                    # Add descriptive intent queries (not tool names)
+                    for iq in intent_queries:
+                        if self._extract_app_prefix(iq) is None and iq not in search_queries:
+                            search_queries.append(iq)
+                    if cleaned not in search_queries:
+                        search_queries.append(cleaned)
+
+                    for sq in search_queries[:3]:
+                        resp3 = await client.post(
+                            f"{url}/v1/search",
+                            headers=headers,
+                            json={"query": sq, "top_k": 8, "threshold": 0.3},
+                        )
+                        resp3.raise_for_status()
+                        for t in resp3.json().get("results", []):
+                            tid = t.get("id", t.get("name", ""))
+                            if tid not in seen_ids and t.get("name") not in self._META_TOOL_PREFIXES:
+                                seen_ids.add(tid)
+                                all_results.append(t)
+
+                # If we know the app, prefer tools from that app
+                if app_prefix:
+                    app_tools = [t for t in all_results if t.get("name", "").startswith(app_prefix + "_")]
+                    if app_tools:
+                        all_results = app_tools
+
+                # Sort by confidence and take top 5
+                all_results.sort(key=lambda t: t.get("confidence", 0), reverse=True)
+                if all_results:
+                    result_block = self._build_context_block(all_results[:5])
+                    names = [t["name"] for t in all_results[:5]]
+                    logger.info("ToolsDNS tier 2: found {} tools: {}", len(names), ", ".join(names))
+                    self._preflight_cache.set(text, result_block)
+                    return result_block
+            except Exception as e:
+                logger.debug("ToolsDNS tier 2 search failed: {}", e)
+
+            # Fallback: return original context_block if available
+            if data.get("found") and context_block:
+                self._preflight_cache.set(text, context_block)
+                return context_block
+
+            self._preflight_cache.set(text, None)
+            return None
 
         except Exception as e:
             logger.debug("ToolsDNS preflight failed (non-blocking): {}", e)
             return None
+
+    @staticmethod
+    def _build_context_block(tools: list[dict]) -> str:
+        """Build a context block matching the ToolsDNS preflight format."""
+        lines = ["[ToolsDNS Auto-Discovery] — tools already found, DO NOT search again.\n"]
+
+        # Build call template for the best match
+        if tools:
+            best = tools[0]
+            best_name = best.get("name", "unknown")
+            best_id = f"tooldns__{best_name}"
+            # Build example arguments from required params
+            schema = best.get("input_schema", {})
+            required = schema.get("required", [])
+            props = schema.get("properties", {})
+            example_args = {}
+            for param in required:
+                ptype = props.get(param, {}).get("type", "string")
+                if ptype == "string":
+                    example_args[param] = f"<{param}>"
+                elif ptype == "number":
+                    example_args[param] = 0
+                elif ptype == "boolean":
+                    example_args[param] = True
+                else:
+                    example_args[param] = f"<{param}>"
+            import json as _json
+            args_str = _json.dumps(example_args) if example_args else "{}"
+            best_desc = best.get("description", "").split("\n")[0][:80]
+            lines.append(f'>>> CALL THIS NOW: toolsdns(action="call", tool_id="{best_id}", arguments={args_str})')
+            lines.append(f"    (tool: {best_name} — {best_desc})\n")
+
+        lines.append("RULES: Your FIRST tool call must be toolsdns action=call. Do NOT action=search. Do NOT action=get. Do NOT use mcp_tooldns_* tools.\n")
+
+        for i, t in enumerate(tools):
+            name = t.get("name", "unknown")
+            tool_id = f"tooldns__{name}"
+            desc = t.get("description", "").split("\n")[0][:200]
+            confidence = t.get("confidence", 0)
+            label = "BEST MATCH" if i == 0 else f"Match {i + 1}"
+            lines.append(f"{label}  [{confidence:.0%}]  TOOL_ID: {tool_id}")
+            lines.append(f"  {name} — {desc}")
+
+            schema = t.get("input_schema", {})
+            if schema and schema.get("properties"):
+                for pname, info in list(schema["properties"].items())[:10]:
+                    ptype = info.get("type", "any")
+                    pdesc = info.get("description", "").split(".")[0].split("\n")[0][:60]
+                    req = " [REQUIRED]" if pname in schema.get("required", []) else ""
+                    lines.append(f"    {pname}: {ptype}{req} — {pdesc}")
+            lines.append("")
+        return "\n".join(lines)
 
     async def _run_agent_loop(
         self,

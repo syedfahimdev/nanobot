@@ -1,7 +1,7 @@
 // Service worker for Jarvis Voice PWA
 // Keeps the app alive in background and enables installability
 
-const CACHE_NAME = 'jarvis-voice-v2';
+const CACHE_NAME = 'mawa-voice-v1';
 const CACHE_URLS = ['/'];
 
 self.addEventListener('install', (event) => {

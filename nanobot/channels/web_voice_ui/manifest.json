@@ -1,13 +1,13 @@
 {
-  "name": "Jarvis Voice Assistant",
-  "short_name": "Jarvis",
-  "description": "Personal AI voice assistant",
+  "name": "MAWA Voice Interface",
+  "short_name": "MAWA",
+  "description": "AI Voice Assistant - Sci-Fi HUD Interface",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0a0a0f",
-  "theme_color": "#1a1a2e",
+  "background_color": "#000000",
+  "theme_color": "#000000",
   "orientation": "any",
-  "categories": ["productivity", "utilities"],
+  "categories": ["productivity", "utilities", "ai"],
   "icons": [
     {
       "src": "/icon-192.png",
@@ -20,6 +20,15 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Start Listening",
+      "short_name": "Listen",
+      "description": "Start voice input",
+      "url": "/?action=listen",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
     }
   ]
 }

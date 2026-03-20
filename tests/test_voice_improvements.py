@@ -265,6 +265,92 @@ class TestStreamChat:
         assert chunks[0].finish_reason == "stop"
 
 
+# ── Two-tier preflight: meta-tool filtering + app detection ──
+
+class TestTwoTierPreflight:
+    def _make_loop(self):
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.bus.queue import MessageBus
+
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        workspace = MagicMock()
+        workspace.__truediv__ = MagicMock(return_value=MagicMock())
+
+        with patch("nanobot.agent.loop.ContextBuilder"), \
+             patch("nanobot.agent.loop.SessionManager"), \
+             patch("nanobot.agent.loop.SubagentManager") as MockSubMgr:
+            MockSubMgr.return_value.cancel_by_session = AsyncMock(return_value=0)
+            MockSubMgr.return_value.spawn = AsyncMock(return_value="spawned")
+            MockSubMgr.return_value.get_running_tasks.return_value = []
+            loop = AgentLoop(bus=bus, provider=provider, workspace=workspace)
+        return loop
+
+    def test_extract_app_prefix(self):
+        from nanobot.agent.loop import AgentLoop
+        assert AgentLoop._extract_app_prefix("GMAIL_SEND_EMAIL") == "GMAIL"
+        assert AgentLoop._extract_app_prefix("WEATHERMAP_WEATHER") == "WEATHERMAP"
+        assert AgentLoop._extract_app_prefix("GOOGLECALENDAR_CREATE_EVENT") == "GOOGLECALENDAR"
+        assert AgentLoop._extract_app_prefix("browser_navigate") is None
+        assert AgentLoop._extract_app_prefix("work_order") is None
+
+    def test_meta_tool_detection(self):
+        from nanobot.agent.loop import AgentLoop
+        meta_names = AgentLoop._META_TOOL_PREFIXES
+        assert "COMPOSIO_SEARCH_TOOLS" in meta_names
+        assert "COMPOSIO_GET_TOOL_SCHEMAS" in meta_names
+        assert "GMAIL_SEND_EMAIL" not in meta_names
+
+    def test_weather_in_intent_map(self):
+        loop = self._make_loop()
+        queries = loop._extract_intent_queries("what's the weather in New York")
+        tool_names = [q for q in queries if q.startswith("WEATHERMAP")]
+        assert len(tool_names) > 0, "Weather intent should extract WEATHERMAP tool names"
+
+    def test_build_context_block(self):
+        loop = self._make_loop()
+        tools = [
+            {
+                "name": "GMAIL_SEND_EMAIL",
+                "description": "Sends an email via Gmail API",
+                "confidence": 0.81,
+                "how_to_call": {"server": "composio", "tool_name": "GMAIL_SEND_EMAIL"},
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "recipient_email": {"type": "string", "description": "Email address"},
+                        "subject": {"type": "string", "description": "Subject line"},
+                    },
+                    "required": ["recipient_email"],
+                },
+            }
+        ]
+        block = loop._build_context_block(tools)
+        assert "GMAIL_SEND_EMAIL" in block
+        assert "toolsdns" in block
+        assert "recipient_email" in block
+        assert "81%" in block
+
+    def test_detect_dominant_app(self):
+        from nanobot.agent.loop import AgentLoop
+        tools = [
+            {"name": "GMAIL_SEND_EMAIL"},
+            {"name": "GMAIL_FETCH_EMAILS"},
+            {"name": "COMPOSIO_SEARCH_TOOLS"},
+            {"name": "GMAIL_REPLY_TO_THREAD"},
+        ]
+        assert AgentLoop._detect_dominant_app(tools) == "GMAIL"
+
+    def test_detect_dominant_app_ignores_meta(self):
+        from nanobot.agent.loop import AgentLoop
+        tools = [
+            {"name": "COMPOSIO_SEARCH_TOOLS"},
+            {"name": "COMPOSIO_GET_TOOL_SCHEMAS"},
+        ]
+        assert AgentLoop._detect_dominant_app(tools) is None
+
+
 # ── Improvement #5: App name config ──
 
 class TestAppNameConfig:
