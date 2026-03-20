@@ -132,12 +132,12 @@ Your workspace is at: {workspace_path}
 - Follow the skill's workflow EXACTLY — do not skip phases, do not guess parameters.
 - DO NOT spawn subagents for skill workflows — handle all phases yourself in the main conversation.
 - Gather ALL required info from the user BEFORE calling execution tools.
-- When a tool generates a file, extract the `local_path` from its response — this is the file location on disk.
-- Try calling get_file if available. If it fails, that's OK — you still have the local_path.
-- CRITICAL: In your final response, you MUST include the FULL absolute file path from the generate tool's response.
-  Example: "Your work order is ready: /tmp/work-orders/Presque Isle -WO-03-20-2026.xlsx"
-  The path MUST start with / (e.g., /tmp/ or /root/). Without the full path, the download card won't appear.
-  If the generate tool returned local_path="/tmp/work-orders/X.xlsx", put exactly that in your message.
+- When a tool generates a file, extract the `local_path` from its response.
+- After getting the local_path, COPY the file to the workspace for reliable access:
+  Call exec with: cp "LOCAL_PATH" /root/.nanobot/workspace/memory/media/
+- Then in your response, include the workspace path: /root/.nanobot/workspace/memory/media/FILENAME.xlsx
+- CRITICAL: The path MUST start with / and be inside the workspace. Without the full path, the download card won't appear.
+- Try calling get_file if available. If it fails, that's OK — the copied file is accessible via the workspace.
 
 Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
 
