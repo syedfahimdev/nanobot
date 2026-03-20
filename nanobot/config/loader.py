@@ -69,6 +69,12 @@ def load_config(config_path: Path | None = None) -> Config:
         try:
             data = _load_raw(path)
             data = _migrate_config(data)
+            # Resolve vault references (${vault:key} → actual value)
+            try:
+                from nanobot.setup.vault import resolve_vault_refs
+                data = resolve_vault_refs(data)
+            except Exception:
+                pass  # Vault not set up yet — use raw values
             return Config.model_validate(data)
         except Exception as e:
             print(f"Warning: Failed to load config from {path}: {e}")

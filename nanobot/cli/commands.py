@@ -331,6 +331,30 @@ def setup():
     run_setup_wizard(config_path, workspace)
 
 
+@app.command()
+def vault():
+    """Move API keys from config.json into an encrypted vault."""
+    from nanobot.config.loader import get_config_path
+    from nanobot.setup.vault import migrate_config_to_vault, load_vault
+
+    config_path = get_config_path()
+    if not config_path.exists():
+        console.print("[yellow]Config not found. Run 'nanobot onboard' first.[/yellow]")
+        raise typer.Exit(1)
+
+    count = migrate_config_to_vault(config_path)
+    if count > 0:
+        console.print(f"[green]✓[/green] Moved {count} API keys from config.json to encrypted vault")
+        console.print(f"[dim]Vault: ~/.nanobot/.vault (chmod 600)[/dim]")
+        console.print(f"[dim]Config now uses ${{vault:...}} references[/dim]")
+    else:
+        vault_data = load_vault()
+        if vault_data:
+            console.print(f"[green]✓[/green] Vault already active — {len(vault_data)} secrets stored")
+        else:
+            console.print("[dim]No secrets found in config.json to migrate[/dim]")
+
+
 def _merge_missing_defaults(existing: Any, defaults: Any) -> Any:
     """Recursively fill in missing values from defaults without overwriting user config."""
     if not isinstance(existing, dict) or not isinstance(defaults, dict):
