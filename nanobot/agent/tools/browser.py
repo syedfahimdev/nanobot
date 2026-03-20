@@ -1,11 +1,11 @@
-"""Native Playwright browser tool — local browser automation with persistent profiles.
+"""Native Playwright browser tool — visible via noVNC with persistent profile.
 
 Features:
+  - Live browser view via noVNC (accessible through Tailscale)
   - Persistent browser profile (cookies, sessions survive restarts)
+  - Auto-screenshot on every action (fallback for mobile)
   - Location/geolocation spoofing
   - Full page scraping + link extraction
-  - Multi-tab support
-  - Screenshot with full page option
   - No ToolsDNS, no Composio, no MCP — runs Playwright directly
 """
 
@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -30,12 +32,44 @@ _lock = asyncio.Lock()
 # Persistent profile directory
 _PROFILE_DIR = Path.home() / ".nanobot" / "browser-profile"
 
+# noVNC display configuration
+_DISPLAY = os.environ.get("DISPLAY", ":99")
+_NOVNC_PORT = 6080
+_SCREENSHOT_DIR = Path.home() / ".nanobot" / "workspace" / "memory" / "media"
+
+
+def _get_live_url() -> str:
+    """Get the noVNC live URL via Tailscale."""
+    try:
+        result = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            import json as _j
+            data = _j.loads(result.stdout)
+            dns = data.get("Self", {}).get("DNSName", "").rstrip(".")
+            if dns:
+                return f"https://{dns}:{_NOVNC_PORT}/vnc.html?autoconnect=true&resize=scale"
+    except Exception:
+        pass
+    # Fallback to IP
+    try:
+        result = subprocess.run(
+            ["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            ip = result.stdout.strip().split("\n")[0]
+            return f"http://{ip}:{_NOVNC_PORT}/vnc.html?autoconnect=true&resize=scale"
+    except Exception:
+        pass
+    return f"http://localhost:{_NOVNC_PORT}/vnc.html?autoconnect=true"
+
 
 async def _ensure_browser(
-    headless: bool = True,
     geolocation: dict | None = None,
 ):
-    """Lazy-init: start Playwright browser with persistent profile."""
+    """Lazy-init: start Playwright browser with persistent profile on Xvfb display."""
     global _playwright, _browser, _context, _page
     if _page is not None:
         return _page
@@ -48,9 +82,13 @@ async def _ensure_browser(
 
             _PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
+            # Set DISPLAY so browser renders on the Xvfb that noVNC is streaming
+            os.environ["DISPLAY"] = _DISPLAY
+
             _playwright = await async_playwright().start()
 
             # Use persistent context for cookie/session persistence
+            # Run HEADED on Xvfb — visible via noVNC
             context_opts: dict[str, Any] = {
                 "viewport": {"width": 1280, "height": 720},
                 "user_agent": (
@@ -67,10 +105,16 @@ async def _ensure_browser(
                 context_opts["geolocation"] = geolocation
                 context_opts["permissions"] = ["geolocation"]
 
+            # Headed mode on Xvfb — visible via noVNC
             _context = await _playwright.chromium.launch_persistent_context(
                 str(_PROFILE_DIR),
-                headless=headless,
-                args=["--no-sandbox", "--disable-gpu", "--disable-blink-features=AutomationControlled"],
+                headless=False,  # HEADED — renders on Xvfb, visible via noVNC
+                args=[
+                    "--no-sandbox", "--disable-gpu",
+                    "--disable-blink-features=AutomationControlled",
+                    f"--display={_DISPLAY}",
+                    "--window-size=1280,720",
+                ],
                 **context_opts,
             )
 
@@ -100,6 +144,19 @@ async def _close_browser():
 
 class BrowserTool(Tool):
     """Browse the web with a persistent profile — cookies and logins are remembered."""
+
+    _screenshot_counter = 0
+
+    async def _save_screenshot(self, page, action_name: str) -> str | None:
+        """Auto-save screenshot after actions as fallback for mobile users."""
+        try:
+            _SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+            self._screenshot_counter += 1
+            path = _SCREENSHOT_DIR / f"browser_{self._screenshot_counter:03d}_{action_name}.png"
+            await page.screenshot(path=str(path), type="png")
+            return str(path)
+        except Exception:
+            return None
 
     @property
     def name(self) -> str:
@@ -205,7 +262,15 @@ class BrowserTool(Tool):
                 title = await page.title()
                 status = resp.status if resp else "unknown"
                 current_url = page.url
-                return f"Navigated to {current_url}\nTitle: {title}\nStatus: {status}"
+                live_url = _get_live_url()
+                # Auto-screenshot as fallback
+                await self._save_screenshot(page, "navigate")
+                return (
+                    f"Navigated to {current_url}\n"
+                    f"Title: {title}\n"
+                    f"Status: {status}\n"
+                    f"Live view: {live_url}"
+                )
 
             elif action == "screenshot":
                 screenshot = await page.screenshot(type="png", full_page=full_page)
@@ -226,12 +291,14 @@ class BrowserTool(Tool):
                 except Exception:
                     pass
                 title = await page.title()
+                await self._save_screenshot(page, "click")
                 return f"Clicked '{selector}'. Page: {title} ({page.url})"
 
             elif action == "fill":
                 if not selector or value is None:
                     return "Error: selector and value required for fill action."
                 await page.fill(selector, value, timeout=timeout)
+                await self._save_screenshot(page, "fill")
                 return f"Filled '{selector}' with value."
 
             elif action == "text":
