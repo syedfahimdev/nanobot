@@ -491,6 +491,8 @@ class WebVoiceChannel(BaseChannel):
                             "sample_rate": client_sample_rate,
                             "channels": "1",
                             "endpointing": "400",
+                            # Audio intelligence
+                            "sentiment": "true",
                         }
 
                         try:
@@ -514,12 +516,27 @@ class WebVoiceChannel(BaseChannel):
                                                     text = alts[0].get("transcript", "").strip()
                                                     confidence = alts[0].get("confidence", 0)
                                                     if text:
-                                                        await ws.send_json({
+                                                        # Extract sentiment from audio intelligence
+                                                        sentiment_data = None
+                                                        if is_final:
+                                                            sentiments = result.get("channel", {}).get("alternatives", [{}])[0].get("sentiment", {})
+                                                            if sentiments:
+                                                                sentiment_data = sentiments
+                                                        msg_out = {
                                                             "type": "transcript",
                                                             "is_final": is_final,
                                                             "text": text,
                                                             "confidence": round(confidence, 3),
-                                                        })
+                                                        }
+                                                        if sentiment_data:
+                                                            msg_out["sentiment"] = sentiment_data
+                                                        # Broadcast to all clients
+                                                        for cid, cws in list(self._clients.items()):
+                                                            if not cws.closed:
+                                                                try:
+                                                                    await cws.send_json(msg_out)
+                                                                except Exception:
+                                                                    pass
                                                         if is_final and confidence > 0.5:
                                                             self._utterance_buffer[session_id].append(text)
 
@@ -702,10 +719,13 @@ class WebVoiceChannel(BaseChannel):
             intel = await self._deepgram_analyze(text)
             logger.debug("Web Voice intel for '{}': {}", text[:40], intel)
             if intel:
-                # Send to browser activity feed
-                ws = self._clients.get(session_id)
-                if ws and not ws.closed:
-                    await ws.send_json({"type": "activity", "kind": "intel", "data": intel})
+                # Broadcast to ALL connected clients
+                for cid, cws in list(self._clients.items()):
+                    if not cws.closed:
+                        try:
+                            await cws.send_json({"type": "intel", "data": intel})
+                        except Exception:
+                            pass
                 # Build a concise summary for the LLM
                 parts = []
                 if intel.get("sentiment"):
