@@ -183,6 +183,7 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_post("/api/memory/clear-short-term", self._memory_clear_short_term_handler)
         self._app.router.add_post("/api/events", self._events_handler)
         self._app.router.add_get("/api/goals", self._goals_handler)
+        self._app.router.add_post("/api/goals", self._goals_update_handler)
         self._app.router.add_get("/api/cron", self._cron_handler)
         self._app.router.add_get("/api/activity", self._activity_handler)
         self._app.router.add_post("/api/memory/search", self._memory_search_handler)
@@ -632,6 +633,45 @@ class WebVoiceChannel(BaseChannel):
             return web.json_response({"goals": goals, "raw": content})
         except Exception as e:
             logger.warning("Goals API error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _goals_update_handler(self, request: web.Request) -> web.Response:
+        """Create, complete, or remove goals. POST /api/goals."""
+        try:
+            from nanobot.config.paths import get_workspace_path
+            from nanobot.agent.tools.goals import GoalsTool
+            import asyncio
+
+            body = await request.json()
+            action = body.get("action", "")
+            tool = GoalsTool(workspace=get_workspace_path())
+
+            if action == "add":
+                goal = body.get("goal", "")
+                subtask = body.get("subtask", "")
+                due = body.get("due", "")
+                result = await tool.execute(action="add", goal=goal, subtask=subtask, due=due)
+                return web.json_response({"ok": True, "result": result})
+
+            elif action == "complete":
+                index = body.get("index")
+                if index is None:
+                    return web.json_response({"error": "index required"}, status=400)
+                result = await tool.execute(action="complete", index=int(index))
+                return web.json_response({"ok": True, "result": result})
+
+            elif action == "remove":
+                index = body.get("index")
+                if index is None:
+                    return web.json_response({"error": "index required"}, status=400)
+                result = await tool.execute(action="remove", index=int(index))
+                return web.json_response({"ok": True, "result": result})
+
+            else:
+                return web.json_response({"error": f"Unknown action: {action}"}, status=400)
+
+        except Exception as e:
+            logger.warning("Goals update error: {}", e)
             return web.json_response({"error": "Internal error"}, status=500)
 
     async def _cron_handler(self, request: web.Request) -> web.Response:
