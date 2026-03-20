@@ -175,6 +175,8 @@ class AgentLoop:
                 base_url=self._toolsdns_config.url,
                 api_key=self._toolsdns_config.api_key,
             ))
+        from nanobot.agent.tools.memory_save import MemorySaveTool
+        self.tools.register(MemorySaveTool(workspace=self.workspace))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -1006,6 +1008,8 @@ class AgentLoop:
         self._running = True
         await self._connect_mcp()
         self._schedule_background(self._start_memory_indexer())
+        from nanobot.hooks.builtin.backup import start_backup_loop
+        self._schedule_background(start_backup_loop(self.workspace))
         logger.info("Agent loop started")
 
         while self._running:

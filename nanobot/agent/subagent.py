@@ -159,6 +159,8 @@ class SubagentManager:
                     api_key=self.toolsdns_config.api_key,
                     timeout=self.toolsdns_config.timeout,
                 ))
+            from nanobot.agent.tools.memory_save import MemorySaveTool
+            tools.register(MemorySaveTool(workspace=self.workspace))
 
             # Run ToolsDNS preflight to discover relevant tools for this task
             enriched_task = task
