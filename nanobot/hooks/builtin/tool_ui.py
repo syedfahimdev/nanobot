@@ -66,11 +66,13 @@ def make_tool_ui_hook(bus: "MessageBus"):
 
         # Check if this tool has a UI component
         if tool_name not in _UI_TOOLS:
+            logger.debug("Tool UI: {} not in UI tools list", tool_name)
             return
 
         # Parse the result
         data = _parse_tool_result(event.result)
         if not data:
+            logger.debug("Tool UI: failed to parse result for {} (len={})", tool_name, len(event.result))
             return
 
         # Send to the channel via bus

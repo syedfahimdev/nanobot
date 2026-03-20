@@ -90,7 +90,7 @@ class ToolRegistry:
             if self._hooks:
                 from nanobot.hooks.events import ToolAfter
                 await self._hooks.emit("tool_after", ToolAfter(
-                    name=name, params=params, result=result[:500] if isinstance(result, str) else str(result)[:500],
+                    name=name, params=params, result=result if isinstance(result, str) else str(result),
                     duration_ms=elapsed_ms, error=is_error,
                     channel=self._channel, chat_id=self._chat_id,
                     session_key=self._session_key,
