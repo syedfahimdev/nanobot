@@ -33,6 +33,14 @@ def register_builtin_hooks(
     hooks.on("tool_after", make_tool_tracker())
     hooks.on("turn_completed", make_turn_tracker(workspace))
 
+    # Pattern observer — detects recurring behavior from tool usage (fire-and-forget)
+    from nanobot.hooks.builtin.observer import make_observer_hook
+    hooks.on("tool_after", make_observer_hook(workspace))
+
+    # Daily cleanup — archives SHORT_TERM.md on date change (fire-and-forget)
+    from nanobot.hooks.builtin.daily_cleanup import make_daily_cleanup_hook
+    hooks.on("turn_completed", make_daily_cleanup_hook(workspace))
+
     # Generative UI — send structured tool results to frontend (fire-and-forget)
     from nanobot.hooks.builtin.tool_ui import make_tool_ui_hook
     hooks.on("tool_after", make_tool_ui_hook(bus))

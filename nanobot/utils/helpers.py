@@ -200,7 +200,10 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     for item in tpl.iterdir():
         if item.name.endswith(".md") and not item.name.startswith("."):
             _write(item, workspace / item.name)
-    _write(tpl / "memory" / "MEMORY.md", workspace / "memory" / "MEMORY.md")
+    _write(tpl / "memory" / "LONG_TERM.md", workspace / "memory" / "LONG_TERM.md")
+    _write(None, workspace / "memory" / "SHORT_TERM.md")
+    _write(None, workspace / "memory" / "OBSERVATIONS.md")
+    _write(None, workspace / "memory" / "EPISODES.md")
     _write(None, workspace / "memory" / "HISTORY.md")
     (workspace / "skills").mkdir(exist_ok=True)
 

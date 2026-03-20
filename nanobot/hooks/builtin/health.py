@@ -65,14 +65,18 @@ def _check_sessions(workspace: Path) -> tuple[str, bool, str]:
 
 def _check_memory(workspace: Path) -> tuple[str, bool, str]:
     history = workspace / "memory" / "HISTORY.md"
-    memory = workspace / "memory" / "MEMORY.md"
+    long_term = workspace / "memory" / "LONG_TERM.md"
+    short_term = workspace / "memory" / "SHORT_TERM.md"
     parts = []
     if history.exists():
         size_kb = history.stat().st_size / 1024
         parts.append(f"HISTORY.md {size_kb:.0f}KB")
-    if memory.exists():
-        size_kb = memory.stat().st_size / 1024
-        parts.append(f"MEMORY.md {size_kb:.0f}KB")
+    if long_term.exists():
+        size_kb = long_term.stat().st_size / 1024
+        parts.append(f"LONG_TERM.md {size_kb:.0f}KB")
+    if short_term.exists():
+        size_kb = short_term.stat().st_size / 1024
+        parts.append(f"SHORT_TERM.md {size_kb:.0f}KB")
     detail = ", ".join(parts) if parts else "No memory files"
     # Warn if HISTORY.md > 500KB
     ok = not history.exists() or history.stat().st_size < 512_000

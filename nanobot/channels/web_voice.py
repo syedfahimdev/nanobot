@@ -179,6 +179,8 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/api/profiles", self._profiles_handler)
         self._app.router.add_get("/api/config", self._config_handler)
         self._app.router.add_post("/api/config", self._config_update_handler)
+        self._app.router.add_get("/api/memory", self._memory_handler)
+        self._app.router.add_post("/api/memory/clear-short-term", self._memory_clear_short_term_handler)
         # Serve React build from /root/mawabot/dist (if exists), fallback to inline HTML
         _react_dist = Path("/root/mawabot/dist")
         if _react_dist.exists():
@@ -422,6 +424,17 @@ class WebVoiceChannel(BaseChannel):
                 except Exception:
                     pass
 
+            # Memory layer stats
+            from nanobot.config.paths import get_workspace_path
+            mem_dir = get_workspace_path() / "memory"
+            memory_info = {}
+            for fname in ("SHORT_TERM.md", "LONG_TERM.md", "OBSERVATIONS.md", "EPISODES.md", "HISTORY.md"):
+                fpath = mem_dir / fname
+                memory_info[fname] = {
+                    "exists": fpath.exists(),
+                    "sizeKB": round(fpath.stat().st_size / 1024, 1) if fpath.exists() else 0,
+                }
+
             return web.json_response({
                 "profiles": profiles,
                 "activeProfile": self._get_active_profile_name(),
@@ -436,6 +449,7 @@ class WebVoiceChannel(BaseChannel):
                     "port": self.config.port,
                     "tailscaleOnly": self.config.tailscale_only,
                 },
+                "memory": memory_info,
             })
         except Exception as e:
             logger.warning("API error: {}", e)
@@ -474,6 +488,48 @@ class WebVoiceChannel(BaseChannel):
             return web.json_response({"ok": True, "changed": changed})
         except Exception as e:
             logger.warning("API error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _memory_handler(self, request: web.Request) -> web.Response:
+        """Return memory layer stats for the settings UI."""
+        try:
+            from nanobot.config.paths import get_workspace_path
+            mem_dir = get_workspace_path() / "memory"
+
+            def _file_stats(name: str) -> dict:
+                path = mem_dir / name
+                if not path.exists():
+                    return {"exists": False, "sizeKB": 0, "lines": 0, "preview": ""}
+                content = path.read_text(encoding="utf-8")
+                lines = [l for l in content.split("\n") if l.strip()]
+                return {
+                    "exists": True,
+                    "sizeKB": round(path.stat().st_size / 1024, 1),
+                    "lines": len(lines),
+                    "preview": content.strip()[:200],
+                }
+
+            return web.json_response({
+                "shortTerm": _file_stats("SHORT_TERM.md"),
+                "longTerm": _file_stats("LONG_TERM.md"),
+                "observations": _file_stats("OBSERVATIONS.md"),
+                "episodes": _file_stats("EPISODES.md"),
+                "history": _file_stats("HISTORY.md"),
+            })
+        except Exception as e:
+            logger.warning("Memory API error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _memory_clear_short_term_handler(self, request: web.Request) -> web.Response:
+        """Clear SHORT_TERM.md (archives to HISTORY.md first)."""
+        try:
+            from nanobot.config.paths import get_workspace_path
+            from nanobot.agent.memory import MemoryStore
+            store = MemoryStore(get_workspace_path())
+            store.daily_cleanup()
+            return web.json_response({"ok": True})
+        except Exception as e:
+            logger.warning("Memory clear error: {}", e)
             return web.json_response({"error": "Internal error"}, status=500)
 
     def _get_active_profile_name(self) -> str:
