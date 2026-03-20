@@ -101,7 +101,9 @@ class AgentLoop:
         from nanobot.hooks import HookEngine
         from nanobot.hooks.builtin import register_builtin_hooks
         self.hooks = HookEngine()
-        register_builtin_hooks(self.hooks, workspace, bus)
+        _td_url = toolsdns_config.url if toolsdns_config else ""
+        _td_key = toolsdns_config.api_key if toolsdns_config else ""
+        register_builtin_hooks(self.hooks, workspace, bus, _td_url, _td_key)
 
         self.tools = ToolRegistry(hooks=self.hooks)
         self._preflight_cache = PreflightCache()
@@ -167,6 +169,11 @@ class AgentLoop:
                 base_url=self._toolsdns_config.url,
                 api_key=self._toolsdns_config.api_key,
                 timeout=self._toolsdns_config.timeout,
+            ))
+            from nanobot.agent.tools.memory_search import MemorySearchTool
+            self.tools.register(MemorySearchTool(
+                base_url=self._toolsdns_config.url,
+                api_key=self._toolsdns_config.api_key,
             ))
 
     async def _connect_mcp(self) -> None:
@@ -998,6 +1005,7 @@ class AgentLoop:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         self._running = True
         await self._connect_mcp()
+        self._schedule_background(self._start_memory_indexer())
         logger.info("Agent loop started")
 
         while self._running:
@@ -1398,6 +1406,32 @@ class AgentLoop:
         task = asyncio.create_task(coro)
         self._background_tasks.append(task)
         task.add_done_callback(self._background_tasks.remove)
+
+    async def _start_memory_indexer(self) -> None:
+        """Index memory files on startup, then re-index every 30 minutes."""
+        if not self._toolsdns_config or not self._toolsdns_config.enabled:
+            return
+        try:
+            from nanobot.memory.indexer import MemoryIndexer
+            indexer = MemoryIndexer(
+                self.workspace, self._toolsdns_config.url, self._toolsdns_config.api_key,
+            )
+            count = await indexer.index_all()
+            if count:
+                logger.info("Memory indexer: initial sync indexed {} chunks", count)
+        except Exception as e:
+            logger.warning("Memory indexer startup failed: {}", e)
+            return
+
+        async def _periodic():
+            while self._running:
+                await asyncio.sleep(1800)
+                try:
+                    await indexer.index_all()
+                except Exception as e:
+                    logger.warning("Memory periodic reindex failed: {}", e)
+
+        asyncio.create_task(_periodic())
 
     def stop(self) -> None:
         """Stop the agent loop."""
