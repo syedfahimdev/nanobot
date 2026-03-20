@@ -193,6 +193,8 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_post("/api/inbox/upload", self._inbox_upload_handler)
         self._app.router.add_get("/api/inbox", self._inbox_list_handler)
         self._app.router.add_get("/api/toolsdns/health", self._toolsdns_health_handler)
+        self._app.router.add_get("/api/credentials", self._credentials_list_handler)
+        self._app.router.add_post("/api/credentials", self._credentials_update_handler)
         # Serve React build from /root/mawabot/dist (if exists), fallback to inline HTML
         _react_dist = Path("/root/mawabot/dist")
         if _react_dist.exists():
@@ -1019,6 +1021,84 @@ class WebVoiceChannel(BaseChannel):
         except Exception as e:
             logger.warning("ToolsDNS health error: {}", e)
             return web.json_response({"status": "error", "error": str(e)})
+
+    async def _credentials_list_handler(self, request: web.Request) -> web.Response:
+        """List stored credentials — names only, NEVER actual values."""
+        try:
+            from nanobot.setup.vault import load_vault
+
+            vault = load_vault()
+            creds = []
+            # Collect credential entries (cred.*)
+            cred_names = set()
+            for k in vault:
+                if k.startswith("cred.") and not k.endswith(".username"):
+                    cred_names.add(k[5:])
+
+            for name in sorted(cred_names):
+                username = vault.get(f"cred.{name}.username", "")
+                value = vault.get(f"cred.{name}", "")
+                creds.append({
+                    "name": name,
+                    "username": username,
+                    "masked": "*" * min(len(value), 12) if value else "",
+                    "length": len(value),
+                })
+
+            # Also count API keys (non-cred vault entries)
+            api_keys = [k for k in vault if not k.startswith("cred.")]
+
+            return web.json_response({
+                "credentials": creds,
+                "apiKeyCount": len(api_keys),
+                "totalSecrets": len(vault),
+            })
+        except Exception as e:
+            logger.warning("Credentials list error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _credentials_update_handler(self, request: web.Request) -> web.Response:
+        """Add, update, or delete credentials. POST /api/credentials."""
+        try:
+            from nanobot.setup.vault import load_vault, save_to_vault
+
+            body = await request.json()
+            action = body.get("action", "")
+
+            if action == "save":
+                name = body.get("name", "").strip()
+                value = body.get("value", "")
+                username = body.get("username", "")
+                if not name or not value:
+                    return web.json_response({"error": "name and value required"}, status=400)
+
+                secrets = {f"cred.{name}": value}
+                if username:
+                    secrets[f"cred.{name}.username"] = username
+                save_to_vault(secrets)
+                return web.json_response({"ok": True, "result": f"Credential '{name}' saved"})
+
+            elif action == "delete":
+                name = body.get("name", "").strip()
+                if not name:
+                    return web.json_response({"error": "name required"}, status=400)
+
+                vault = load_vault()
+                key = f"cred.{name}"
+                if key not in vault:
+                    return web.json_response({"error": f"'{name}' not found"}, status=404)
+
+                del vault[key]
+                vault.pop(f"cred.{name}.username", None)
+                save_to_vault(vault)
+                return web.json_response({"ok": True, "result": f"Credential '{name}' deleted"})
+
+            else:
+                return web.json_response({"error": f"Unknown action: {action}"}, status=400)
+
+        except Exception as e:
+            logger.warning("Credentials update error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
 
     def _get_active_profile_name(self) -> str:
         """Get the name of the currently active LLM profile."""
