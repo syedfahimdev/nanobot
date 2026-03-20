@@ -1632,16 +1632,8 @@ let keepAliveSource = null;
 
 const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 
-// Persistent client ID
-function getClientId() {
-  let id = localStorage.getItem('mawa_client_id');
-  if (!id) {
-    id = 'mawa_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    localStorage.setItem('mawa_client_id', id);
-  }
-  return id;
-}
-const CLIENT_ID = getClientId();
+// Fixed client ID — same across all devices for single-user session continuity
+const CLIENT_ID = 'voice';
 
 // ============================================
 // UI Functions
@@ -2532,7 +2524,7 @@ document.addEventListener('keyup', (e) => {
   }
 });
 
-// Visibility handling
+// Visibility handling — resume all audio contexts on mobile
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     if (keepAliveCtx && keepAliveCtx.state === 'suspended') {
@@ -2540,6 +2532,10 @@ document.addEventListener('visibilitychange', () => {
     }
     if (audioContext && audioContext.state === 'suspended') {
       audioContext.resume();
+    }
+    // Resume TTS context too — mobile suspends it on background
+    if (ttsCtx && ttsCtx.state === 'suspended') {
+      ttsCtx.resume();
     }
     if (!ws || ws.readyState > 1) {
       connectWS();
@@ -2622,10 +2618,21 @@ function updateMetrics() {
 
 function updateClock() {
   const now = new Date();
-  const timeStr = now.toLocaleTimeString('en-US', { hour12: false });
-  const dateStr = now.toISOString().split('T')[0];
+  const timeStr = now.toLocaleTimeString('en-US', { 
+    timeZone: 'America/New_York',
+    hour12: true,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  });
+  const dateStr = now.toLocaleDateString('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  });
   
-  document.getElementById('clockTime').textContent = timeStr;
+  document.getElementById('clockTime').textContent = timeStr + ' EST';
   document.getElementById('clockDate').textContent = dateStr;
 }
 

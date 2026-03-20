@@ -594,11 +594,12 @@ class AgentLoop:
             best = tools[0]
             best_name = best.get("name", "unknown")
             best_id = f"tooldns__{best_name}"
-            # Build example arguments from required params
+            # Build example arguments from required params + key optional ones
             schema = best.get("input_schema", {})
             required = schema.get("required", [])
             props = schema.get("properties", {})
             example_args = {}
+            # Always include required params
             for param in required:
                 ptype = props.get(param, {}).get("type", "string")
                 if ptype == "string":
@@ -609,6 +610,19 @@ class AgentLoop:
                     example_args[param] = True
                 else:
                     example_args[param] = f"<{param}>"
+            # If no required params, include up to 3 useful optional params
+            # so the LLM knows to pass useful arguments
+            if not required:
+                for param, info in list(props.items())[:3]:
+                    ptype = info.get("type", "string")
+                    if ptype == "string":
+                        example_args[param] = f"<{param}>"
+                    elif ptype == "integer" or ptype == "number":
+                        example_args[param] = 10
+                    elif ptype == "boolean":
+                        example_args[param] = True
+                    else:
+                        example_args[param] = f"<{param}>"
             import json as _json
             args_str = _json.dumps(example_args) if example_args else "{}"
             best_desc = best.get("description", "").split("\n")[0][:80]
@@ -628,11 +642,20 @@ class AgentLoop:
 
             schema = t.get("input_schema", {})
             if schema and schema.get("properties"):
+                req_set = set(schema.get("required", []))
                 for pname, info in list(schema["properties"].items())[:10]:
                     ptype = info.get("type", "any")
                     pdesc = info.get("description", "").split(".")[0].split("\n")[0][:60]
-                    req = " [REQUIRED]" if pname in schema.get("required", []) else ""
+                    req = " [REQUIRED]" if pname in req_set else ""
                     lines.append(f"    {pname}: {ptype}{req} — {pdesc}")
+                # Add a CALL example for non-best-match tools
+                if i > 0:
+                    call_args = {}
+                    for pname in req_set:
+                        call_args[pname] = f"<{pname}>"
+                    lines.append(f'  CALL: toolsdns(action="call", tool_id="{tool_id}", arguments={_json.dumps(call_args)})')
+                if not req_set:
+                    lines.append("  NOTE: All params optional — fill in what's relevant to the user's request")
             lines.append("")
         return "\n".join(lines)
 
@@ -1011,6 +1034,102 @@ class AgentLoop:
             return True
         return False
 
+    # Dynamic skill pattern cache — built from skill names/trigger phrases
+    _skill_pattern: re.Pattern | None = None
+    _skill_cache_ts: float = 0
+
+    def _needs_main_agent(self, text: str) -> bool:
+        """Check if message matches a known skill (requires interactive main agent).
+
+        Dynamically loads skill names and trigger phrases from the workspace
+        and ToolsDNS. Refreshes every 5 minutes. Matches on skill names as
+        phrases (e.g. "weekly report", "cea report") not individual words,
+        to avoid false positives.
+        """
+        import time as _time
+
+        now = _time.monotonic()
+        if self._skill_pattern is None or (now - self._skill_cache_ts) > 300:
+            self._refresh_skill_patterns()
+            self._skill_cache_ts = now
+
+        if self._skill_pattern is None:
+            return False
+        return bool(self._skill_pattern.search(text))
+
+    @staticmethod
+    def _extract_skill_phrases(name: str, description: str) -> set[str]:
+        """Extract match phrases from a skill name and description."""
+        phrases: set[str] = set()
+        # Skill name as phrase (e.g. "cea-weekly-report" → "cea weekly report")
+        name_phrase = name.replace("-", " ").replace("_", " ").strip()
+        if len(name_phrase) >= 3:
+            phrases.add(name_phrase.lower())
+        # Consecutive word pairs from name
+        parts = name_phrase.lower().split()
+        if len(parts) >= 2:
+            for i in range(len(parts) - 1):
+                phrases.add(f"{parts[i]} {parts[i+1]}")
+        # Extract quoted trigger phrases from description ("Use when: user says 'X', 'Y'")
+        if description:
+            for match in re.findall(r"['\"]([^'\"]{3,30})['\"]", description):
+                phrases.add(match.lower())
+        return phrases
+
+    def _refresh_skill_patterns(self) -> None:
+        """Build skill match patterns from ToolsDNS skills and workspace skills."""
+        phrases: set[str] = {"skill"}  # "use the skill" always routes to main agent
+
+        # Primary source: ToolsDNS skills API (has all skills with descriptions)
+        if self._toolsdns_config and self._toolsdns_config.enabled:
+            try:
+                import httpx
+                url = self._toolsdns_config.url.rstrip("/")
+                resp = httpx.get(
+                    f"{url}/v1/skills",
+                    headers={"Authorization": f"Bearer {self._toolsdns_config.api_key}"},
+                    timeout=3.0,
+                )
+                if resp.status_code == 200:
+                    for skill_data in resp.json().get("skills", []):
+                        phrases |= self._extract_skill_phrases(
+                            skill_data.get("name", ""),
+                            skill_data.get("description", ""),
+                        )
+            except Exception:
+                pass
+
+        # Fallback: workspace skills directory
+        try:
+            for skills_dir in [self.workspace / "skills"]:
+                if not skills_dir.is_dir():
+                    continue
+                for skill_dir in skills_dir.iterdir():
+                    if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").exists():
+                        continue
+                    desc = ""
+                    try:
+                        content = (skill_dir / "SKILL.md").read_text()
+                        for line in content.split("\n")[:15]:
+                            if line.startswith("description:"):
+                                desc = line.split(":", 1)[1].strip().strip('"').strip("'")
+                    except Exception:
+                        pass
+                    phrases |= self._extract_skill_phrases(skill_dir.name, desc)
+        except Exception:
+            pass
+
+        if phrases:
+            # Sort longest first so "weekly report" matches before "report"
+            escaped = [re.escape(p) for p in sorted(phrases, key=len, reverse=True)]
+            AgentLoop._skill_pattern = re.compile(
+                r"\b(" + "|".join(escaped) + r")\b", re.I,
+            )
+            logger.info("Loaded {} skill phrases for routing: {}",
+                         len(phrases), ", ".join(sorted(phrases)[:8]))
+        else:
+            AgentLoop._skill_pattern = None
+
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process a message under a per-session lock.
 
@@ -1028,6 +1147,18 @@ class AgentLoop:
                 logger.info("Session {} busy, queuing conversational: '{}'",
                             msg.session_key, text[:40])
                 self._pending_messages.setdefault(msg.session_key, []).append(msg)
+                return
+
+            # Skills/interactive tasks need the main agent — queue instead of spawning
+            if self._needs_main_agent(text):
+                logger.info("Session {} busy, queuing skill/interactive request: '{}'",
+                            msg.session_key, text[:60])
+                self._pending_messages.setdefault(msg.session_key, []).append(msg)
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content="I'll handle that as soon as I'm done with the current task.",
+                    metadata={"_tts_sentence": True},
+                ))
                 return
 
             logger.info("Session {} busy, auto-spawning for: '{}'",
@@ -1068,15 +1199,22 @@ class AgentLoop:
                     content="Sorry, I encountered an error.",
                 ))
             finally:
-                # Process queued conversational messages — add to session history
+                # Process queued messages
                 pending = self._pending_messages.pop(msg.session_key, [])
                 if pending:
                     key = msg.session_key
                     session = self.sessions.get_or_create(key)
+                    # Separate: conversational → add to history, tasks → re-dispatch
                     for pending_msg in pending:
-                        session.add_message("user", pending_msg.content)
-                        logger.info("Appended queued conversational msg to session: '{}'",
-                                    pending_msg.content[:40])
+                        if self._needs_main_agent(pending_msg.content):
+                            # Re-dispatch skill/interactive requests to main agent
+                            logger.info("Re-dispatching queued skill request: '{}'",
+                                        pending_msg.content[:60])
+                            asyncio.create_task(self._dispatch(pending_msg))
+                        else:
+                            session.add_message("user", pending_msg.content)
+                            logger.info("Appended queued conversational msg to session: '{}'",
+                                        pending_msg.content[:40])
                     self.sessions.save(session)
 
     async def close_mcp(self) -> None:

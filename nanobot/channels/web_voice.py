@@ -401,14 +401,15 @@ class WebVoiceChannel(BaseChannel):
                         if client_id:
                             old_id = session_id
                             session_id = client_id
-                            # Close any existing WS for this client (other tab/reconnect)
-                            old_ws = self._clients.get(session_id)
-                            if old_ws and old_ws is not ws and not old_ws.closed:
-                                logger.info("Web Voice: closing old connection for {}", session_id)
-                                try:
-                                    await old_ws.close()
-                                except Exception:
-                                    pass
+                            # Close ALL other web voice connections (single-user: new device takes over)
+                            for other_id, other_ws in list(self._clients.items()):
+                                if other_ws is not ws and not other_ws.closed:
+                                    logger.info("Web Voice: closing other connection {} for new client {}", other_id, session_id)
+                                    await self._send_stop(other_id)
+                                    try:
+                                        await other_ws.close()
+                                    except Exception:
+                                        pass
                             # Migrate from temp ID to persistent ID
                             self._clients.pop(old_id, None)
                             self._utterance_buffer.pop(old_id, None)
@@ -443,12 +444,12 @@ class WebVoiceChannel(BaseChannel):
                             "smart_format": "true",
                             "punctuate": "true",
                             "interim_results": "true",
-                            "utterance_end_ms": "1200",
+                            "utterance_end_ms": "2000",
                             "vad_events": "true",
                             "encoding": client_encoding,
                             "sample_rate": client_sample_rate,
                             "channels": "1",
-                            "endpointing": "300",
+                            "endpointing": "800",
                         }
 
                         try:
