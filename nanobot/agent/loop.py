@@ -483,16 +483,21 @@ class AgentLoop:
         text = user_message.strip()
         if len(text) < 10 or self._TOOLSDNS_SKIP_PATTERNS.match(text):
             return None
-        # Skip ToolsDNS for queries that map to built-in tools or skills
+        # Skip ToolsDNS for queries that map to built-in tools
         _builtin_patterns = re.compile(
             r"\b(goal|goals|my goals|list.*goals|check.*goals|add.*goal|complete.*goal|"
             r"inbox|my docs|my documents|search.*inbox|upload|"
             r"open.*website|browse|go to.*\.com|go to.*\.org|navigate.*url|screenshot|playwright|"
-            r"open.*page|visit.*site|browser|"
-            r"work.?order|everi|cea.*report|weekly.*report)\b", re.I,
+            r"open.*page|visit.*site|browser)\b", re.I,
         )
         if _builtin_patterns.search(text):
             return None
+        # Skip ToolsDNS for queries that match known skill names (dynamic)
+        if hasattr(self, "_skill_match_phrases") and self._skill_match_phrases:
+            text_lower = text.lower()
+            for phrase in self._skill_match_phrases:
+                if phrase in text_lower:
+                    return None
         # Skip conversational messages that have no action intent
         # (saves 1-2s per message on voice channels)
         if not re.search(

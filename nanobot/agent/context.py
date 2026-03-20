@@ -128,12 +128,13 @@ Your workspace is at: {workspace_path}
 - For browser automation: ALWAYS use the built-in `browser` tool, NOT ToolsDNS BROWSER_TOOL_* or browser_navigate
 
 ## Skill Workflow Rules — CRITICAL
-- BEFORE using ANY skill tools (work_order_*, cea_*, etc.), you MUST first call `mcp_tooldns_read_skill` to read the full SKILL.md. It contains the exact phases and rules you must follow.
-- Follow the skill's PHASE workflow EXACTLY — do not skip phases or guess.
-- DO NOT spawn subagents for skill workflows — handle all phases yourself.
-- Gather ALL required info from the user BEFORE calling tool execution.
-- After generating a file, ALWAYS call the get_file tool (e.g., `work_order_get_file`) to return it in chat as a downloadable link.
-- Include the file path in your response so the user sees a download card.
+- BEFORE using ANY ToolsDNS skill tools, you MUST first call `mcp_tooldns_read_skill` with the skill name. The returned SKILL.md contains the exact workflow, phases, and rules.
+- Follow the skill's workflow EXACTLY — do not skip phases, do not guess parameters.
+- DO NOT spawn subagents for skill workflows — handle all phases yourself in the main conversation.
+- Gather ALL required info from the user BEFORE calling execution tools.
+- When a tool generates a file, check its response for a `local_path`, `file_path`, `path`, or `s3_path` field.
+- If a get_file or download tool exists in the skill, call it to return the file content.
+- CRITICAL: In your final response, always include the FULL absolute file path (e.g., /tmp/work-orders/name.xlsx or /root/.nanobot/workspace/...) so the user gets a clickable download card in the web chat. Never omit the path.
 
 Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
 
