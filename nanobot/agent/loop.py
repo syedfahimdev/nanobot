@@ -684,33 +684,33 @@ class AgentLoop:
             lines.append(f'>>> CALL THIS NOW: toolsdns(action="call", tool_id="{best_id}", arguments={args_str})')
             lines.append(f"    (tool: {best_name} — {best_desc})\n")
 
-        lines.append("RULES: Your FIRST tool call must be toolsdns action=call. Do NOT action=search. Do NOT action=get. Do NOT use mcp_tooldns_* tools.\n")
+        lines.append("RULES: Your FIRST tool call must be toolsdns action=call with real argument values (not placeholders). Do NOT pass extra params like workflow_id or top_k. Do NOT action=search. Do NOT action=get. Do NOT use mcp_tooldns_* tools.\n")
 
         for i, t in enumerate(tools):
             name = t.get("name", "unknown")
             tool_id = f"tooldns__{name}"
-            desc = t.get("description", "").split("\n")[0][:200]
+            desc = t.get("description", "").split("\n")[0][:120]
             confidence = t.get("confidence", 0)
             label = "BEST MATCH" if i == 0 else f"Match {i + 1}"
             lines.append(f"{label}  [{confidence:.0%}]  TOOL_ID: {tool_id}")
             lines.append(f"  {name} — {desc}")
 
             schema = t.get("input_schema", {})
-            if schema and schema.get("properties"):
+            # Full schema for best match only; others get one-liner + CALL template
+            if i == 0 and schema and schema.get("properties"):
                 req_set = set(schema.get("required", []))
                 for pname, info in list(schema["properties"].items())[:10]:
                     ptype = info.get("type", "any")
                     pdesc = info.get("description", "").split(".")[0].split("\n")[0][:60]
                     req = " [REQUIRED]" if pname in req_set else ""
                     lines.append(f"    {pname}: {ptype}{req} — {pdesc}")
-                # Add a CALL example for non-best-match tools
-                if i > 0:
-                    call_args = {}
-                    for pname in req_set:
-                        call_args[pname] = f"<{pname}>"
-                    lines.append(f'  CALL: toolsdns(action="call", tool_id="{tool_id}", arguments={_json.dumps(call_args)})')
                 if not req_set:
                     lines.append("  NOTE: All params optional — fill in what's relevant to the user's request")
+            elif i > 0:
+                # Compact: just a CALL template for alternates
+                req_set = set(schema.get("required", []))
+                call_args = {p: f"<{p}>" for p in req_set}
+                lines.append(f'  CALL: toolsdns(action="call", tool_id="{tool_id}", arguments={_json.dumps(call_args)})')
             lines.append("")
         return "\n".join(lines)
 
@@ -1524,8 +1524,6 @@ class AgentLoop:
 
         history = session.get_history(max_messages=0)
         enriched_content = msg.content
-        if voice_hint := (msg.metadata or {}).get("voice_instruction"):
-            enriched_content = f"{voice_hint}\n\n{enriched_content}"
 
         # Inject running subagent context so the main agent can route updates
         running = self.subagents.get_running_tasks()

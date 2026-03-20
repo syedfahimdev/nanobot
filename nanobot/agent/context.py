@@ -24,9 +24,27 @@ class ContextBuilder:
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
 
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+    _VOICE_SYSTEM_BLOCK = (
+        "## Voice Mode\n"
+        "The user is speaking via voice. Your reply will be read aloud by TTS.\n"
+        "- Say a quick acknowledgment before tool calls ('Let me check.', 'One sec.').\n"
+        "- Write EXACTLY how you'd say it out loud. Plain text only — no markdown, "
+        "no bullets, no emojis, no code blocks, no tables.\n"
+        "- Punctuate for speech rhythm — commas for pauses, periods for stops.\n"
+        "- Use contractions naturally (I'm, don't, you've, that's).\n"
+        "- Keep it conversational, 2-3 sentences max unless asked for more.\n"
+        "- For lists, say them naturally: 'First is X, then Y, and finally Z.'\n"
+        "- If you can't understand the speech, say 'Sorry, I didn't catch that. Can you say it again?'\n"
+        "- Never say 'Sure, I'd be happy to help!' or any customer service filler."
+    )
+
+    def build_system_prompt(self, skill_names: list[str] | None = None, channel: str | None = None) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
         parts = [self._get_identity()]
+
+        # Voice channels get voice mode instructions in system prompt (not per-message)
+        if channel in ("discord_voice", "web_voice"):
+            parts.append(self._VOICE_SYSTEM_BLOCK)
 
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
@@ -157,7 +175,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             merged = [{"type": "text", "text": runtime_ctx}] + user_content
 
         return [
-            {"role": "system", "content": self.build_system_prompt(skill_names)},
+            {"role": "system", "content": self.build_system_prompt(skill_names, channel=channel)},
             *history,
             {"role": "user", "content": merged},
         ]

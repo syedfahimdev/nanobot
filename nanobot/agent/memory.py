@@ -299,26 +299,44 @@ class MemoryConsolidator:
                 return True
         return True
 
+    _MSG_COUNT_THRESHOLD = 50  # Force consolidation after this many unconsolidated messages
+
     async def maybe_consolidate_by_tokens(self, session: Session) -> None:
-        """Loop: archive old messages until prompt fits within half the context window."""
+        """Loop: archive old messages until prompt fits within half the context window.
+
+        Also triggers if unconsolidated message count exceeds threshold,
+        even if token count is within limits (prevents MEMORY.md from
+        staying empty on large context windows).
+        """
         if not session.messages or self.context_window_tokens <= 0:
             return
 
         lock = self.get_lock(session.key)
         async with lock:
+            unconsolidated_count = len(session.messages) - session.last_consolidated
             target = self.context_window_tokens // 2
             estimated, source = self.estimate_session_prompt_tokens(session)
             if estimated <= 0:
                 return
-            if estimated < self.context_window_tokens:
+
+            force_by_count = unconsolidated_count >= self._MSG_COUNT_THRESHOLD
+            if estimated < self.context_window_tokens and not force_by_count:
                 logger.debug(
-                    "Token consolidation idle {}: {}/{} via {}",
+                    "Token consolidation idle {}: {}/{} via {} ({} unconsolidated msgs)",
                     session.key,
                     estimated,
                     self.context_window_tokens,
                     source,
+                    unconsolidated_count,
                 )
                 return
+
+            if force_by_count:
+                logger.info(
+                    "Message-count consolidation triggered for {}: {} unconsolidated msgs",
+                    session.key,
+                    unconsolidated_count,
+                )
 
             for round_num in range(self._MAX_CONSOLIDATION_ROUNDS):
                 if estimated <= target:
