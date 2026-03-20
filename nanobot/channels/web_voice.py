@@ -661,22 +661,55 @@ class WebVoiceChannel(BaseChannel):
             return web.json_response({"error": "Internal error"}, status=500)
 
     async def _activity_handler(self, request: web.Request) -> web.Response:
-        """Return recent activity entries from activity.jsonl."""
+        """Return recent activity from HISTORY.md (rich) + activity.jsonl (turns)."""
         try:
             from nanobot.config.paths import get_workspace_path
-            import json as _j
-            activity_file = get_workspace_path() / "activity.jsonl"
-            entries = []
-            if activity_file.exists():
-                lines = activity_file.read_text(encoding="utf-8").strip().split("\n")
-                # Return last 50 entries, newest first
-                for line in reversed(lines[-50:]):
-                    if line.strip():
-                        try:
-                            entries.append(_j.loads(line))
-                        except _j.JSONDecodeError:
-                            pass
-            return web.json_response({"entries": entries})
+            import re
+            workspace = get_workspace_path()
+
+            # Parse HISTORY.md for detailed tool calls and summaries
+            history_file = workspace / "memory" / "HISTORY.md"
+            tool_calls = []
+            summaries = []
+            if history_file.exists():
+                content = history_file.read_text(encoding="utf-8")
+                for line in content.strip().split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # Tool call lines: [2026-03-20 13:05] TOOL goals OK (0ms)
+                    m = re.match(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\] TOOL (\S+) (OK|ERR) \((\d+)ms\)", line)
+                    if m:
+                        tool_calls.append({
+                            "type": "tool",
+                            "timestamp": m.group(1),
+                            "tool": m.group(2),
+                            "status": m.group(3),
+                            "duration_ms": int(m.group(4)),
+                        })
+                    # Summary lines: [2026-03-20 01:44-04:52] User asked...
+                    elif line.startswith("[2") and "] " in line and "TOOL" not in line and "EVENT" not in line and "[RAW]" not in line:
+                        bracket_end = line.index("] ")
+                        ts = line[1:bracket_end]
+                        text = line[bracket_end + 2:]
+                        # Skip internal/noisy lines
+                        if len(text) > 30 and not text.startswith("ToolsDNS") and not text.startswith("tools already"):
+                            summaries.append({
+                                "type": "summary",
+                                "timestamp": ts,
+                                "text": text[:500],
+                            })
+
+            # Merge and return last 80 entries, newest first
+            all_entries = tool_calls + summaries
+            # Sort by timestamp string (works for ISO-like format)
+            all_entries.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+
+            return web.json_response({
+                "entries": all_entries[:80],
+                "total_tools": len(tool_calls),
+                "total_summaries": len(summaries),
+            })
         except Exception as e:
             logger.warning("Activity API error: {}", e)
             return web.json_response({"error": "Internal error"}, status=500)
