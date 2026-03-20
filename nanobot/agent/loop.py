@@ -483,12 +483,13 @@ class AgentLoop:
         text = user_message.strip()
         if len(text) < 10 or self._TOOLSDNS_SKIP_PATTERNS.match(text):
             return None
-        # Skip ToolsDNS for queries that map to built-in tools
+        # Skip ToolsDNS for queries that map to built-in tools or skills
         _builtin_patterns = re.compile(
             r"\b(goal|goals|my goals|list.*goals|check.*goals|add.*goal|complete.*goal|"
             r"inbox|my docs|my documents|search.*inbox|upload|"
             r"open.*website|browse|go to.*\.com|go to.*\.org|navigate.*url|screenshot|playwright|"
-            r"open.*page|visit.*site|browser)\b", re.I,
+            r"open.*page|visit.*site|browser|"
+            r"work.?order|everi|cea.*report|weekly.*report)\b", re.I,
         )
         if _builtin_patterns.search(text):
             return None
