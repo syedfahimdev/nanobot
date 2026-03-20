@@ -299,16 +299,36 @@ def onboard():
 
     sync_workspace_templates(workspace)
 
-    console.print(f"\n{__logo__} nanobot is ready!")
-    console.print("\nNext steps:")
-    console.print("  1. Add your API key to [cyan]~/.nanobot/config.json[/cyan]")
-    console.print("     • OpenRouter (any model):  https://openrouter.ai/keys")
-    console.print("     • Kimi Coding (kimi-for-coding):  https://api.kimi.com  → set [cyan]providers.kimi.apiKey[/cyan] and [cyan]providers.kimi.apiBase[/cyan]")
-    console.print("       then set [cyan]agents.defaults.provider: kimi[/cyan], [cyan]model: kimi-for-coding[/cyan], [cyan]maxTokens: 32768[/cyan], [cyan]contextWindowTokens: 262144[/cyan]")
-    console.print("     • Z.AI Coding (GLM models):  https://api.z.ai  → set [cyan]providers.zai.apiKey[/cyan]")
-    console.print("       then set [cyan]agents.defaults.provider: zai[/cyan], [cyan]model: GLM-4.7[/cyan]")
-    console.print("  2. Chat: [cyan]nanobot agent -m \"Hello!\"[/cyan]")
-    console.print("\n[dim]Want Telegram/Discord? See: https://github.com/HKUDS/nanobot#-chat-apps[/dim]")
+    console.print(f"\n{__logo__} nanobot core is ready!")
+    console.print("\nStep 1 complete — basic config and workspace created.")
+    console.print("  API key: add to [cyan]~/.nanobot/config.json[/cyan]")
+    console.print("    • OpenRouter: https://openrouter.ai/keys")
+    console.print("    • Kimi Coding: https://api.kimi.com")
+
+    # Run the extended setup wizard (ToolsDNS + Mawabot + Security)
+    # Only in interactive mode (skip in tests/CI)
+    import sys
+    if sys.stdin.isatty():
+        from nanobot.setup.wizard import run_setup_wizard
+        run_setup_wizard(config_path, workspace)
+    else:
+        console.print("\n[dim]Run [cyan]nanobot setup[/cyan] to configure ToolsDNS, web dashboard, and security.[/dim]")
+
+
+@app.command()
+def setup():
+    """Run the Mawa setup wizard (ToolsDNS + Web Dashboard + Security)."""
+    from nanobot.config.loader import get_config_path
+    from nanobot.config.paths import get_workspace_path
+    from nanobot.setup.wizard import run_setup_wizard
+
+    config_path = get_config_path()
+    if not config_path.exists():
+        console.print("[yellow]Config not found. Run 'nanobot onboard' first.[/yellow]")
+        raise typer.Exit(1)
+
+    workspace = get_workspace_path()
+    run_setup_wizard(config_path, workspace)
 
 
 def _merge_missing_defaults(existing: Any, defaults: Any) -> Any:
@@ -491,6 +511,10 @@ def gateway(
     profile: str | None = typer.Option(None, "--profile", help="Activate a named provider profile from config"),
 ):
     """Start the nanobot gateway."""
+    # Load secrets (webhook HMAC key, etc.) into environment
+    from nanobot.setup.secrets import load_secrets
+    load_secrets()
+
     from nanobot.agent.loop import AgentLoop
     from nanobot.bus.queue import MessageBus
     from nanobot.channels.manager import ChannelManager
