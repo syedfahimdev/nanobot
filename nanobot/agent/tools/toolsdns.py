@@ -276,16 +276,71 @@ class ToolsDNSTool(Tool):
             lines += ["", "Skill instructions:", skill]
         return "\n".join(lines)
 
+    # Regex for detecting placeholder strings the LLM copied from the context block
+    _PLACEHOLDER_RE = __import__("re").compile(r"^<\w+>$")
+
+    async def _sanitize_args(self, tool_id: str, arguments: dict) -> dict:
+        """Code-level argument sanitizer — fix LLM mistakes before calling the tool.
+
+        1. Strip toolsdns-own params leaked into arguments
+        2. Remove placeholder strings like <query>, <user_id>
+        3. Strip params not in the tool's schema (unknown junk)
+        4. Auto-fill from tool memory if args are empty/minimal
+        """
+        # Step 1: strip own params
+        arguments = {k: v for k, v in arguments.items() if k not in self._OWN_PARAMS}
+
+        # Step 2: remove placeholder strings
+        arguments = {
+            k: v for k, v in arguments.items()
+            if not (isinstance(v, str) and self._PLACEHOLDER_RE.match(v))
+        }
+
+        # Step 3: fetch schema and strip unknown params
+        try:
+            data = await self._get(f"/v1/tool/{tool_id}")
+            schema = data.get("input_schema", data.get("inputSchema", {}))
+            valid_params = set(schema.get("properties", {}).keys())
+            if valid_params:
+                stripped = {k: v for k, v in arguments.items() if k in valid_params}
+                if stripped != arguments:
+                    from loguru import logger
+                    removed = set(arguments) - set(stripped)
+                    if removed:
+                        logger.info("ToolsDNS sanitizer: stripped unknown params {} from {}", removed, tool_id)
+                arguments = stripped
+        except Exception:
+            pass  # Schema fetch failed — proceed with what we have
+
+        # Step 4: auto-fill from tool memory if args are empty or very sparse
+        if len(arguments) <= 1:
+            try:
+                hints_data = await self._post("/v1/tool-hints", {
+                    "agent_id": "mawa",
+                    "tool_ids": [tool_id],
+                })
+                hints = hints_data.get("hints", {}).get(tool_id, [])
+                if hints:
+                    remembered = hints[0].get("arguments", {})
+                    # Merge: remembered args fill in gaps, but don't overwrite what the LLM set
+                    for k, v in remembered.items():
+                        if k not in arguments and v:
+                            arguments[k] = v
+                    if remembered:
+                        from loguru import logger
+                        logger.info("ToolsDNS sanitizer: auto-filled args from memory for {}", tool_id)
+            except Exception:
+                pass
+
+        return arguments
+
     async def _call_tool(self, tool_id: str, arguments: dict, agent_id: str = "mawa") -> str:
         if not tool_id.strip():
             return "Error: tool_id is required for call."
 
-        # Strip out toolsdns-own parameters that the LLM may have leaked into arguments
-        arguments = {k: v for k, v in arguments.items() if k not in self._OWN_PARAMS}
+        # Code-level argument sanitization — fixes LLM mistakes
+        arguments = await self._sanitize_args(tool_id, arguments)
 
-        # If no arguments, just attempt the call — let the server return the error.
-        # The preflight already gave the LLM the schema. Don't block with a schema
-        # return that causes retry loops. Skills and macros work with empty args.
         try:
             data = await self._post("/v1/call", {
                 "tool_id": tool_id,
