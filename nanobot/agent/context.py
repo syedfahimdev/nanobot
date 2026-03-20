@@ -104,6 +104,7 @@ Your workspace is at: {workspace_path}
 - Episodes: {workspace_path}/memory/EPISODES.md (significant moments)
 - Observations: {workspace_path}/memory/OBSERVATIONS.md (detected behavior patterns)
 - History log: {workspace_path}/memory/HISTORY.md (grep-searchable). Each entry starts with [YYYY-MM-DD HH:MM].
+- RAG inbox: {workspace_path}/inbox/work/, personal/, general/ — use the inbox tool to search uploaded docs before writing emails or answering questions.
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
 {platform_policy}

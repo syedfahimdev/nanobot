@@ -189,6 +189,8 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/api/memory/export", self._memory_export_handler)
         self._app.router.add_get("/api/tools", self._tools_handler)
         self._app.router.add_get("/api/files/{path:.*}", self._file_download_handler)
+        self._app.router.add_post("/api/inbox/upload", self._inbox_upload_handler)
+        self._app.router.add_get("/api/inbox", self._inbox_list_handler)
         # Serve React build from /root/mawabot/dist (if exists), fallback to inline HTML
         _react_dist = Path("/root/mawabot/dist")
         if _react_dist.exists():
@@ -851,6 +853,79 @@ class WebVoiceChannel(BaseChannel):
             )
         except Exception as e:
             logger.warning("File download error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _inbox_upload_handler(self, request: web.Request) -> web.Response:
+        """Upload a file to the inbox. POST /api/inbox/upload (multipart form)."""
+        try:
+            from nanobot.config.paths import get_workspace_path
+            from nanobot.agent.tools.inbox import VALID_FOLDERS
+
+            reader = await request.multipart()
+            folder = "general"
+            saved_files = []
+
+            async for part in reader:
+                if part.name == "folder":
+                    val = (await part.text()).strip()
+                    if val in VALID_FOLDERS:
+                        folder = val
+                elif part.name == "file" and part.filename:
+                    inbox_dir = get_workspace_path() / "inbox" / folder
+                    inbox_dir.mkdir(parents=True, exist_ok=True)
+
+                    # Sanitize filename
+                    safe_name = part.filename.replace("/", "_").replace("\\", "_").replace("..", "_")
+                    dest = inbox_dir / safe_name
+
+                    # Write file
+                    size = 0
+                    with open(dest, "wb") as f:
+                        while True:
+                            chunk = await part.read_chunk()
+                            if not chunk:
+                                break
+                            size += len(chunk)
+                            if size > 50 * 1024 * 1024:  # 50MB limit
+                                dest.unlink(missing_ok=True)
+                                return web.json_response({"error": "File too large (max 50MB)"}, status=413)
+                            f.write(chunk)
+
+                    saved_files.append({"name": safe_name, "folder": folder, "size": size})
+                    logger.info("Inbox upload: {}/{} ({}KB)", folder, safe_name, size // 1024)
+
+            return web.json_response({"ok": True, "files": saved_files})
+        except Exception as e:
+            logger.warning("Inbox upload error: {}", e)
+            return web.json_response({"error": "Upload failed"}, status=500)
+
+    async def _inbox_list_handler(self, request: web.Request) -> web.Response:
+        """List all inbox files. GET /api/inbox."""
+        try:
+            from nanobot.config.paths import get_workspace_path
+            from nanobot.agent.tools.inbox import VALID_FOLDERS
+
+            inbox_dir = get_workspace_path() / "inbox"
+            folders: dict[str, list] = {}
+
+            for f in sorted(VALID_FOLDERS):
+                folder_path = inbox_dir / f
+                files = []
+                if folder_path.exists():
+                    for p in sorted(folder_path.iterdir()):
+                        if p.is_file() and not p.name.startswith("."):
+                            files.append({
+                                "name": p.name,
+                                "size": p.stat().st_size,
+                                "ext": p.suffix.lower(),
+                                "modified": p.stat().st_mtime,
+                            })
+                folders[f] = files
+
+            total = sum(len(v) for v in folders.values())
+            return web.json_response({"folders": folders, "total": total})
+        except Exception as e:
+            logger.warning("Inbox list error: {}", e)
             return web.json_response({"error": "Internal error"}, status=500)
 
     def _get_active_profile_name(self) -> str:

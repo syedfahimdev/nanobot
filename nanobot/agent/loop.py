@@ -148,6 +148,12 @@ class AgentLoop:
         from nanobot.hooks.builtin.briefing_hook import make_briefing_hook
         self.hooks.on("turn_completed", make_briefing_hook(workspace, provider, self.model, bus))
 
+        # Inbox indexer — auto-indexes uploaded files for RAG search
+        from nanobot.hooks.builtin.inbox_indexer import make_inbox_indexer_hook
+        _td_url2 = toolsdns_config.url if toolsdns_config else ""
+        _td_key2 = toolsdns_config.api_key if toolsdns_config else ""
+        self.hooks.on("turn_completed", make_inbox_indexer_hook(workspace, provider, self.model, _td_url2, _td_key2))
+
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -190,6 +196,8 @@ class AgentLoop:
         self.tools.register(GoalsTool(workspace=self.workspace))
         from nanobot.agent.tools.media_memory import MediaMemoryTool
         self.tools.register(MediaMemoryTool(workspace=self.workspace))
+        from nanobot.agent.tools.inbox import InboxTool
+        self.tools.register(InboxTool(workspace=self.workspace))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
