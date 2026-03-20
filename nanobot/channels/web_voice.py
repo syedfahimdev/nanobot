@@ -174,15 +174,22 @@ class WebVoiceChannel(BaseChannel):
         if self.config.tailscale_only:
             self._app.middlewares.append(self._tailscale_middleware)
 
-        self._app.router.add_get("/", self._index_handler)
         self._app.router.add_get("/ws", self._ws_handler)
         self._app.router.add_get("/health", self._health_handler)
         self._app.router.add_get("/api/profiles", self._profiles_handler)
-        # PWA assets
-        self._app.router.add_get("/manifest.json", self._pwa_asset_handler)
-        self._app.router.add_get("/sw.js", self._pwa_asset_handler)
-        self._app.router.add_get("/icon-192.png", self._pwa_asset_handler)
-        self._app.router.add_get("/icon-512.png", self._pwa_asset_handler)
+        # Serve React build from /root/mawabot/dist (if exists), fallback to inline HTML
+        _react_dist = Path("/root/mawabot/dist")
+        if _react_dist.exists():
+            self._app.router.add_static("/assets", _react_dist / "assets")
+            self._app.router.add_get("/manifest.json", lambda r: web.FileResponse(_react_dist / "manifest.json") if (_react_dist / "manifest.json").exists() else self._pwa_asset_handler(r))
+            # SPA fallback: all non-API/non-WS routes serve index.html
+            self._app.router.add_get("/{path:.*}", self._spa_handler)
+        else:
+            self._app.router.add_get("/", self._index_handler)
+            self._app.router.add_get("/manifest.json", self._pwa_asset_handler)
+            self._app.router.add_get("/sw.js", self._pwa_asset_handler)
+            self._app.router.add_get("/icon-192.png", self._pwa_asset_handler)
+            self._app.router.add_get("/icon-512.png", self._pwa_asset_handler)
 
         ssl_ctx = None
         ts_dns = _get_tailscale_dns() if self.config.tailscale_only else None
@@ -329,6 +336,11 @@ class WebVoiceChannel(BaseChannel):
 
     async def _index_handler(self, request: web.Request) -> web.Response:
         return web.Response(text=_load_dashboard_html(), content_type="text/html")
+
+    async def _spa_handler(self, request: web.Request) -> web.Response:
+        """Serve React SPA — all routes get index.html (client-side routing)."""
+        dist = Path("/root/mawabot/dist")
+        return web.FileResponse(dist / "index.html")
 
     async def _pwa_asset_handler(self, request: web.Request) -> web.Response:
         """Serve PWA assets (manifest, service worker, icons)."""
