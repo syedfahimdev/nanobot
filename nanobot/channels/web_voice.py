@@ -485,12 +485,12 @@ class WebVoiceChannel(BaseChannel):
                             "smart_format": "true",
                             "punctuate": "true",
                             "interim_results": "true",
-                            "utterance_end_ms": "1200",
+                            "utterance_end_ms": "800",
                             "vad_events": "true",
                             "encoding": client_encoding,
                             "sample_rate": client_sample_rate,
                             "channels": "1",
-                            "endpointing": "500",
+                            "endpointing": "300",
                         }
 
                         try:
