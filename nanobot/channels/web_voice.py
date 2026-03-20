@@ -894,7 +894,7 @@ class WebVoiceChannel(BaseChannel):
             return web.json_response({"error": "Internal error"}, status=500)
 
     async def _file_download_handler(self, request: web.Request) -> web.Response:
-        """Serve workspace files for download/preview. GET /api/files/{path}."""
+        """Serve workspace + temp files for download/preview. GET /api/files/{path}."""
         try:
             from nanobot.config.paths import get_workspace_path
             import mimetypes
@@ -904,10 +904,24 @@ class WebVoiceChannel(BaseChannel):
                 return web.json_response({"error": "Path required"}, status=400)
 
             workspace = get_workspace_path()
-            file_path = (workspace / rel_path).resolve()
 
-            # Security: ensure file is within workspace
-            if not str(file_path).startswith(str(workspace.resolve())):
+            # Allow serving from workspace OR /tmp/ (generated files like work orders)
+            _ALLOWED_ROOTS = [
+                str(workspace.resolve()),
+                "/tmp/work-orders",
+                "/tmp/nanobot",
+                str(Path.home() / ".nanobot"),
+            ]
+
+            # Try workspace-relative first, then absolute path
+            if rel_path.startswith("/"):
+                file_path = Path(rel_path).resolve()
+            else:
+                file_path = (workspace / rel_path).resolve()
+
+            # Security: ensure file is within an allowed root
+            file_str = str(file_path)
+            if not any(file_str.startswith(root) for root in _ALLOWED_ROOTS):
                 return web.json_response({"error": "Access denied"}, status=403)
 
             if not file_path.exists() or not file_path.is_file():

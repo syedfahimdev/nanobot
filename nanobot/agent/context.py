@@ -127,6 +127,13 @@ Your workspace is at: {workspace_path}
 - "open website" / "go to URL" / "browse" / "screenshot" → call `browser(action="navigate", url="...")` (built-in Playwright, NOT ToolsDNS browser tools)
 - For browser automation: ALWAYS use the built-in `browser` tool, NOT ToolsDNS BROWSER_TOOL_* or browser_navigate
 
+## Skill Workflow Rules
+- When a ToolsDNS skill is activated (work orders, reports, etc.), follow the skill's PHASE workflow EXACTLY in the main conversation.
+- DO NOT spawn subagents for skill workflows — handle all phases yourself in the main loop.
+- Gather ALL required info from the user BEFORE calling tool execution (parts, addresses, names, quantities).
+- After generating a file, ALWAYS call the skill's get_file tool to return it in chat so the user can view/download it.
+- For Excel/PDF files: provide the download path so the frontend can render a file attachment card.
+
 Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
 
     @staticmethod
