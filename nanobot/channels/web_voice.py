@@ -596,13 +596,6 @@ class WebVoiceChannel(BaseChannel):
                         if text:
                             self._enqueue_message(session_id, text)
 
-                    # Forward Deepgram keepalive to STT WebSocket
-                    elif data.get("type") == "KeepAlive" and dg_ws:
-                        try:
-                            await dg_ws.send('{"type": "KeepAlive"}')
-                        except Exception:
-                            pass
-
                 elif msg.type == aiohttp.WSMsgType.BINARY:
                     if dg_ws:
                         try:
