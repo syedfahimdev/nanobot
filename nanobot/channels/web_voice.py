@@ -229,8 +229,16 @@ class WebVoiceChannel(BaseChannel):
         if not msg.content:
             return
 
-        session_id = msg.chat_id
+        # Route to specific device if metadata has _ws_session_id, otherwise broadcast to all
+        session_id = (msg.metadata or {}).get("_ws_session_id") or msg.chat_id
         ws = self._clients.get(session_id)
+        # If not found by session_id, try broadcasting to all connected clients
+        if not ws or ws.closed:
+            for cid, cws in self._clients.items():
+                if not cws.closed:
+                    ws = cws
+                    session_id = cid
+                    break
         if not ws or ws.closed:
             return
 
@@ -413,15 +421,15 @@ class WebVoiceChannel(BaseChannel):
                         if client_id:
                             old_id = session_id
                             session_id = client_id
-                            # Close ALL other web voice connections (single-user: new device takes over)
-                            for other_id, other_ws in list(self._clients.items()):
-                                if other_ws is not ws and not other_ws.closed:
-                                    logger.info("Web Voice: closing other connection {} for new client {}", other_id, session_id)
-                                    await self._send_stop(other_id)
-                                    try:
-                                        await other_ws.close()
-                                    except Exception:
-                                        pass
+                            # Close only the previous connection with the SAME client ID (same device reconnect)
+                            old_ws = self._clients.get(session_id)
+                            if old_ws and old_ws is not ws and not old_ws.closed:
+                                logger.info("Web Voice: closing old connection for reconnecting client {}", session_id)
+                                await self._send_stop(session_id)
+                                try:
+                                    await old_ws.close()
+                                except Exception:
+                                    pass
                             # Migrate from temp ID to persistent ID
                             self._clients.pop(old_id, None)
                             self._utterance_buffer.pop(old_id, None)
@@ -627,7 +635,7 @@ class WebVoiceChannel(BaseChannel):
             stop_msg = InboundMessage(
                 channel=self.name,
                 sender_id=session_id,
-                chat_id=session_id,
+                chat_id="voice",  # shared session
                 content="/stop",
                 media=[],
                 metadata={},
@@ -654,24 +662,16 @@ class WebVoiceChannel(BaseChannel):
         if len(text.split()) >= 4:
             asyncio.create_task(self._get_intel_for_llm(session_id, text))
 
+        # Use fixed chat_id so all devices share the same nanobot session
+        shared_chat_id = "voice"
+
         await self._handle_message(
             sender_id=session_id,
-            chat_id=session_id,
+            chat_id=shared_chat_id,
             content=text,
             metadata={
                 "source": "voice",
-                "voice_instruction": (
-                    "[VOICE MODE] This is spoken voice input. Your reply will be read aloud by TTS.\n"
-                    "- Say a quick acknowledgment before any tool calls ('Let me check.', 'One sec.').\n"
-                    "- Write EXACTLY how you'd say it out loud. Plain text only — no markdown, "
-                    "no bullets, no emojis, no code blocks, no tables.\n"
-                    "- Use proper punctuation — commas for pauses, periods for stops, "
-                    "question marks for questions. The TTS engine reads punctuation as speech rhythm.\n"
-                    "- Use contractions naturally (I'm, don't, you've, that's).\n"
-                    "- Keep it conversational and concise, 2-3 sentences max unless asked for more.\n"
-                    "- For lists, say them naturally: 'First thing is X, then Y, and finally Z.'\n"
-                    "- Never say 'Sure, I'd be happy to help!' or any customer service filler."
-                ),
+                "_ws_session_id": session_id,
             },
         )
 
