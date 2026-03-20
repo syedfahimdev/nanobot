@@ -225,35 +225,46 @@ class WebVoiceChannel(BaseChannel):
             await self._runner.cleanup()
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Receive agent output -> stream activity + chunked TTS to browser."""
+        """Receive agent output -> stream activity + chunked TTS to browser.
+
+        Broadcasts to ALL connected web voice clients so every device
+        (PC + phone) sees responses and gets TTS audio.
+        """
         if not msg.content:
             return
 
-        # Route to specific device if metadata has _ws_session_id, otherwise broadcast to all
-        session_id = (msg.metadata or {}).get("_ws_session_id") or msg.chat_id
-        ws = self._clients.get(session_id)
-        # If not found by session_id, try broadcasting to all connected clients
-        if not ws or ws.closed:
-            for cid, cws in self._clients.items():
-                if not cws.closed:
-                    ws = cws
-                    session_id = cid
-                    break
-        if not ws or ws.closed:
+        # Collect all live client WebSockets
+        live_clients: list[tuple[str, web.WebSocketResponse]] = [
+            (cid, cws) for cid, cws in self._clients.items() if not cws.closed
+        ]
+        if not live_clients:
             return
+
+        # Pick first live client as reference for session_id (for TTS queue etc.)
+        session_id = live_clients[0][0]
 
         meta = msg.metadata or {}
         is_progress = meta.get("_progress", False)
         is_tool_hint = meta.get("_tool_hint", False)
 
+        # Broadcast helper — send JSON to all connected clients
+        async def broadcast(data: dict) -> None:
+            for _, cws in live_clients:
+                if not cws.closed:
+                    try:
+                        await cws.send_json(data)
+                    except Exception:
+                        pass
+
         # Parallel task spawned — resolve pending bubble, show in activity
         if meta.get("_parallel"):
-            await ws.send_json({"type": "parallel", "text": msg.content})
+            await broadcast({"type": "parallel", "text": msg.content})
             return
 
-        # Streaming TTS sentence — enqueue for TTS immediately (no display yet)
+        # Streaming TTS sentence — enqueue for TTS, send to all clients
         if meta.get("_tts_sentence"):
-            self._enqueue_tts(session_id, msg.content)
+            for cid, _ in live_clients:
+                self._enqueue_tts(cid, msg.content)
             return
 
         if is_progress:
@@ -263,20 +274,19 @@ class WebVoiceChannel(BaseChannel):
             self._activity_ts[session_id] = now
 
             if is_tool_hint:
-                # Tool call or tool result activity
                 text = msg.content
                 if text.startswith("[") and "] \u2192 " in text:
-                    await ws.send_json({"type": "activity", "kind": "result", "text": text, "latency_ms": delta_ms})
+                    await broadcast({"type": "activity", "kind": "result", "text": text, "latency_ms": delta_ms})
                 else:
-                    await ws.send_json({"type": "activity", "kind": "tool", "text": text, "latency_ms": delta_ms})
+                    await broadcast({"type": "activity", "kind": "tool", "text": text, "latency_ms": delta_ms})
             else:
-                await ws.send_json({"type": "activity", "kind": "thinking", "text": msg.content, "latency_ms": delta_ms})
+                await broadcast({"type": "activity", "kind": "thinking", "text": msg.content, "latency_ms": delta_ms})
             return
 
         # Final response
         is_subagent = meta.get("_subagent_result", False)
         self._streamed_text.pop(session_id, None)
-        await ws.send_json({
+        await broadcast({
             "type": "response_text",
             "text": msg.content,
             "subagent_result": is_subagent,
@@ -288,7 +298,7 @@ class WebVoiceChannel(BaseChannel):
             self._pending_count[session_id] = count - 1
             remaining = count - 1
             if remaining > 0:
-                await ws.send_json({"type": "queue_status", "pending": remaining})
+                await broadcast({"type": "queue_status", "pending": remaining})
 
         # TTS: subagent results and non-streamed responses need sentence-based TTS here.
         # When streaming was active, sentences were already sent via _tts_sentence messages,
