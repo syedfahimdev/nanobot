@@ -96,9 +96,8 @@ class ToolScorer:
         entry["total_duration_ms"] += event.duration_ms
         entry["last_used"] = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-        # Flush periodically
-        if self._event_count % _FLUSH_INTERVAL == 0:
-            self._save()
+        # Flush every event — CLI sessions are short-lived
+        self._save()
 
     def get_insights(self) -> str:
         """Generate insights for the system prompt.
