@@ -195,7 +195,7 @@ class BrowserTool(Tool):
                 },
                 "value": {
                     "type": "string",
-                    "description": "Value to fill (for fill action).",
+                    "description": "Value to fill. Use {cred:name} to inject a saved credential securely (e.g., {cred:outlook}).",
                 },
                 "script": {
                     "type": "string",
@@ -297,8 +297,14 @@ class BrowserTool(Tool):
             elif action == "fill":
                 if not selector or value is None:
                     return "Error: selector and value required for fill action."
-                await page.fill(selector, value, timeout=timeout)
+                # Resolve {cred:name} references to actual credential values
+                from nanobot.agent.tools.credentials import resolve_credential_refs
+                actual_value = resolve_credential_refs(value)
+                is_secret = actual_value != value  # Was a credential reference
+                await page.fill(selector, actual_value, timeout=timeout)
                 await self._save_screenshot(page, "fill")
+                if is_secret:
+                    return f"Filled '{selector}' with saved credential (value masked)."
                 return f"Filled '{selector}' with value."
 
             elif action == "text":

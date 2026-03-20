@@ -198,6 +198,9 @@ class AgentLoop:
         self.tools.register(MediaMemoryTool(workspace=self.workspace))
         from nanobot.agent.tools.inbox import InboxTool
         self.tools.register(InboxTool(workspace=self.workspace))
+        # Credentials — securely store and use passwords
+        from nanobot.agent.tools.credentials import CredentialsTool
+        self.tools.register(CredentialsTool())
         # Native Playwright browser — works without ToolsDNS/Composio
         try:
             from nanobot.agent.tools.browser import BrowserTool
@@ -1616,6 +1619,12 @@ class AgentLoop:
 
         history = session.get_history(max_messages=0)
         enriched_content = msg.content
+
+        # Mask secrets in user message before LLM sees them
+        from nanobot.hooks.builtin.secret_mask import detect_and_mask_secrets, save_detected_secrets
+        enriched_content, detected_secrets = detect_and_mask_secrets(enriched_content)
+        if detected_secrets:
+            self._schedule_background(save_detected_secrets(detected_secrets))
 
         # Inject running subagent context so the main agent can route updates
         running = self.subagents.get_running_tasks()
