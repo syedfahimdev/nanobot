@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -6,6 +7,12 @@ from nanobot.agent.loop import AgentLoop
 import nanobot.agent.memory as memory_module
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMResponse
+
+
+async def _drain_background(loop: AgentLoop) -> None:
+    """Wait for all background tasks scheduled by the agent loop."""
+    if loop._background_tasks:
+        await asyncio.gather(*loop._background_tasks, return_exceptions=True)
 
 
 def _make_loop(tmp_path, *, estimated_tokens: int, context_window_tokens: int) -> AgentLoop:
@@ -49,6 +56,7 @@ async def test_prompt_above_threshold_triggers_consolidation(tmp_path, monkeypat
     monkeypatch.setattr(memory_module, "estimate_message_tokens", lambda _message: 500)
 
     await loop.process_direct("hello", session_key="cli:test")
+    await _drain_background(loop)
 
     assert loop.memory_consolidator.consolidate_messages.await_count >= 1
 
@@ -152,8 +160,8 @@ async def test_consolidation_continues_below_trigger_until_half_target(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_preflight_consolidation_before_llm_call(tmp_path, monkeypatch) -> None:
-    """Verify preflight consolidation runs before the LLM call in process_direct."""
+async def test_preflight_consolidation_runs_alongside_llm_call(tmp_path, monkeypatch) -> None:
+    """Verify consolidation is triggered during process_direct (runs as background task)."""
     order: list[str] = []
 
     loop = _make_loop(tmp_path, estimated_tokens=0, context_window_tokens=200)
@@ -184,7 +192,7 @@ async def test_preflight_consolidation_before_llm_call(tmp_path, monkeypatch) ->
     loop.memory_consolidator.estimate_session_prompt_tokens = mock_estimate  # type: ignore[method-assign]
 
     await loop.process_direct("hello", session_key="cli:test")
+    await _drain_background(loop)
 
     assert "consolidate" in order
     assert "llm" in order
-    assert order.index("consolidate") < order.index("llm")

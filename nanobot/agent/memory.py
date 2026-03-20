@@ -193,6 +193,32 @@ class MemoryStore:
             top = "\n".join(lines[:5])
             parts.append(f"## Patterns\n{top}")
 
+        # Inject learned rules from reflection
+        learnings_file = self.memory_dir / "LEARNINGS.md"
+        if learnings_file.exists():
+            content = learnings_file.read_text(encoding="utf-8")
+            rules = [l for l in content.split("\n") if l.strip().startswith("- ")]
+            if rules:
+                top_rules = "\n".join(rules[-10:])
+                parts.append(f"## Learned Rules\n{top_rules}")
+
+        # Inject tool reliability warnings from tool_scores.json
+        scores_file = self.memory_dir / "tool_scores.json"
+        if scores_file.exists():
+            try:
+                scores = json.loads(scores_file.read_text(encoding="utf-8"))
+                warnings = []
+                for tool, data in scores.items():
+                    total = data.get("success", 0) + data.get("fail", 0)
+                    if total >= 5:
+                        rate = data["success"] / total
+                        if rate < 0.7:
+                            warnings.append(f"- {tool}: {int(rate * 100)}% success ({data['fail']} failures)")
+                if warnings:
+                    parts.append("## Tool Reliability\n" + "\n".join(warnings))
+            except (json.JSONDecodeError, OSError, TypeError):
+                pass
+
         parts.append("Use memory_search to recall long-term facts, past episodes, or user preferences.")
 
         return "\n\n".join(parts)

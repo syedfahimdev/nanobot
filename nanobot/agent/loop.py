@@ -139,6 +139,15 @@ class AgentLoop:
             build_messages=self.context.build_messages,
             get_tool_definitions=self.tools.get_definitions,
         )
+
+        # Reflection engine — learns from user corrections
+        from nanobot.hooks.builtin.reflection import ReflectionEngine
+        self.reflection = ReflectionEngine(workspace, provider, self.model)
+
+        # Morning briefing — proactive context-aware summaries
+        from nanobot.hooks.builtin.briefing_hook import make_briefing_hook
+        self.hooks.on("turn_completed", make_briefing_hook(workspace, provider, self.model, bus))
+
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -177,6 +186,10 @@ class AgentLoop:
             ))
         from nanobot.agent.tools.memory_save import MemorySaveTool
         self.tools.register(MemorySaveTool(workspace=self.workspace))
+        from nanobot.agent.tools.goals import GoalsTool
+        self.tools.register(GoalsTool(workspace=self.workspace))
+        from nanobot.agent.tools.media_memory import MediaMemoryTool
+        self.tools.register(MediaMemoryTool(workspace=self.workspace))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -1553,6 +1566,9 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=report)
         self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
 
+        # Reflection: check if this message is correcting the previous turn
+        self._schedule_background(self.reflection.check_for_correction(key, msg.content))
+
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
@@ -1636,6 +1652,9 @@ class AgentLoop:
             tools_used=[], iterations=0, duration_ms=_turn_elapsed,
             channel=msg.channel, chat_id=msg.chat_id,
         ))
+
+        # Reflection: record this turn for future correction detection
+        self.reflection.on_turn_completed(key, msg.content, final_content or "")
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None

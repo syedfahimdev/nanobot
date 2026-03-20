@@ -1392,26 +1392,219 @@ If you edit the `.service` file itself, run `systemctl --user daemon-reload` bef
 > loginctl enable-linger $USER
 > ```
 
+## 🧠 Autonomous Agent Features
+
+nanobot includes a suite of autonomous capabilities that make it a true **personal AI** — not just a chatbot. These features work together to create an agent that learns, remembers, self-corrects, and proactively helps.
+
+### 4-Layer Memory System
+
+nanobot's memory is organized into layers with different lifecycles, keeping token usage low while giving the agent access to everything it knows about you.
+
+```
+memory/
+├── SHORT_TERM.md    ← Today's context (auto-cleared daily, ~200 tokens/turn)
+├── LONG_TERM.md     ← Permanent facts (searched on demand via semantic embeddings)
+├── OBSERVATIONS.md  ← Behavior patterns detected from tool usage
+├── EPISODES.md      ← Key moments worth remembering
+├── LEARNINGS.md     ← Behavioral rules learned from corrections
+├── GOALS.md         ← Persistent goals and subtasks (agent-managed)
+├── MEDIA.md         ← Summaries of images, receipts, documents
+├── CORRECTIONS.md   ← Tool failure patterns for self-correction
+├── HISTORY.md       ← Grep-searchable timestamped log
+└── tool_scores.json ← Tool success/failure rates and latency
+```
+
+| Layer | Injected Every Turn | Purpose |
+|-------|:-------------------:|---------|
+| SHORT_TERM.md | Yes | What happened today — tasks, conversations, context |
+| OBSERVATIONS.md | Yes (top 5) | Detected patterns — "uses Gmail mostly in the morning" |
+| LEARNINGS.md | Yes (top 10) | Rules from corrections — "don't add type annotations unless asked" |
+| Tool Reliability | Yes (warnings only) | Warns when a tool drops below 70% success rate |
+| LONG_TERM.md | No — searched on demand | Name, preferences, relationships, projects |
+| EPISODES.md | No — searched on demand | Key decisions, milestones, breakthroughs |
+| GOALS.md | No — searched on demand | Multi-session goals and subtask progress |
+| MEDIA.md | No — searched on demand | Structured summaries of images and documents |
+
+**Token budget:** ~200 tokens per turn (SHORT_TERM + observations + learnings + search hint). Long-term facts are searched via ToolsDNS semantic embeddings only when needed.
+
+**Daily lifecycle:** At the start of each day, SHORT_TERM.md is archived to HISTORY.md and cleared automatically.
+
+### Self-Improvement: Reflection Engine
+
+When you correct the agent ("no, not that", "wrong", "try again"), nanobot detects the correction and extracts a behavioral rule using a lightweight LLM call. These rules are stored in `LEARNINGS.md` and injected into every future prompt.
+
+**How it works:**
+1. After each turn, the engine records the assistant's response
+2. On the next user message, it scores for correction signals (11 regex patterns, weighted)
+3. If score >= 0.5, an LLM extracts the lesson via the `save_learning` tool
+4. Rules are deduped (60% word overlap check) and capped at 20 entries
+
+**Example learnings:**
+```markdown
+- Don't add docstrings to functions unless asked [2026-03-20 14:30]
+- Use python3 instead of python on this system [2026-03-20 15:00]
+- When checking email, summarize instead of listing raw headers [2026-03-20 16:22]
+```
+
+### Self-Correction: Tool Failure Detection
+
+A hook monitors every tool call result for error patterns and learns from repeated failures.
+
+**Detection categories:**
+- `auth_failure` — 401/403 responses
+- `rate_limit` — 429 / too many requests
+- `timeout` — Tool took too long
+- `server_error` — 5xx responses
+- `silent_failure` — Tool "succeeded" but returned empty/useless result
+
+**Auto-learning:** When the same tool fails 3+ times with the same error pattern, the system promotes it to a learned rule (e.g., "web_search keeps timing out — try with simpler parameters").
+
+### Tool Success Scoring
+
+Every tool call is tracked with success/failure rates, latency, and error samples.
+
+```json
+{
+  "web_search": {"success": 142, "fail": 23, "successRate": 86.1, "avgDurationMs": 2340},
+  "send_email": {"success": 89, "fail": 2, "successRate": 97.8, "avgDurationMs": 1200}
+}
+```
+
+When a tool drops below 70% success rate, a warning is injected into the system prompt so the agent adjusts its approach. Scores are visible in the Settings page with color-coded reliability dots.
+
+### Pattern Observer
+
+Passively learns from tool usage behavior without any LLM calls:
+
+- **Time-of-day habits:** "Uses Gmail mostly in the morning"
+- **Tool frequency:** "Most used tools: web_search (42x), read_calendar (18x)"
+- **Sequential patterns:** "Often does read_email → read_calendar"
+- **Day-of-week patterns:** "Uses web_search often on Mondays"
+
+Patterns are written to `OBSERVATIONS.md` after 3+ occurrences. The top 5 are injected into every prompt.
+
+### Morning Briefing
+
+Context-aware proactive summaries delivered at the right time:
+
+| Time | Briefing Type | Content |
+|------|--------------|---------|
+| 7-9 AM | Morning | Email, calendar, weather, pending goals, financial alerts |
+| 6-8 PM | Evening | Day summary, pending tasks, tomorrow's items |
+| Sunday | Weekly | Accomplishments, patterns, upcoming deadlines |
+
+Briefings are generated from memory context (all layers) using an LLM call. Each type is delivered at most once per day. The agent decides whether there's anything worth reporting (sets `skip=true` if not).
+
+### Goal Tracking
+
+Persistent agent-managed task queue stored in `GOALS.md`. The agent uses the `goals` tool to track multi-session objectives.
+
+```markdown
+## Goal: Plan wedding
+- [x] Choose venue
+- [ ] Book photographer (due: 2026-05-01)
+- [ ] Send invitations
+
+## Goal: General
+- [ ] Pay Alibaba Cloud bill before March 26
+```
+
+**Tool actions:** `add`, `complete`, `list`, `remove`, `update`. Due dates are tracked with overdue warnings.
+
+### Webhook Event Endpoint
+
+External services can trigger the agent via `POST /api/events`:
+
+```bash
+curl -X POST http://localhost:8765/api/events \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "email",
+    "title": "New email from Boss",
+    "content": "Meeting moved to 3pm",
+    "priority": "high",
+    "source": "gmail-webhook"
+  }'
+```
+
+**Supported event types:** `email`, `calendar`, `file`, `webhook`, `reminder`, `alert`
+
+**Priority levels:** `urgent`, `high`, `normal`, `low`, `background`
+
+**Security:** Optional HMAC-SHA256 signature verification via `X-Nanobot-Signature` header (set `NANOBOT_WEBHOOK_SECRET` env var).
+
+Events are routed to the agent as system messages and logged to HISTORY.md.
+
+### Multi-Modal Memory
+
+The agent can save structured summaries of images, receipts, and documents using the `remember_media` tool:
+
+```
+remember_media(
+  media_type="receipt",
+  title="Amazon order",
+  summary="Wireless keyboard, delivered to CT address",
+  file_path="/tmp/receipt.png",
+  extracted_data={"amount": "$42.99", "vendor": "Amazon", "order": "123-456"}
+)
+```
+
+Media files are copied to `memory/media/` for persistence. Summaries in `MEDIA.md` are automatically indexed by ToolsDNS for semantic search.
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/config` | GET | Full safe config for settings UI |
+| `/api/config` | POST | Update voice settings |
+| `/api/memory` | GET | Memory layer stats + tool scores |
+| `/api/memory/clear-short-term` | POST | Archive and clear today's memory |
+| `/api/events` | POST | Ingest external events via webhook |
+| `/api/goals` | GET | Goal list and progress |
+| `/api/profiles` | GET | Available LLM profiles |
+| `/health` | GET | Health check |
+
+---
+
 ## 📁 Project Structure
 
 ```
 nanobot/
-├── agent/          # 🧠 Core agent logic
-│   ├── loop.py     #    Agent loop (LLM ↔ tool execution)
-│   ├── context.py  #    Prompt builder
-│   ├── memory.py   #    Persistent memory
-│   ├── skills.py   #    Skills loader
-│   ├── subagent.py #    Background task execution
-│   └── tools/      #    Built-in tools (incl. spawn)
-├── skills/         # 🎯 Bundled skills (github, weather, tmux...)
-├── channels/       # 📱 Chat channel integrations (supports plugins)
-├── bus/            # 🚌 Message routing
-├── cron/           # ⏰ Scheduled tasks
-├── heartbeat/      # 💓 Proactive wake-up
-├── providers/      # 🤖 LLM providers (OpenRouter, etc.)
-├── session/        # 💬 Conversation sessions
-├── config/         # ⚙️ Configuration
-└── cli/            # 🖥️ Commands
+├── agent/            # 🧠 Core agent logic
+│   ├── loop.py       #    Agent loop (LLM ↔ tool execution)
+│   ├── context.py    #    Prompt builder
+│   ├── memory.py     #    4-layer persistent memory
+│   ├── skills.py     #    Skills loader
+│   ├── subagent.py   #    Background task execution
+│   └── tools/        #    Built-in tools
+│       ├── goals.py       #    Persistent goal tracking
+│       ├── media_memory.py #   Multi-modal memory (images, docs)
+│       ├── memory_save.py  #   Knowledge/learning/rule storage
+│       ├── memory_search.py #  Semantic memory search via ToolsDNS
+│       └── cron.py         #   Scheduled reminders and tasks
+├── hooks/builtin/    # 🪝 Event-driven hooks
+│   ├── reflection.py     #   Self-improvement from corrections
+│   ├── self_correct.py   #   Tool failure detection & learning
+│   ├── tool_scores.py    #   Tool success/failure scoring
+│   ├── observer.py       #   Behavior pattern detection
+│   ├── briefing.py       #   Morning briefing generation
+│   ├── briefing_hook.py  #   Briefing delivery on turn_completed
+│   ├── daily_cleanup.py  #   SHORT_TERM archival on date change
+│   ├── events.py         #   External webhook event parsing
+│   ├── auto_log.py       #   Tool call logging to HISTORY.md
+│   ├── approval.py       #   Dangerous tool approval guard
+│   └── lifecycle.py      #   Turn timing and activity tracking
+├── memory/           # 🗂️ Semantic indexing
+│   └── indexer.py    #    Chunk + embed to ToolsDNS
+├── skills/           # 🎯 Bundled skills (github, weather, tmux...)
+├── channels/         # 📱 Chat channel integrations
+├── bus/              # 🚌 Message routing
+├── cron/             # ⏰ Scheduled tasks
+├── heartbeat/        # 💓 Proactive wake-up
+├── providers/        # 🤖 LLM providers (20+)
+├── session/          # 💬 Conversation sessions
+├── config/           # ⚙️ Configuration
+└── cli/              # 🖥️ Commands
 ```
 
 ## 🤝 Contribute & Roadmap
@@ -1429,11 +1622,17 @@ PRs welcome! The codebase is intentionally small and readable. 🤗
 
 **Roadmap** — Pick an item and [open a PR](https://github.com/HKUDS/nanobot/pulls)!
 
-- [ ] **Multi-modal** — See and hear (images, voice, video)
-- [ ] **Long-term memory** — Never forget important context
-- [ ] **Better reasoning** — Multi-step planning and reflection
-- [ ] **More integrations** — Calendar and more
-- [ ] **Self-improvement** — Learn from feedback and mistakes
+- [x] **4-layer memory** — SHORT_TERM, LONG_TERM, OBSERVATIONS, EPISODES with daily lifecycle
+- [x] **Self-improvement** — Reflection engine learns from user corrections + tool failures
+- [x] **Multi-modal memory** — Remember images, receipts, documents with structured summaries
+- [x] **Goal tracking** — Persistent agent-managed task queue across sessions
+- [x] **Proactive briefings** — Morning/evening/weekly context-aware summaries
+- [x] **Webhook events** — External services trigger the agent via POST /api/events
+- [x] **Tool reliability** — Success scoring with auto-warnings when tools degrade
+- [ ] **Supervisor routing** — Intent-based delegation to specialized sub-agents
+- [ ] **State machine** — Multi-turn goal tracking with step-by-step execution
+- [ ] **Voice memory** — Remember tone, sentiment, and emotional context from voice
+- [ ] **Calendar integration** — Proactive meeting prep and schedule awareness
 
 ### Contributors
 

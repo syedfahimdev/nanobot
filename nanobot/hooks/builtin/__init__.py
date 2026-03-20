@@ -41,6 +41,17 @@ def register_builtin_hooks(
     from nanobot.hooks.builtin.daily_cleanup import make_daily_cleanup_hook
     hooks.on("turn_completed", make_daily_cleanup_hook(workspace))
 
+    # Tool success scoring — tracks reliability and latency (fire-and-forget)
+    from nanobot.hooks.builtin.tool_scores import make_tool_scorer_hook
+    scorer_callback, scorer_instance = make_tool_scorer_hook(workspace)
+    hooks.on("tool_after", scorer_callback)
+    # Store scorer on hooks engine so context builder can access insights
+    hooks._tool_scorer = scorer_instance  # type: ignore[attr-defined]
+
+    # Self-correction — detects tool failures and learns from repeated errors
+    from nanobot.hooks.builtin.self_correct import make_self_correct_hook
+    hooks.on("tool_after", make_self_correct_hook(workspace))
+
     # Generative UI — send structured tool results to frontend (fire-and-forget)
     from nanobot.hooks.builtin.tool_ui import make_tool_ui_hook
     hooks.on("tool_after", make_tool_ui_hook(bus))

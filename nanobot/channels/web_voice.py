@@ -181,6 +181,13 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_post("/api/config", self._config_update_handler)
         self._app.router.add_get("/api/memory", self._memory_handler)
         self._app.router.add_post("/api/memory/clear-short-term", self._memory_clear_short_term_handler)
+        self._app.router.add_post("/api/events", self._events_handler)
+        self._app.router.add_get("/api/goals", self._goals_handler)
+        self._app.router.add_get("/api/cron", self._cron_handler)
+        self._app.router.add_get("/api/activity", self._activity_handler)
+        self._app.router.add_post("/api/memory/search", self._memory_search_handler)
+        self._app.router.add_get("/api/memory/export", self._memory_export_handler)
+        self._app.router.add_get("/api/tools", self._tools_handler)
         # Serve React build from /root/mawabot/dist (if exists), fallback to inline HTML
         _react_dist = Path("/root/mawabot/dist")
         if _react_dist.exists():
@@ -509,12 +516,38 @@ class WebVoiceChannel(BaseChannel):
                     "preview": content.strip()[:200],
                 }
 
+            # Tool scores
+            tool_scores = {}
+            scores_path = mem_dir / "tool_scores.json"
+            if scores_path.exists():
+                try:
+                    import json as _j
+                    raw = _j.loads(scores_path.read_text(encoding="utf-8"))
+                    for tool, data in raw.items():
+                        total = data.get("success", 0) + data.get("fail", 0)
+                        if total > 0:
+                            tool_scores[tool] = {
+                                "total": total,
+                                "success": data["success"],
+                                "fail": data["fail"],
+                                "successRate": round(data["success"] / total * 100, 1),
+                                "avgDurationMs": round(data.get("total_duration_ms", 0) / total),
+                                "lastUsed": data.get("last_used", ""),
+                            }
+                except Exception:
+                    pass
+
             return web.json_response({
                 "shortTerm": _file_stats("SHORT_TERM.md"),
                 "longTerm": _file_stats("LONG_TERM.md"),
                 "observations": _file_stats("OBSERVATIONS.md"),
                 "episodes": _file_stats("EPISODES.md"),
                 "history": _file_stats("HISTORY.md"),
+                "learnings": _file_stats("LEARNINGS.md"),
+                "goals": _file_stats("GOALS.md"),
+                "media": _file_stats("MEDIA.md"),
+                "corrections": _file_stats("CORRECTIONS.md"),
+                "toolScores": tool_scores,
             })
         except Exception as e:
             logger.warning("Memory API error: {}", e)
@@ -530,6 +563,255 @@ class WebVoiceChannel(BaseChannel):
             return web.json_response({"ok": True})
         except Exception as e:
             logger.warning("Memory clear error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _events_handler(self, request: web.Request) -> web.Response:
+        """Ingest external events via webhook. POST /api/events."""
+        try:
+            from nanobot.hooks.builtin.events import parse_event, format_event_as_message, validate_signature
+
+            body = await request.json()
+
+            # Optional HMAC signature verification
+            sig = request.headers.get("X-Nanobot-Signature", "")
+            if sig:
+                import os
+                secret = os.environ.get("NANOBOT_WEBHOOK_SECRET", "")
+                if secret and not validate_signature(await request.read(), sig, secret):
+                    return web.json_response({"error": "Invalid signature"}, status=401)
+
+            event = parse_event(body)
+            if isinstance(event, str):
+                return web.json_response({"error": event}, status=400)
+
+            # Route event to agent via message bus as a system message
+            from nanobot.bus.events import InboundMessage
+            msg = InboundMessage(
+                channel="system",
+                sender_id="webhook",
+                chat_id=body.get("deliver_to", "web_voice:direct"),
+                content=format_event_as_message(event),
+                metadata={"_event": event},
+            )
+            await self.bus.publish_inbound(msg)
+
+            # Log to HISTORY.md
+            from nanobot.config.paths import get_workspace_path
+            mem_dir = get_workspace_path() / "memory"
+            history = mem_dir / "HISTORY.md"
+            from datetime import datetime
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+            with open(history, "a", encoding="utf-8") as f:
+                f.write(f"[{ts}] EVENT {event['type']} from {event['source']}: {event['title']}\n\n")
+
+            return web.json_response({"ok": True, "event_id": event["received_at"]})
+        except Exception as e:
+            logger.warning("Events API error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _goals_handler(self, request: web.Request) -> web.Response:
+        """Return goals/tasks for the settings UI."""
+        try:
+            from nanobot.config.paths import get_workspace_path
+            goals_path = get_workspace_path() / "memory" / "GOALS.md"
+            if not goals_path.exists():
+                return web.json_response({"goals": [], "raw": ""})
+
+            content = goals_path.read_text(encoding="utf-8")
+            # Parse goals from markdown checkboxes
+            goals = []
+            for line in content.split("\n"):
+                line = line.strip()
+                if line.startswith("- [ ] "):
+                    goals.append({"text": line[6:], "done": False})
+                elif line.startswith("- [x] ") or line.startswith("- [X] "):
+                    goals.append({"text": line[6:], "done": True})
+            return web.json_response({"goals": goals, "raw": content})
+        except Exception as e:
+            logger.warning("Goals API error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _cron_handler(self, request: web.Request) -> web.Response:
+        """Return scheduled cron jobs."""
+        try:
+            from nanobot.config.paths import get_workspace_path
+            import json as _j
+            config_dir = Path("/root/.nanobot")
+            jobs_file = config_dir / "cron" / "jobs.json"
+            if not jobs_file.exists():
+                return web.json_response({"jobs": []})
+            data = _j.loads(jobs_file.read_text(encoding="utf-8"))
+            jobs = []
+            for job in data.get("jobs", []):
+                jobs.append({
+                    "id": job.get("id", ""),
+                    "name": job.get("name", ""),
+                    "message": job.get("message", ""),
+                    "schedule": job.get("schedule", {}),
+                    "enabled": job.get("enabled", True),
+                    "channel": job.get("channel", ""),
+                    "lastError": job.get("last_error", ""),
+                })
+            return web.json_response({"jobs": jobs})
+        except Exception as e:
+            logger.warning("Cron API error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _activity_handler(self, request: web.Request) -> web.Response:
+        """Return recent activity entries from activity.jsonl."""
+        try:
+            from nanobot.config.paths import get_workspace_path
+            import json as _j
+            activity_file = get_workspace_path() / "activity.jsonl"
+            entries = []
+            if activity_file.exists():
+                lines = activity_file.read_text(encoding="utf-8").strip().split("\n")
+                # Return last 50 entries, newest first
+                for line in reversed(lines[-50:]):
+                    if line.strip():
+                        try:
+                            entries.append(_j.loads(line))
+                        except _j.JSONDecodeError:
+                            pass
+            return web.json_response({"entries": entries})
+        except Exception as e:
+            logger.warning("Activity API error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _memory_search_handler(self, request: web.Request) -> web.Response:
+        """Search memory via ToolsDNS semantic search."""
+        try:
+            body = await request.json()
+            query = body.get("query", "").strip()
+            if not query:
+                return web.json_response({"error": "query required"}, status=400)
+
+            from nanobot.config.loader import load_config
+            config = load_config()
+            td = getattr(getattr(config, "tools", None), "toolsdns", None)
+            if not td or not td.url:
+                return web.json_response({"results": [], "note": "ToolsDNS not configured"})
+
+            import httpx
+            resp = httpx.post(
+                f"{td.url}/v1/search",
+                json={"query": query, "top_k": 10, "threshold": 0.1, "id_prefix": "memory__"},
+                headers={"Authorization": f"Bearer {td.api_key}"},
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                return web.json_response({"results": [], "note": "Search failed"})
+
+            results = []
+            for r in resp.json().get("results", []):
+                results.append({
+                    "title": r.get("title", ""),
+                    "content": r.get("description", r.get("content", ""))[:300],
+                    "score": round(r.get("score", 0) * 100, 1),
+                    "source": r.get("source_info", {}).get("file_path", ""),
+                })
+            return web.json_response({"results": results})
+        except Exception as e:
+            logger.warning("Memory search API error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _memory_export_handler(self, request: web.Request) -> web.Response:
+        """Export all memory files as JSON."""
+        try:
+            from nanobot.config.paths import get_workspace_path
+            mem_dir = get_workspace_path() / "memory"
+            export = {}
+            if mem_dir.exists():
+                for f in sorted(mem_dir.rglob("*.md")):
+                    key = str(f.relative_to(mem_dir))
+                    export[key] = f.read_text(encoding="utf-8")
+                # Include tool_scores.json
+                scores = mem_dir / "tool_scores.json"
+                if scores.exists():
+                    export["tool_scores.json"] = scores.read_text(encoding="utf-8")
+            return web.json_response({"files": export, "count": len(export)})
+        except Exception as e:
+            logger.warning("Memory export error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _tools_handler(self, request: web.Request) -> web.Response:
+        """Return list of available tools with metadata."""
+        try:
+            from nanobot.config.paths import get_workspace_path
+            import json as _j
+            # Read tool scores for reliability data
+            mem_dir = get_workspace_path() / "memory"
+            scores = {}
+            scores_path = mem_dir / "tool_scores.json"
+            if scores_path.exists():
+                try:
+                    scores = _j.loads(scores_path.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+
+            # Check ToolsDNS for available tools
+            from nanobot.config.loader import load_config
+            config = load_config()
+            td = getattr(getattr(config, "tools", None), "toolsdns", None)
+            tools = []
+
+            # Built-in tools
+            builtins = [
+                {"name": "read_file", "type": "builtin", "desc": "Read file contents"},
+                {"name": "write_file", "type": "builtin", "desc": "Write to a file"},
+                {"name": "edit_file", "type": "builtin", "desc": "Edit file with find/replace"},
+                {"name": "list_dir", "type": "builtin", "desc": "List directory contents"},
+                {"name": "exec", "type": "builtin", "desc": "Execute shell commands"},
+                {"name": "web_search", "type": "builtin", "desc": "Search the web"},
+                {"name": "web_fetch", "type": "builtin", "desc": "Fetch a URL"},
+                {"name": "message", "type": "builtin", "desc": "Send message to a channel"},
+                {"name": "memory_search", "type": "builtin", "desc": "Search memory via semantic embeddings"},
+                {"name": "memory_save", "type": "builtin", "desc": "Save knowledge to memory"},
+                {"name": "goals", "type": "builtin", "desc": "Track persistent goals and tasks"},
+                {"name": "remember_media", "type": "builtin", "desc": "Remember images, receipts, documents"},
+                {"name": "cron", "type": "builtin", "desc": "Schedule reminders and tasks"},
+                {"name": "spawn", "type": "builtin", "desc": "Spawn a background subagent"},
+            ]
+            for t in builtins:
+                score_data = scores.get(t["name"], {})
+                total = score_data.get("success", 0) + score_data.get("fail", 0)
+                t["calls"] = total
+                t["successRate"] = round(score_data["success"] / total * 100, 1) if total > 0 else None
+                t["lastUsed"] = score_data.get("last_used", "")
+                tools.append(t)
+
+            # ToolsDNS tools
+            if td and td.url:
+                try:
+                    import httpx
+                    resp = httpx.get(
+                        f"{td.url}/v1/health",
+                        headers={"Authorization": f"Bearer {td.api_key}"},
+                        timeout=3,
+                    )
+                    if resp.status_code == 200:
+                        td_tools = resp.json().get("tools", [])
+                        if isinstance(td_tools, int):
+                            pass  # Just a count, no detail
+                        elif isinstance(td_tools, list):
+                            for tt in td_tools:
+                                name = tt if isinstance(tt, str) else tt.get("id", "")
+                                score_data = scores.get(name, {})
+                                total = score_data.get("success", 0) + score_data.get("fail", 0)
+                                tools.append({
+                                    "name": name,
+                                    "type": "toolsdns",
+                                    "desc": tt.get("description", "") if isinstance(tt, dict) else "",
+                                    "calls": total,
+                                    "successRate": round(score_data["success"] / total * 100, 1) if total > 0 else None,
+                                    "lastUsed": score_data.get("last_used", ""),
+                                })
+                except Exception:
+                    pass
+
+            return web.json_response({"tools": tools})
+        except Exception as e:
+            logger.warning("Tools API error: {}", e)
             return web.json_response({"error": "Internal error"}, status=500)
 
     def _get_active_profile_name(self) -> str:

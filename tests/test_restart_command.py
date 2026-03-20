@@ -35,7 +35,9 @@ class TestRestartCommand:
         loop, bus = _make_loop()
         msg = InboundMessage(channel="cli", sender_id="user", chat_id="direct", content="/restart")
 
-        with patch("nanobot.agent.loop.os.execv") as mock_execv:
+        mock_run = MagicMock(return_value=MagicMock(returncode=1))
+        with patch("nanobot.agent.loop.os.execv") as mock_execv, \
+             patch("subprocess.run", mock_run):
             await loop._handle_restart(msg)
             out = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
             assert "Restarting" in out.content

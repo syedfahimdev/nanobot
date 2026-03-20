@@ -194,7 +194,8 @@ def test_is_allowed_rejects_invalid_legacy_telegram_sender_shapes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_progress_keeps_message_in_topic() -> None:
+async def test_send_progress_skipped_on_telegram() -> None:
+    """Progress messages are intentionally skipped on Telegram (typing indicator suffices)."""
     config = TelegramConfig(enabled=True, token="123:abc", allow_from=["*"])
     channel = TelegramChannel(config, MessageBus())
     channel._app = _FakeApp(lambda: None)
@@ -208,7 +209,7 @@ async def test_send_progress_keeps_message_in_topic() -> None:
         )
     )
 
-    assert channel._app.bot.sent_messages[0]["message_thread_id"] == 42
+    assert len(channel._app.bot.sent_messages) == 0
 
 
 @pytest.mark.asyncio
