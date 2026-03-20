@@ -493,6 +493,7 @@ class AgentLoop:
                 queries = data.get("queries_used", [])
                 logger.info("ToolsDNS preflight: tools found via '{}'",
                              " + ".join(queries[:3])[:80])
+                context_block = await self._enrich_with_hints(context_block)
                 self._preflight_cache.set(text, context_block)
                 return context_block
 
@@ -565,6 +566,7 @@ class AgentLoop:
                 all_results.sort(key=lambda t: t.get("confidence", 0), reverse=True)
                 if all_results:
                     result_block = self._build_context_block(all_results[:5])
+                    result_block = await self._enrich_with_hints(result_block)
                     names = [t["name"] for t in all_results[:5]]
                     logger.info("ToolsDNS tier 2: found {} tools: {}", len(names), ", ".join(names))
                     self._preflight_cache.set(text, result_block)
@@ -574,6 +576,7 @@ class AgentLoop:
 
             # Fallback: return original context_block if available
             if data.get("found") and context_block:
+                context_block = await self._enrich_with_hints(context_block)
                 self._preflight_cache.set(text, context_block)
                 return context_block
 
@@ -583,6 +586,48 @@ class AgentLoop:
         except Exception as e:
             logger.debug("ToolsDNS preflight failed (non-blocking): {}", e)
             return None
+
+    async def _enrich_with_hints(self, context_block: str, timeout: float = 3.0) -> str:
+        """Append [TOOL MEMORY] hints to a context block if available."""
+        if not context_block or not self._toolsdns_config.enabled:
+            return context_block
+        try:
+            import httpx
+            # Extract all TOOL_IDs from the context block
+            tool_ids = re.findall(r'TOOL_ID: (\S+)', context_block)
+            if not tool_ids:
+                return context_block
+            url = self._toolsdns_config.url.rstrip("/")
+            headers = {"Authorization": f"Bearer {self._toolsdns_config.api_key}"}
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    f"{url}/v1/tool-hints",
+                    headers=headers,
+                    json={"agent_id": "mawa", "tool_ids": tool_ids},
+                )
+                if resp.status_code != 200:
+                    return context_block
+                data = resp.json()
+                hints = data.get("hints", {})
+                if not hints:
+                    return context_block
+                hint_lines = []
+                for tool_id, entries in hints.items():
+                    if entries:
+                        args = entries[0].get("arguments", {})
+                        # Filter out empty/null values
+                        args = {k: v for k, v in args.items() if v}
+                        if args:
+                            import json as _json
+                            short_name = tool_id.replace("tooldns__", "")
+                            hint_lines.append(
+                                f"  {short_name}: {_json.dumps(args)}"
+                            )
+                if hint_lines:
+                    context_block += "\n\n[TOOL MEMORY] Previously successful args:\n" + "\n".join(hint_lines)
+        except Exception:
+            pass  # Non-blocking
+        return context_block
 
     @staticmethod
     def _build_context_block(tools: list[dict]) -> str:
@@ -1034,6 +1079,31 @@ class AgentLoop:
             return True
         return False
 
+    # Context-dependent message detection — pronouns/references that need conversation context
+    _CONTEXT_MARKERS = re.compile(
+        r"\b(that|this|those|these|it|its|them|him|her|his|hers|theirs"
+        r"|also|too|same|again|like before|the one|the last"
+        r"|previous|earlier|just now|what you|you just|my last"
+        r"|did (it|they|he|she)|was (it|that|this)"
+        r"|how about|what about|and also|one more)\b",
+        re.IGNORECASE,
+    )
+
+    _CLEAR_TASK_RE = re.compile(
+        r"\b(check|fetch|search|create|send|schedule|book|open|list|show|set|get|find)\b"
+        r".*\b(email|calendar|slack|github|weather|stock|task|file|report|meeting|news|reddit)\b",
+        re.IGNORECASE,
+    )
+
+    def _is_context_dependent(self, text: str) -> bool:
+        """Detect messages needing conversation context (pronouns, references)."""
+        stripped = text.strip()
+        if len(stripped) > 120:
+            return False  # Long messages are likely self-contained
+        if self._CLEAR_TASK_RE.search(stripped):
+            return False  # Clear verb+noun = self-contained task
+        return bool(self._CONTEXT_MARKERS.search(stripped))
+
     # Dynamic skill pattern cache — built from skill names/trigger phrases
     _skill_pattern: re.Pattern | None = None
     _skill_cache_ts: float = 0
@@ -1146,6 +1216,13 @@ class AgentLoop:
             if self._is_conversational(text):
                 logger.info("Session {} busy, queuing conversational: '{}'",
                             msg.session_key, text[:40])
+                self._pending_messages.setdefault(msg.session_key, []).append(msg)
+                return
+
+            # Context-dependent messages (pronouns, references) need main agent context
+            if self._is_context_dependent(text):
+                logger.info("Session {} busy, queuing context-dependent: '{}'",
+                            msg.session_key, text[:60])
                 self._pending_messages.setdefault(msg.session_key, []).append(msg)
                 return
 

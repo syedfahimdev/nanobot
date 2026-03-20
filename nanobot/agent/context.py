@@ -105,6 +105,25 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
+    def build_subagent_context(self) -> str:
+        """Build condensed context from USER.md + TOOLS.md for subagent injection.
+
+        Reads the files and extracts the first N lines of each (truncated).
+        No regex parsing — just cap the size to keep tokens low.
+        """
+        parts = []
+        for filename, max_lines in [("USER.md", 40), ("TOOLS.md", 25)]:
+            path = self.workspace / filename
+            if path.exists():
+                content = path.read_text(encoding="utf-8")
+                all_lines = content.split("\n")
+                lines = all_lines[:max_lines]
+                truncated = "\n".join(lines)
+                if len(lines) < len(all_lines):
+                    truncated += "\n... (truncated)"
+                parts.append(f"## {filename}\n\n{truncated}")
+        return "\n\n".join(parts)
+
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""
         parts = []

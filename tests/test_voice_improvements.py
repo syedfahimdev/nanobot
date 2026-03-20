@@ -365,3 +365,67 @@ class TestAppNameConfig:
 
         config = WebVoiceConfig()
         assert config.app_name == "Mawa"
+
+
+# ── Context-Dependent Message Detection ──
+
+class TestContextDependent:
+    def _make_loop(self):
+        from nanobot.agent.loop import AgentLoop
+        loop = AgentLoop.__new__(AgentLoop)
+        return loop
+
+    def test_pronoun_references_detected(self):
+        loop = self._make_loop()
+        assert loop._is_context_dependent("did it all come?")
+        assert loop._is_context_dependent("send that to John")
+        assert loop._is_context_dependent("also remind him about Friday")
+        assert loop._is_context_dependent("what about those?")
+        assert loop._is_context_dependent("was it successful?")
+
+    def test_clear_tasks_not_blocked(self):
+        loop = self._make_loop()
+        assert not loop._is_context_dependent("check my email")
+        assert not loop._is_context_dependent("search for AI news on reddit")
+        assert not loop._is_context_dependent("send email to john@example.com")
+        assert not loop._is_context_dependent("find weather in new york")
+
+    def test_long_messages_pass_through(self):
+        loop = self._make_loop()
+        long_msg = "I want you to also check " + "x" * 100
+        assert not loop._is_context_dependent(long_msg)
+
+    def test_conversational_not_context_dependent(self):
+        loop = self._make_loop()
+        # "it" is a context marker but "ok" is conversational — caught earlier
+        # These should not match because they're too short and simple
+        assert not loop._is_context_dependent("ok")
+        assert not loop._is_context_dependent("yes")
+
+
+# ── Subagent Context Injection ──
+
+class TestSubagentContext:
+    def test_build_subagent_context(self, tmp_path):
+        from nanobot.agent.context import ContextBuilder
+
+        user_md = tmp_path / "USER.md"
+        user_md.write_text("# User\n- **Name:** TestUser\n- **Timezone:** ET\n" + "\n".join(f"Line {i}" for i in range(50)))
+
+        tools_md = tmp_path / "TOOLS.md"
+        tools_md.write_text("# Tools\n- Use ToolsDNS first\n" + "\n".join(f"Rule {i}" for i in range(30)))
+
+        ctx = ContextBuilder(tmp_path)
+        result = ctx.build_subagent_context()
+
+        assert "TestUser" in result
+        assert "Timezone" in result
+        assert "ToolsDNS" in result
+        assert "... (truncated)" in result  # Both files exceed limit
+
+    def test_empty_workspace(self, tmp_path):
+        from nanobot.agent.context import ContextBuilder
+
+        ctx = ContextBuilder(tmp_path)
+        result = ctx.build_subagent_context()
+        assert result == ""
