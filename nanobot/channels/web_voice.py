@@ -261,10 +261,21 @@ class WebVoiceChannel(BaseChannel):
             await broadcast({"type": "parallel", "text": msg.content})
             return
 
-        # Streaming TTS sentence — enqueue for TTS, send to all clients
+        # Streaming TTS sentence — enqueue for TTS + send text chunk for live display
         if meta.get("_tts_sentence"):
+            await broadcast({"type": "response_chunk", "text": msg.content})
             for cid, _ in live_clients:
                 self._enqueue_tts(cid, msg.content)
+            return
+
+        # Structured tool result — send data for generative UI rendering
+        if meta.get("_tool_result"):
+            await broadcast({
+                "type": "tool_result",
+                "tool": meta.get("_tool_name", ""),
+                "data": meta.get("_tool_data", {}),
+                "summary": msg.content,
+            })
             return
 
         if is_progress:

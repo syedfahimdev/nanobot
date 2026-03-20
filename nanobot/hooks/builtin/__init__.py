@@ -33,6 +33,10 @@ def register_builtin_hooks(
     hooks.on("tool_after", make_tool_tracker())
     hooks.on("turn_completed", make_turn_tracker(workspace))
 
+    # Generative UI — send structured tool results to frontend (fire-and-forget)
+    from nanobot.hooks.builtin.tool_ui import make_tool_ui_hook
+    hooks.on("tool_after", make_tool_ui_hook(bus))
+
     # Memory re-index on file writes (fire-and-forget)
     if toolsdns_url and toolsdns_api_key:
         from nanobot.hooks.builtin.memory_reindex import make_memory_reindex_hook
