@@ -177,6 +177,8 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/ws", self._ws_handler)
         self._app.router.add_get("/health", self._health_handler)
         self._app.router.add_get("/api/profiles", self._profiles_handler)
+        self._app.router.add_get("/api/config", self._config_handler)
+        self._app.router.add_post("/api/config", self._config_update_handler)
         # Serve React build from /root/mawabot/dist (if exists), fallback to inline HTML
         _react_dist = Path("/root/mawabot/dist")
         if _react_dist.exists():
@@ -392,6 +394,88 @@ class WebVoiceChannel(BaseChannel):
             "status": "ok",
             "active_sessions": len(self._clients),
         })
+
+    async def _config_handler(self, request: web.Request) -> web.Response:
+        """Return full safe config for the settings UI."""
+        try:
+            import json as _json
+            from nanobot.config.loader import load_config
+            config = load_config()
+            profiles = {}
+            for name, p in (config.profiles or {}).items():
+                profiles[name] = {"provider": p.provider or "—", "model": p.model or "—"}
+
+            # Check ToolsDNS
+            toolsdns_info = {"url": "", "enabled": False, "tools": 0}
+            if self.config.deepgram_api_key:
+                pass  # deepgram is configured
+            td = getattr(config, "tools", None)
+            td_cfg = getattr(td, "toolsdns", None) if td else None
+            if td_cfg and td_cfg.url:
+                toolsdns_info = {"url": td_cfg.url, "enabled": True}
+                try:
+                    import httpx
+                    resp = httpx.get(f"{td_cfg.url}/v1/health",
+                        headers={"Authorization": f"Bearer {td_cfg.api_key}"}, timeout=3)
+                    if resp.status_code == 200:
+                        toolsdns_info["tools"] = resp.json().get("total_tools", 0)
+                except Exception:
+                    pass
+
+            return web.json_response({
+                "profiles": profiles,
+                "activeProfile": self._get_active_profile_name(),
+                "voice": {
+                    "ttsModel": self.config.tts_model,
+                    "sttModel": self.config.stt_model,
+                    "deepgramConfigured": bool(self.config.deepgram_api_key),
+                },
+                "toolsdns": toolsdns_info,
+                "connection": {
+                    "host": self.config.host,
+                    "port": self.config.port,
+                    "tailscaleOnly": self.config.tailscale_only,
+                },
+            })
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _config_update_handler(self, request: web.Request) -> web.Response:
+        """Update config values from the settings UI."""
+        try:
+            import json as _json
+            body = await request.json()
+            config_path = Path("/root/.nanobot/config.json")
+            cfg = _json.loads(config_path.read_text())
+
+            changed = []
+            # Update voice settings
+            if "ttsModel" in body:
+                cfg.setdefault("channels", {}).setdefault("web_voice", {})["ttsModel"] = body["ttsModel"]
+                self.config.tts_model = body["ttsModel"]
+                changed.append("ttsModel")
+            if "sttModel" in body:
+                cfg.setdefault("channels", {}).setdefault("web_voice", {})["sttModel"] = body["sttModel"]
+                self.config.stt_model = body["sttModel"]
+                changed.append("sttModel")
+
+            if changed:
+                config_path.write_text(_json.dumps(cfg, indent=2))
+
+            return web.json_response({"ok": True, "changed": changed})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    def _get_active_profile_name(self) -> str:
+        """Get the name of the currently active LLM profile."""
+        try:
+            from nanobot.config.loader import load_config
+            config = load_config()
+            # The active profile is stored in the agent loop, not easily accessible here
+            # Return "default" as fallback
+            return "default"
+        except Exception:
+            return "default"
 
     async def _profiles_handler(self, request: web.Request) -> web.Response:
         """Return available LLM profiles for the UI switcher."""
