@@ -188,6 +188,7 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_post("/api/memory/search", self._memory_search_handler)
         self._app.router.add_get("/api/memory/export", self._memory_export_handler)
         self._app.router.add_get("/api/tools", self._tools_handler)
+        self._app.router.add_get("/api/files/{path:.*}", self._file_download_handler)
         # Serve React build from /root/mawabot/dist (if exists), fallback to inline HTML
         _react_dist = Path("/root/mawabot/dist")
         if _react_dist.exists():
@@ -812,6 +813,44 @@ class WebVoiceChannel(BaseChannel):
             return web.json_response({"tools": tools})
         except Exception as e:
             logger.warning("Tools API error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _file_download_handler(self, request: web.Request) -> web.Response:
+        """Serve workspace files for download/preview. GET /api/files/{path}."""
+        try:
+            from nanobot.config.paths import get_workspace_path
+            import mimetypes
+
+            rel_path = request.match_info.get("path", "")
+            if not rel_path:
+                return web.json_response({"error": "Path required"}, status=400)
+
+            workspace = get_workspace_path()
+            file_path = (workspace / rel_path).resolve()
+
+            # Security: ensure file is within workspace
+            if not str(file_path).startswith(str(workspace.resolve())):
+                return web.json_response({"error": "Access denied"}, status=403)
+
+            if not file_path.exists() or not file_path.is_file():
+                return web.json_response({"error": "File not found"}, status=404)
+
+            content_type, _ = mimetypes.guess_type(str(file_path))
+            content_type = content_type or "application/octet-stream"
+
+            # For viewable types, serve inline; for others, force download
+            viewable = {"text/", "image/", "application/pdf", "application/json"}
+            disposition = "inline" if any(content_type.startswith(v) for v in viewable) else "attachment"
+
+            return web.FileResponse(
+                file_path,
+                headers={
+                    "Content-Disposition": f'{disposition}; filename="{file_path.name}"',
+                    "Content-Type": content_type,
+                },
+            )
+        except Exception as e:
+            logger.warning("File download error: {}", e)
             return web.json_response({"error": "Internal error"}, status=500)
 
     def _get_active_profile_name(self) -> str:
