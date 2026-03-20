@@ -96,7 +96,14 @@ class AgentLoop:
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
-        self.tools = ToolRegistry()
+
+        # Hook engine — deterministic code-level event handlers
+        from nanobot.hooks import HookEngine
+        from nanobot.hooks.builtin import register_builtin_hooks
+        self.hooks = HookEngine()
+        register_builtin_hooks(self.hooks, workspace, bus)
+
+        self.tools = ToolRegistry(hooks=self.hooks)
         self._preflight_cache = PreflightCache()
         self.subagents = SubagentManager(
             provider=provider,
@@ -190,6 +197,9 @@ class AgentLoop:
             if tool := self.tools.get(name):
                 if hasattr(tool, "set_context"):
                     tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
+        # Set hook context so approval guard knows the channel
+        session_key = f"{channel}:{chat_id}"
+        self.tools.set_context(channel, chat_id, session_key)
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -1208,6 +1218,12 @@ class AgentLoop:
           session history after the current task completes.
         - Task messages are auto-spawned as subagents for parallel execution.
         """
+        # Intercept approval responses (yes/no) — consumed before normal dispatch
+        from nanobot.hooks.builtin.approval import resolve_approval
+        if resolve_approval(msg.session_key, msg.content):
+            logger.info("Approval response consumed for {}: '{}'", msg.session_key, msg.content[:20])
+            return
+
         lock = self._get_session_lock(msg.session_key)
 
         if lock.locked():
@@ -1471,6 +1487,7 @@ class AgentLoop:
                 "/stop — Stop the current task",
                 "/restart — Restart the bot",
                 "/profile [name|list] — Switch provider profile",
+                "/doctor — Run health checks",
                 "/help — Show available commands",
             ]
             return OutboundMessage(
@@ -1478,12 +1495,26 @@ class AgentLoop:
             )
         if cmd.startswith("/profile"):
             return self._handle_profile_cmd(msg)
+        if cmd == "/doctor":
+            from nanobot.hooks.builtin.health import run_doctor
+            report = await run_doctor(
+                workspace=self.workspace,
+                toolsdns_config=self._toolsdns_config,
+                provider=self.provider,
+                model=self.model,
+            )
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=report)
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
+
+        # Lifecycle tracking
+        from nanobot.hooks.builtin.lifecycle import mark_turn_started
+        mark_turn_started(key, msg.channel)
+        _turn_t0 = __import__("time").monotonic()
 
         # ToolsDNS pre-flight + speech intel run in parallel for voice channels
         _is_voice = msg.channel in ("discord_voice", "web_voice")
@@ -1552,6 +1583,15 @@ class AgentLoop:
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
         self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
+
+        # Emit turn_completed for lifecycle tracking
+        _turn_elapsed = (__import__("time").monotonic() - _turn_t0) * 1000
+        from nanobot.hooks.events import TurnCompleted
+        await self.hooks.emit("turn_completed", TurnCompleted(
+            session_key=key, final_content=final_content,
+            tools_used=[], iterations=0, duration_ms=_turn_elapsed,
+            channel=msg.channel, chat_id=msg.chat_id,
+        ))
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
