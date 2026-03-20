@@ -219,6 +219,28 @@ class MemoryStore:
             except (json.JSONDecodeError, OSError, TypeError):
                 pass
 
+        # Inject pending goals so agent is always aware of them
+        goals_file = self.memory_dir / "GOALS.md"
+        if goals_file.exists():
+            try:
+                content = goals_file.read_text(encoding="utf-8")
+                pending = [l.strip()[6:] for l in content.split("\n") if l.strip().startswith("- [ ] ")]
+                if pending:
+                    overdue = []
+                    from datetime import datetime, date
+                    import re
+                    today = date.today().isoformat()
+                    for p in pending:
+                        m = re.search(r"\(due:\s*(\d{4}-\d{2}-\d{2})\)", p)
+                        if m and m.group(1) < today:
+                            overdue.append(p)
+                    goals_text = "\n".join(f"- [ ] {p}" for p in pending[:8])
+                    if overdue:
+                        goals_text = "OVERDUE: " + ", ".join(overdue) + "\n" + goals_text
+                    parts.append(f"## Pending Goals ({len(pending)})\n{goals_text}\nUse the goals tool to manage these.")
+            except (OSError, TypeError):
+                pass
+
         parts.append("Use memory_search to recall long-term facts, past episodes, or user preferences.")
 
         return "\n\n".join(parts)
