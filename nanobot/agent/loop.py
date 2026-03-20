@@ -198,6 +198,12 @@ class AgentLoop:
         self.tools.register(MediaMemoryTool(workspace=self.workspace))
         from nanobot.agent.tools.inbox import InboxTool
         self.tools.register(InboxTool(workspace=self.workspace))
+        # Native Playwright browser — works without ToolsDNS/Composio
+        try:
+            from nanobot.agent.tools.browser import BrowserTool
+            self.tools.register(BrowserTool())
+        except Exception:
+            pass  # Playwright not installed — skip silently
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -477,7 +483,9 @@ class AgentLoop:
         # Skip ToolsDNS for queries that map to built-in tools
         _builtin_patterns = re.compile(
             r"\b(goal|goals|my goals|list.*goals|check.*goals|add.*goal|complete.*goal|"
-            r"inbox|my docs|my documents|search.*inbox|upload)\b", re.I,
+            r"inbox|my docs|my documents|search.*inbox|upload|"
+            r"open.*website|browse|go to.*\.com|go to.*\.org|navigate.*url|screenshot|playwright|"
+            r"open.*page|visit.*site|browser)\b", re.I,
         )
         if _builtin_patterns.search(text):
             return None

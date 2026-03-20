@@ -124,6 +124,8 @@ Your workspace is at: {workspace_path}
 - "search my docs" / "find in inbox" → call `inbox(action="search", query="...")`
 - "what do you know about me" / recall facts → call `memory_search`
 - Before drafting work emails → call `inbox(action="search", folder="work", query="...")`
+- "open website" / "go to URL" / "browse" / "screenshot" → call `browser(action="navigate", url="...")` (built-in Playwright, NOT ToolsDNS browser tools)
+- For browser automation: ALWAYS use the built-in `browser` tool, NOT ToolsDNS BROWSER_TOOL_* or browser_navigate
 
 Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
 
