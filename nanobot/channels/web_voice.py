@@ -248,6 +248,7 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_post("/api/generated/cleanup", self._generated_cleanup_handler)
         self._app.router.add_get("/api/inbox", self._inbox_list_handler)
         self._app.router.add_get("/api/toolsdns/health", self._toolsdns_health_handler)
+        self._app.router.add_get("/api/autonomy", self._autonomy_handler)
         self._app.router.add_get("/api/credentials", self._credentials_list_handler)
         self._app.router.add_post("/api/credentials", self._credentials_update_handler)
         # Serve React build from /root/mawabot/dist (if exists), fallback to inline HTML
@@ -1138,6 +1139,52 @@ class WebVoiceChannel(BaseChannel):
         except Exception as e:
             logger.warning("ToolsDNS health error: {}", e)
             return web.json_response({"status": "error", "error": str(e)})
+
+    async def _autonomy_handler(self, request: web.Request) -> web.Response:
+        """Return autonomy system stats for the settings page."""
+        try:
+            from nanobot.config.paths import get_workspace_path
+            workspace = get_workspace_path()
+
+            # Workflow patterns
+            workflow_patterns = []
+            try:
+                from nanobot.hooks.builtin.workflow_recorder import get_recorder
+                recorder = get_recorder(workspace)
+                workflow_patterns = recorder.get_top_patterns(5)
+            except Exception:
+                pass
+
+            # Prompt optimization stats
+            prompt_stats = {}
+            try:
+                from nanobot.hooks.builtin.prompt_optimizer import get_optimizer
+                optimizer = get_optimizer(workspace)
+                prompt_stats = optimizer.get_stats_summary()
+            except Exception:
+                pass
+
+            # Skills count
+            skills_dir = workspace / "skills"
+            skills_count = 0
+            if skills_dir.exists():
+                skills_count = sum(1 for d in skills_dir.iterdir() if d.is_dir() and (d / "SKILL.md").exists())
+
+            # Knowledge digest size
+            digest = workspace / "memory" / "KNOWLEDGE_DIGEST.md"
+            knowledge_entries = 0
+            if digest.exists():
+                knowledge_entries = digest.read_text().count("## [")
+
+            return web.json_response({
+                "skills": skills_count,
+                "knowledgeEntries": knowledge_entries,
+                "workflowPatterns": workflow_patterns,
+                "promptStats": prompt_stats,
+            })
+        except Exception as e:
+            logger.warning("Autonomy API error: {}", e)
+            return web.json_response({"error": str(e)}, status=500)
 
     async def _credentials_list_handler(self, request: web.Request) -> web.Response:
         """List stored credentials — names only, NEVER actual values."""

@@ -154,6 +154,16 @@ class AgentLoop:
         _td_key2 = toolsdns_config.api_key if toolsdns_config else ""
         self.hooks.on("turn_completed", make_inbox_indexer_hook(workspace, provider, self.model, _td_url2, _td_key2))
 
+        # Workflow recorder — detects repeated tool sequences
+        from nanobot.hooks.builtin.workflow_recorder import make_workflow_recorder_tool_hook, make_workflow_recorder_turn_hook
+        self.hooks.on("tool_after", make_workflow_recorder_tool_hook(workspace))
+        self.hooks.on("turn_completed", make_workflow_recorder_turn_hook(workspace, bus))
+
+        # Prompt optimizer — tracks instruction effectiveness
+        from nanobot.hooks.builtin.prompt_optimizer import make_prompt_optimizer_tool_hook, make_prompt_optimizer_turn_hook
+        self.hooks.on("tool_after", make_prompt_optimizer_tool_hook(workspace))
+        self.hooks.on("turn_completed", make_prompt_optimizer_turn_hook(workspace))
+
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -198,6 +208,12 @@ class AgentLoop:
         self.tools.register(MediaMemoryTool(workspace=self.workspace))
         from nanobot.agent.tools.inbox import InboxTool
         self.tools.register(InboxTool(workspace=self.workspace))
+        # Skill acquisition — learn new skills from descriptions/URLs
+        from nanobot.agent.tools.skill_creator import SkillCreatorTool
+        self.tools.register(SkillCreatorTool(self.workspace, self.provider, self.model))
+        # Knowledge ingestion — learn from web pages and blogs
+        from nanobot.agent.tools.knowledge_ingest import KnowledgeIngestTool
+        self.tools.register(KnowledgeIngestTool(self.workspace, self.provider, self.model))
         # Credentials — securely store and use passwords
         from nanobot.agent.tools.credentials import CredentialsTool
         self.tools.register(CredentialsTool())
