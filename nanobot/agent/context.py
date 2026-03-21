@@ -105,6 +105,7 @@ Your workspace is at: {workspace_path}
 - Observations: {workspace_path}/memory/OBSERVATIONS.md (detected behavior patterns)
 - History log: {workspace_path}/memory/HISTORY.md (grep-searchable). Each entry starts with [YYYY-MM-DD HH:MM].
 - RAG inbox: {workspace_path}/inbox/work/, personal/, general/ — use the inbox tool to search uploaded docs before writing emails or answering questions.
+- Generated files: {workspace_path}/generated/ — work orders, reports, exports go here (auto-accessible via /api/files/)
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
 {platform_policy}
@@ -133,11 +134,10 @@ Your workspace is at: {workspace_path}
 - DO NOT spawn subagents for skill workflows — handle all phases yourself in the main conversation.
 - Gather ALL required info from the user BEFORE calling execution tools.
 - When a tool generates a file, extract the `local_path` from its response.
-- After getting the local_path, COPY the file to the workspace for reliable access:
-  Call exec with: cp "LOCAL_PATH" /root/.nanobot/workspace/memory/media/
-- Then in your response, include the workspace path: /root/.nanobot/workspace/memory/media/FILENAME.xlsx
-- CRITICAL: The path MUST start with / and be inside the workspace. Without the full path, the download card won't appear.
-- Try calling get_file if available. If it fails, that's OK — the copied file is accessible via the workspace.
+- COPY it to the workspace: use the exec tool to run: cp "LOCAL_PATH" /root/.nanobot/workspace/generated/work-orders/
+- In your response, include the WORKSPACE path: `/root/.nanobot/workspace/generated/work-orders/FILENAME.xlsx`
+- The path MUST be inside /root/.nanobot/workspace/ and start with /. Without it, no download card appears.
+- Try get_file if available. If it fails, the copied workspace file is always accessible.
 
 Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
 

@@ -244,6 +244,8 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/api/tools", self._tools_handler)
         self._app.router.add_get("/api/files/{path:.*}", self._file_download_handler)
         self._app.router.add_post("/api/inbox/upload", self._inbox_upload_handler)
+        self._app.router.add_get("/api/generated", self._generated_list_handler)
+        self._app.router.add_post("/api/generated/cleanup", self._generated_cleanup_handler)
         self._app.router.add_get("/api/inbox", self._inbox_list_handler)
         self._app.router.add_get("/api/toolsdns/health", self._toolsdns_health_handler)
         self._app.router.add_get("/api/credentials", self._credentials_list_handler)
@@ -1069,6 +1071,54 @@ class WebVoiceChannel(BaseChannel):
             return web.json_response({"folders": folders, "total": total})
         except Exception as e:
             logger.warning("Inbox list error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _generated_list_handler(self, request: web.Request) -> web.Response:
+        """List generated files (work orders, reports, etc.)."""
+        try:
+            from nanobot.config.paths import get_workspace_path
+            gen_dir = get_workspace_path() / "generated"
+            files = []
+            if gen_dir.exists():
+                for sub in sorted(gen_dir.iterdir()):
+                    if sub.is_dir():
+                        for f in sorted(sub.iterdir()):
+                            if f.is_file() and not f.name.startswith("."):
+                                files.append({
+                                    "name": f.name,
+                                    "folder": sub.name,
+                                    "size": f.stat().st_size,
+                                    "modified": f.stat().st_mtime,
+                                    "path": str(f),
+                                })
+            return web.json_response({"files": files, "total": len(files)})
+        except Exception as e:
+            logger.warning("Generated list error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _generated_cleanup_handler(self, request: web.Request) -> web.Response:
+        """Delete old generated files. POST with optional {older_than_days: N}."""
+        try:
+            from nanobot.config.paths import get_workspace_path
+            import time
+
+            body = await request.json() if request.content_length else {}
+            days = body.get("older_than_days", 7)
+            cutoff = time.time() - (days * 86400)
+
+            gen_dir = get_workspace_path() / "generated"
+            deleted = 0
+            if gen_dir.exists():
+                for sub in gen_dir.iterdir():
+                    if sub.is_dir():
+                        for f in sub.iterdir():
+                            if f.is_file() and f.stat().st_mtime < cutoff:
+                                f.unlink()
+                                deleted += 1
+
+            return web.json_response({"ok": True, "deleted": deleted, "older_than_days": days})
+        except Exception as e:
+            logger.warning("Generated cleanup error: {}", e)
             return web.json_response({"error": "Internal error"}, status=500)
 
     async def _toolsdns_health_handler(self, request: web.Request) -> web.Response:
