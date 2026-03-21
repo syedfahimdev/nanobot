@@ -102,6 +102,59 @@ def _ensure_tailscale_cert(dns_name: str) -> tuple[Path, Path] | None:
         return None
 
 
+# ── Smart endpointing: semantic sentence completion check ──
+
+# Words that signal an incomplete sentence when they appear at the end
+_INCOMPLETE_ENDINGS = re.compile(
+    r"\b(?:is|are|was|were|the|a|an|and|or|but|if|to|for|in|on|at|of|with|"
+    r"my|your|his|her|its|our|their|this|that|these|those|"
+    r"can|could|would|should|will|shall|may|might|must|"
+    r"do|does|did|have|has|had|"
+    r"not|no|any|some|every|"
+    r"about|from|into|by|than|"
+    r"there|here|where|when|what|which|who|whom|how|why|"
+    r"also|just|even|still|already|"
+    r"I|you|he|she|it|we|they)\s*$",
+    re.I,
+)
+
+# Sentence-ending punctuation
+_COMPLETE_ENDINGS = re.compile(r"[.!?;:)\"]\s*$")
+
+# Very short utterances are likely incomplete
+_MIN_COMPLETE_LENGTH = 15
+
+
+def _is_sentence_complete(text: str) -> bool:
+    """Check if text looks like a complete sentence.
+
+    Returns True if the sentence appears complete (should submit immediately).
+    Returns False if it appears incomplete (should wait for more speech).
+    """
+    text = text.strip()
+    if not text:
+        return False
+
+    # Very short → probably incomplete
+    if len(text) < _MIN_COMPLETE_LENGTH:
+        return False
+
+    # Ends with punctuation → likely complete
+    if _COMPLETE_ENDINGS.search(text):
+        return True
+
+    # Ends with an incomplete word → definitely incomplete
+    if _INCOMPLETE_ENDINGS.search(text):
+        return False
+
+    # If it got past the incomplete check and is reasonably long → complete
+    if len(text) > 25:
+        return True
+
+    # Short, no punctuation, no obvious incomplete ending → wait
+    return False
+
+
 def _strip_markdown(text: str) -> str:
     text = re.sub(r"```[\s\S]*?```", " ", text)
     text = re.sub(r"`[^`]+`", "", text)
@@ -1218,12 +1271,12 @@ class WebVoiceChannel(BaseChannel):
                             "smart_format": "true",
                             "punctuate": "true",
                             "interim_results": "true",
-                            "utterance_end_ms": "2000",
+                            "utterance_end_ms": "1000",
                             "vad_events": "true",
                             "encoding": client_encoding,
                             "sample_rate": client_sample_rate,
                             "channels": "1",
-                            "endpointing": "800",
+                            "endpointing": "400",
                             # Audio intelligence
                             "sentiment": "true",
                         }
@@ -1281,8 +1334,28 @@ class WebVoiceChannel(BaseChannel):
                                                 buf = self._utterance_buffer.get(session_id, [])
                                                 if buf:
                                                     full_text = " ".join(buf)
-                                                    self._utterance_buffer[session_id] = []
-                                                    self._enqueue_message(session_id, full_text)
+                                                    if _is_sentence_complete(full_text):
+                                                        # Sentence is complete — submit immediately
+                                                        self._utterance_buffer[session_id] = []
+                                                        self._enqueue_message(session_id, full_text)
+                                                    else:
+                                                        # Sentence incomplete — wait 1.5s for more speech
+                                                        logger.debug("Smart endpointing: incomplete '{}', waiting...", full_text[:50])
+                                                        _pending_key = f"_pending_submit_{session_id}"
+                                                        # Cancel any existing pending submit
+                                                        prev = getattr(self, _pending_key, None)
+                                                        if prev and not prev.done():
+                                                            prev.cancel()
+                                                        async def _delayed_submit(sid=session_id, txt=full_text):
+                                                            await asyncio.sleep(1.5)
+                                                            # Check if buffer was already submitted or got more text
+                                                            cur_buf = self._utterance_buffer.get(sid, [])
+                                                            if cur_buf:
+                                                                merged = " ".join(cur_buf)
+                                                                self._utterance_buffer[sid] = []
+                                                                self._enqueue_message(sid, merged)
+                                                                logger.debug("Smart endpointing: submitted after wait '{}'", merged[:50])
+                                                        setattr(self, _pending_key, asyncio.create_task(_delayed_submit()))
 
                                             elif msg_type == "Error":
                                                 await ws.send_json({"type": "error", "message": str(result)})
