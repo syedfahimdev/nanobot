@@ -1456,6 +1456,25 @@ class WebVoiceChannel(BaseChannel):
                             self._enqueue_message(session_id, f"/profile {profile_name}")
                             await ws.send_json({"type": "profile_switched", "name": profile_name})
 
+                    elif action == "interrupt":
+                        # User tapped interrupt — stop TTS, cancel pending, go to listening
+                        logger.info("Web Voice interrupt from {}", session_id)
+                        # Clear TTS queue for this session
+                        if session_id in self._tts_queues:
+                            while not self._tts_queues[session_id].empty():
+                                try:
+                                    self._tts_queues[session_id].get_nowait()
+                                except asyncio.QueueEmpty:
+                                    break
+                        # Cancel any pending agent work
+                        await self._send_stop(session_id)
+                        self._pending_count[session_id] = 0
+                        await ws.send_json({"type": "queue_status", "pending": 0})
+                        # Clear utterance buffer so old speech doesn't get submitted
+                        self._utterance_buffer[session_id] = []
+                        # Tell frontend to go back to listening mode
+                        await ws.send_json({"type": "status", "message": "listening"})
+
                     elif action == "submit_now":
                         # Push-to-talk release: immediately submit buffered utterance
                         buf = self._utterance_buffer.get(session_id, [])

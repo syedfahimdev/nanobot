@@ -25,13 +25,22 @@ class ToolsDNSTool(Tool):
         "macro_name", "macro_description", "steps", "workflow_id", "analytics_type",
     })
 
+    # Read-only tools that can be cached (fetch = no side effects)
+    _CACHEABLE_TOOLS = frozenset({
+        "GMAIL_FETCH_EMAILS", "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID",
+        "GOOGLECALENDAR_FIND_EVENT", "GOOGLECALENDAR_EVENTS_LIST",
+        "WEATHERMAP_WEATHER", "WEATHERMAP_GEOCODE_LOCATION",
+        "HACKERNEWS_SEARCH_POSTS", "REDDIT_SEARCH_ACROSS_SUBREDDITS",
+    })
+    _RESULT_CACHE_TTL = 300  # 5 minutes
+
     def __init__(self, base_url: str, api_key: str, timeout: float = 30.0) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._timeout = timeout
-        self._turn_calls: list[dict] = []  # tracks tool calls within a turn
-        self._schema_returned_for: set[str] = set()  # tracks tool_ids we already returned schema for
-        # Use shared cache for schemas and hints
+        self._turn_calls: list[dict] = []
+        self._schema_returned_for: set[str] = set()
+        self._result_cache: dict[str, tuple[str, float]] = {}  # cache_key → (result, expires_at)
         from nanobot.agent.tools.toolsdns_cache import get_cache
         self._cache = get_cache(base_url, api_key)
 
@@ -343,6 +352,18 @@ class ToolsDNSTool(Tool):
         # Code-level argument sanitization — fixes LLM mistakes
         arguments = await self._sanitize_args(tool_id, arguments)
 
+        # Check result cache for read-only tools
+        import time as _time
+        tool_name = tool_id.replace("tooldns__", "").replace("tooldns-skills__", "")
+        if tool_name in self._CACHEABLE_TOOLS:
+            import hashlib
+            cache_key = hashlib.md5(f"{tool_id}:{json.dumps(arguments, sort_keys=True)}".encode()).hexdigest()
+            cached = self._result_cache.get(cache_key)
+            if cached and cached[1] > _time.time():
+                from loguru import logger
+                logger.info("ToolsDNS cache hit for {} (saved {}ms)", tool_name, "~27000")
+                return cached[0]
+
         try:
             data = await self._post("/v1/call", {
                 "tool_id": tool_id,
@@ -398,6 +419,10 @@ class ToolsDNSTool(Tool):
                 f"macro_description=<what it does>, steps={json.dumps(arg_templates)}"
             )
             result_str += hint
+
+        # Cache result for read-only tools
+        if tool_name in self._CACHEABLE_TOOLS:
+            self._result_cache[cache_key] = (result_str, _time.time() + self._RESULT_CACHE_TTL)
 
         return result_str
 
