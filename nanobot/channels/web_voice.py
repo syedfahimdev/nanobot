@@ -1155,8 +1155,8 @@ class WebVoiceChannel(BaseChannel):
             model = config.agents.defaults.model
 
             # Get provider
-            from nanobot.providers.registry import get_provider
-            provider = get_provider(provider_name, config)
+            from nanobot.providers.litellm_provider import LiteLLMProvider
+            provider = LiteLLMProvider()
 
             from nanobot.hooks.builtin.reaction_feedback import ReactionFeedback, REACTION_MEANINGS
             feedback = ReactionFeedback(workspace, provider, model)
