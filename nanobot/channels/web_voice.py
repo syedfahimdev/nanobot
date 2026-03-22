@@ -258,6 +258,7 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/api/sessions", self._sessions_list_handler)
         self._app.router.add_post("/api/sessions/switch", self._sessions_switch_handler)
         self._app.router.add_get("/api/suggestions", self._suggestions_handler)
+        self._app.router.add_get("/api/shortcut/{action}", self._shortcut_download_handler)
         self._app.router.add_get("/api/mcp-servers", self._mcp_servers_list_handler)
         self._app.router.add_post("/api/mcp-servers", self._mcp_servers_save_handler)
         self._app.router.add_delete("/api/mcp-servers/{name}", self._mcp_servers_delete_handler)
@@ -1400,6 +1401,75 @@ class WebVoiceChannel(BaseChannel):
             return web.json_response({"suggestions": suggestions[:4]})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
+
+    async def _shortcut_download_handler(self, request: web.Request) -> web.Response:
+        """Generate and serve an Apple Shortcut .shortcut (plist) file."""
+        import plistlib
+
+        action = request.match_info.get("action", "")
+        if not action:
+            return web.json_response({"error": "action required"}, status=400)
+
+        # Get the base URL for this server
+        host = request.headers.get("Host", "localhost:3000")
+        scheme = "https" if "taile" in host or request.secure else "http"
+        base_url = f"{scheme}://{host}"
+
+        # Map actions to URLs and names
+        shortcuts = {
+            "check-email": ("Check Email", f"{base_url}/?action=check-email"),
+            "check-calendar": ("Today's Schedule", f"{base_url}/?action=check-calendar"),
+            "check-goals": ("My Goals", f"{base_url}/?view=goals"),
+            "voice": ("Talk to Mawa", f"{base_url}/?view=chat&mode=voice"),
+            "briefing": ("Morning Briefing", f"{base_url}/?action=briefing"),
+            "search": ("Search Mawa", f"{base_url}/?view=chat&search=1"),
+            "browser": ("Open Browser", f"{base_url}/?action=open-browser"),
+        }
+
+        if action not in shortcuts:
+            return web.json_response({"error": f"Unknown shortcut: {action}"}, status=404)
+
+        name, url = shortcuts[action]
+
+        # Build the Apple Shortcut plist
+        shortcut_plist = {
+            "WFWorkflowMinimumClientVersionString": "900",
+            "WFWorkflowMinimumClientVersion": 900,
+            "WFWorkflowIcon": {
+                "WFWorkflowIconStartColor": 946986751,  # Teal
+                "WFWorkflowIconGlyphNumber": 59511,  # Globe icon
+            },
+            "WFWorkflowClientVersion": "2302.0.4",
+            "WFWorkflowOutputContentItemClasses": [],
+            "WFWorkflowHasOutputFallback": False,
+            "WFWorkflowActions": [
+                {
+                    "WFWorkflowActionIdentifier": "is.workflow.actions.openurl",
+                    "WFWorkflowActionParameters": {
+                        "WFInput": {
+                            "Value": {"string": url},
+                            "WFSerializationType": "WFTextTokenString",
+                        },
+                    },
+                }
+            ],
+            "WFWorkflowImportQuestions": [],
+            "WFWorkflowTypes": ["NCWidget", "WatchKit"],
+            "WFQuickActionSurfaces": [],
+            "WFWorkflowHasShortcutInputVariables": False,
+            "WFWorkflowName": f"Mawa: {name}",
+        }
+
+        # Serialize as binary plist (what Shortcuts expects)
+        plist_data = plistlib.dumps(shortcut_plist, fmt=plistlib.FMT_BINARY)
+
+        return web.Response(
+            body=plist_data,
+            content_type="application/x-apple-shortcut",
+            headers={
+                "Content-Disposition": f'attachment; filename="Mawa - {name}.shortcut"',
+            },
+        )
 
     async def _credentials_list_handler(self, request: web.Request) -> web.Response:
         """List stored credentials — names only, NEVER actual values."""
