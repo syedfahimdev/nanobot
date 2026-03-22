@@ -1334,33 +1334,7 @@ class WebVoiceChannel(BaseChannel):
             logger.warning("Search error: {}", e)
             return web.json_response({"error": str(e)}, status=500)
 
-    async def _sessions_list_handler(self, request: web.Request) -> web.Response:
-        """List available chat sessions. GET /api/sessions."""
-        try:
-            from nanobot.config.paths import get_workspace_path
-            import json as _j
-
-            sessions_dir = get_workspace_path() / "sessions"
-            sessions = []
-            if sessions_dir.exists():
-                for f in sorted(sessions_dir.iterdir(), reverse=True):
-                    if f.suffix == ".jsonl" and f.stat().st_size > 0:
-                        # Read first line for metadata
-                        first_line = f.read_text(encoding="utf-8").split("\n")[0]
-                        try:
-                            meta = _j.loads(first_line)
-                        except Exception:
-                            meta = {}
-                        sessions.append({
-                            "key": f.stem,
-                            "size": f.stat().st_size,
-                            "modified": f.stat().st_mtime,
-                            "channel": meta.get("channel", f.stem.split(":")[0] if ":" in f.stem else "unknown"),
-                        })
-            return web.json_response({"sessions": sessions[:20]})
-        except Exception as e:
-            logger.warning("Sessions list error: {}", e)
-            return web.json_response({"error": str(e)}, status=500)
+    # Duplicate _sessions_list_handler removed — using session_manager.list_sessions above
 
     async def _sessions_switch_handler(self, request: web.Request) -> web.Response:
         """Switch to a different session. POST /api/sessions/switch."""
