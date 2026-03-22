@@ -199,6 +199,9 @@ class AgentLoop:
         # Knowledge ingestion — learn from web pages and blogs
         from nanobot.agent.tools.knowledge_ingest import KnowledgeIngestTool
         self.tools.register(KnowledgeIngestTool(self.workspace, self.provider, self.model))
+        # Skills marketplace — search and install from skills.sh
+        from nanobot.agent.tools.skills_marketplace import SkillsMarketplaceTool
+        self.tools.register(SkillsMarketplaceTool())
         # Credentials — securely store and use passwords
         from nanobot.agent.tools.credentials import CredentialsTool
         self.tools.register(CredentialsTool())

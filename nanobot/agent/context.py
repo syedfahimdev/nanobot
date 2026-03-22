@@ -60,6 +60,11 @@ class ContextBuilder:
             if always_content:
                 parts.append(f"# Active Skills\n\n{always_content}")
 
+        # Generative UI: instruct LLM to output HTML widgets for visual data
+        from nanobot.hooks.builtin.generative_ui import GENERATIVE_UI_INSTRUCTION
+        if channel in ("web_voice",):
+            parts.append(GENERATIVE_UI_INSTRUCTION)
+
         skills_summary = self.skills.build_skills_summary()
         if skills_summary:
             parts.append(f"""# Skills
@@ -123,6 +128,11 @@ Your workspace is at: {workspace_path}
 - Calendar results: List events with time and title only. Details on request.
 - Keep responses short and actionable. The user can always ask for more detail.
 
+## Skill Discovery
+- If you can't complete a task with existing tools, search skills.sh: `skills_marketplace(action="search", query="...")`
+- If a relevant skill exists, suggest installing it to the user
+- You can also install skills directly: `skills_marketplace(action="install", skill_id="owner/repo@skill")`
+
 ## Tool Routing — ALWAYS use the correct tool
 - "check my goals" / "list goals" / "what am I working on" → call `goals(action="list")`
 - "add a goal" / "track this" → call `goals(action="add", ...)`
@@ -130,11 +140,10 @@ Your workspace is at: {workspace_path}
 - "search my docs" / "find in inbox" → call `inbox(action="search", query="...")`
 - "what do you know about me" / recall facts → call `memory_search`
 - Before drafting work emails → call `inbox(action="search", folder="work", query="...")`
-- "open website" / "go to URL" / "browse" / "screenshot" → call `browser(action="navigate", url="...")` (built-in Playwright, NOT ToolsDNS browser tools)
-- For browser automation: ALWAYS use the built-in `browser` tool, NOT ToolsDNS BROWSER_TOOL_* or browser_navigate
+- "open website" / "go to URL" / "browse" / "screenshot" → call `browser(action="navigate", url="...")` (built-in Playwright browser)
 
 ## Skill Workflow Rules — CRITICAL
-- BEFORE using ANY ToolsDNS skill tools, you MUST first call `mcp_tooldns_read_skill` with the skill name. The returned SKILL.md contains the exact workflow, phases, and rules.
+- BEFORE using a skill, read its SKILL.md file first. The file contains the exact workflow, phases, and rules.
 - Follow the skill's workflow EXACTLY — do not skip phases, do not guess parameters.
 - DO NOT spawn subagents for skill workflows — handle all phases yourself in the main conversation.
 - Gather ALL required info from the user BEFORE calling execution tools.
