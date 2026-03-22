@@ -254,6 +254,10 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/api/inbox", self._inbox_list_handler)
         self._app.router.add_post("/api/reaction", self._reaction_handler)
         self._app.router.add_get("/api/autonomy", self._autonomy_handler)
+        self._app.router.add_get("/api/search", self._search_handler)
+        self._app.router.add_get("/api/sessions", self._sessions_list_handler)
+        self._app.router.add_post("/api/sessions/switch", self._sessions_switch_handler)
+        self._app.router.add_get("/api/suggestions", self._suggestions_handler)
         self._app.router.add_get("/api/mcp-servers", self._mcp_servers_list_handler)
         self._app.router.add_post("/api/mcp-servers", self._mcp_servers_save_handler)
         self._app.router.add_delete("/api/mcp-servers/{name}", self._mcp_servers_delete_handler)
@@ -1271,6 +1275,113 @@ class WebVoiceChannel(BaseChannel):
         """Get favorite tools based on usage."""
         from nanobot.hooks.builtin.tool_favorites import get_favorites
         return web.json_response({"favorites": get_favorites(self._get_workspace())})
+
+    async def _search_handler(self, request: web.Request) -> web.Response:
+        """Search across chat history and memory. GET /api/search?q=..."""
+        try:
+            from nanobot.config.paths import get_workspace_path
+            import re
+
+            query = request.query.get("q", "").strip()
+            if not query or len(query) < 2:
+                return web.json_response({"results": []})
+
+            workspace = get_workspace_path()
+            results = []
+            words = [w for w in query.lower().split() if len(w) >= 2]
+            pattern = re.compile("|".join(re.escape(w) for w in words), re.IGNORECASE)
+
+            # Search HISTORY.md
+            history = workspace / "memory" / "HISTORY.md"
+            if history.exists():
+                for line in history.read_text(encoding="utf-8").split("\n"):
+                    if pattern.search(line) and len(line.strip()) > 10:
+                        results.append({"source": "history", "text": line.strip()[:200]})
+                        if len(results) >= 20:
+                            break
+
+            # Search LONG_TERM.md
+            lt = workspace / "memory" / "LONG_TERM.md"
+            if lt.exists():
+                content = lt.read_text(encoding="utf-8")
+                for para in content.split("\n\n"):
+                    if pattern.search(para):
+                        results.append({"source": "memory", "text": para.strip()[:200]})
+                        if len(results) >= 20:
+                            break
+
+            return web.json_response({"results": results[:20], "query": query})
+        except Exception as e:
+            logger.warning("Search error: {}", e)
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _sessions_list_handler(self, request: web.Request) -> web.Response:
+        """List available chat sessions. GET /api/sessions."""
+        try:
+            from nanobot.config.paths import get_workspace_path
+            import json as _j
+
+            sessions_dir = get_workspace_path() / "sessions"
+            sessions = []
+            if sessions_dir.exists():
+                for f in sorted(sessions_dir.iterdir(), reverse=True):
+                    if f.suffix == ".jsonl" and f.stat().st_size > 0:
+                        # Read first line for metadata
+                        first_line = f.read_text(encoding="utf-8").split("\n")[0]
+                        try:
+                            meta = _j.loads(first_line)
+                        except Exception:
+                            meta = {}
+                        sessions.append({
+                            "key": f.stem,
+                            "size": f.stat().st_size,
+                            "modified": f.stat().st_mtime,
+                            "channel": meta.get("channel", f.stem.split(":")[0] if ":" in f.stem else "unknown"),
+                        })
+            return web.json_response({"sessions": sessions[:20]})
+        except Exception as e:
+            logger.warning("Sessions list error: {}", e)
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _sessions_switch_handler(self, request: web.Request) -> web.Response:
+        """Switch to a different session. POST /api/sessions/switch."""
+        try:
+            body = await request.json()
+            session_key = body.get("key", "")
+            if not session_key:
+                return web.json_response({"error": "key required"}, status=400)
+            # The actual session switch happens on the WebSocket side
+            # Just return the session info for the frontend
+            return web.json_response({"ok": True, "key": session_key})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _suggestions_handler(self, request: web.Request) -> web.Response:
+        """Generate context-aware quick reply suggestions. GET /api/suggestions."""
+        try:
+            from datetime import datetime
+
+            now = datetime.now()
+            hour = now.hour
+            weekday = now.strftime("%A")
+            suggestions = []
+
+            # Time-based suggestions
+            if 6 <= hour <= 10:
+                suggestions.append({"text": "Check my email", "icon": "mail"})
+                suggestions.append({"text": "What's on my calendar today?", "icon": "calendar"})
+            elif 11 <= hour <= 14:
+                suggestions.append({"text": "Any urgent emails?", "icon": "mail"})
+            elif 17 <= hour <= 21:
+                suggestions.append({"text": "Summarize what happened today", "icon": "sparkles"})
+
+            # Always available
+            suggestions.append({"text": "Check my goals", "icon": "target"})
+            suggestions.append({"text": "What do you remember about me?", "icon": "brain"})
+
+            return web.json_response({"suggestions": suggestions[:4]})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
 
     async def _credentials_list_handler(self, request: web.Request) -> web.Response:
         """List stored credentials — names only, NEVER actual values."""
