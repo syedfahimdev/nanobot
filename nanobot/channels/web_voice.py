@@ -217,6 +217,11 @@ class WebVoiceChannel(BaseChannel):
         # Latency tracking per session
         self._activity_ts: dict[str, float] = {}  # last activity timestamp
 
+    @staticmethod
+    def _get_workspace():
+        from nanobot.config.paths import get_workspace_path
+        return get_workspace_path()
+
     async def start(self) -> None:
         if not self.config.deepgram_api_key:
             logger.error("Web Voice: deepgram_api_key not configured")
@@ -247,10 +252,22 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/api/generated", self._generated_list_handler)
         self._app.router.add_post("/api/generated/cleanup", self._generated_cleanup_handler)
         self._app.router.add_get("/api/inbox", self._inbox_list_handler)
-        self._app.router.add_get("/api/toolsdns/health", self._toolsdns_health_handler)
+        self._app.router.add_post("/api/reaction", self._reaction_handler)
         self._app.router.add_get("/api/autonomy", self._autonomy_handler)
+        self._app.router.add_get("/api/mcp-servers", self._mcp_servers_list_handler)
+        self._app.router.add_post("/api/mcp-servers", self._mcp_servers_save_handler)
+        self._app.router.add_delete("/api/mcp-servers/{name}", self._mcp_servers_delete_handler)
         self._app.router.add_get("/api/credentials", self._credentials_list_handler)
         self._app.router.add_post("/api/credentials", self._credentials_update_handler)
+        self._app.router.add_get("/api/usage", self._usage_handler)
+        self._app.router.add_get("/api/search", self._search_handler)
+        self._app.router.add_get("/api/sessions", self._sessions_list_handler)
+        self._app.router.add_get("/api/sessions/{key:.+}/export", self._session_export_handler)
+        self._app.router.add_get("/api/sessions/{key:.+}", self._session_detail_handler)
+        self._app.router.add_delete("/api/sessions/{key:.+}", self._session_delete_handler)
+        self._app.router.add_get("/api/budget", self._budget_handler)
+        self._app.router.add_post("/api/budget", self._budget_update_handler)
+        self._app.router.add_get("/api/favorites", self._favorites_handler)
         # Serve React build from /root/mawabot/dist (if exists), fallback to inline HTML
         _react_dist = Path("/root/mawabot/dist")
         if _react_dist.exists():
@@ -352,6 +369,19 @@ class WebVoiceChannel(BaseChannel):
             })
             return
 
+        # Token usage — send as activity entry
+        if meta.get("_token_usage"):
+            usage_data = meta.get("_usage_data", {})
+            await broadcast({
+                "type": "activity",
+                "kind": "tokens",
+                "text": msg.content,
+                "prompt_tokens": usage_data.get("prompt_tokens", 0),
+                "completion_tokens": usage_data.get("completion_tokens", 0),
+                "total_tokens": usage_data.get("total_tokens", 0),
+            })
+            return
+
         if is_progress:
             now = time.time()
             prev = self._activity_ts.get(session_id, now)
@@ -376,6 +406,11 @@ class WebVoiceChannel(BaseChannel):
             "text": msg.content,
             "subagent_result": is_subagent,
         })
+
+        # Detect profile switch and notify frontend
+        if msg.content.startswith("Switched to profile:"):
+            profile_name = self._get_active_profile_name()
+            await broadcast({"type": "profile_switched", "name": profile_name})
 
         # Update pending count
         count = self._pending_count.get(session_id, 0)
@@ -477,23 +512,6 @@ class WebVoiceChannel(BaseChannel):
             for name, p in (config.profiles or {}).items():
                 profiles[name] = {"provider": p.provider or "—", "model": p.model or "—"}
 
-            # Check ToolsDNS
-            toolsdns_info = {"url": "", "enabled": False, "tools": 0}
-            if self.config.deepgram_api_key:
-                pass  # deepgram is configured
-            td = getattr(config, "tools", None)
-            td_cfg = getattr(td, "toolsdns", None) if td else None
-            if td_cfg and td_cfg.url:
-                toolsdns_info = {"url": td_cfg.url, "enabled": True}
-                try:
-                    import httpx
-                    resp = httpx.get(f"{td_cfg.url}/v1/health",
-                        headers={"Authorization": f"Bearer {td_cfg.api_key}"}, timeout=3)
-                    if resp.status_code == 200:
-                        toolsdns_info["tools"] = resp.json().get("total_tools", 0)
-                except Exception:
-                    pass
-
             # Memory layer stats
             from nanobot.config.paths import get_workspace_path
             mem_dir = get_workspace_path() / "memory"
@@ -513,7 +531,6 @@ class WebVoiceChannel(BaseChannel):
                     "sttModel": self.config.stt_model,
                     "deepgramConfigured": bool(self.config.deepgram_api_key),
                 },
-                "toolsdns": toolsdns_info,
                 "connection": {
                     "host": self.config.host,
                     "port": self.config.port,
@@ -792,7 +809,7 @@ class WebVoiceChannel(BaseChannel):
                         ts = line[1:bracket_end]
                         text = line[bracket_end + 2:]
                         # Skip internal/noisy lines
-                        if len(text) > 30 and not text.startswith("ToolsDNS") and not text.startswith("tools already"):
+                        if len(text) > 30:
                             summaries.append({
                                 "type": "summary",
                                 "timestamp": ts,
@@ -814,37 +831,43 @@ class WebVoiceChannel(BaseChannel):
             return web.json_response({"error": "Internal error"}, status=500)
 
     async def _memory_search_handler(self, request: web.Request) -> web.Response:
-        """Search memory via ToolsDNS semantic search."""
+        """Search memory via local grep-based search."""
         try:
             body = await request.json()
             query = body.get("query", "").strip()
             if not query:
                 return web.json_response({"error": "query required"}, status=400)
 
-            from nanobot.config.loader import load_config
-            config = load_config()
-            td = getattr(getattr(config, "tools", None), "toolsdns", None)
-            if not td or not td.url:
-                return web.json_response({"results": [], "note": "ToolsDNS not configured"})
-
-            import httpx
-            resp = httpx.post(
-                f"{td.url}/v1/search",
-                json={"query": query, "top_k": 10, "threshold": 0.1, "id_prefix": "memory__"},
-                headers={"Authorization": f"Bearer {td.api_key}"},
-                timeout=10,
-            )
-            if resp.status_code != 200:
-                return web.json_response({"results": [], "note": "Search failed"})
-
+            from nanobot.config.paths import get_workspace_path
+            mem_dir = get_workspace_path() / "memory"
             results = []
-            for r in resp.json().get("results", []):
-                results.append({
-                    "title": r.get("title", ""),
-                    "content": r.get("description", r.get("content", ""))[:300],
-                    "score": round(r.get("score", 0) * 100, 1),
-                    "source": r.get("source_info", {}).get("file_path", ""),
-                })
+
+            if mem_dir.exists():
+                import re
+                pattern = re.compile(re.escape(query), re.IGNORECASE)
+                for md_file in sorted(mem_dir.rglob("*.md")):
+                    try:
+                        content = md_file.read_text(encoding="utf-8")
+                        for i, line in enumerate(content.split("\n")):
+                            if pattern.search(line):
+                                # Include surrounding context (2 lines before/after)
+                                lines = content.split("\n")
+                                start = max(0, i - 2)
+                                end = min(len(lines), i + 3)
+                                snippet = "\n".join(lines[start:end])
+                                results.append({
+                                    "title": md_file.name,
+                                    "content": snippet[:300],
+                                    "score": 100.0,
+                                    "source": str(md_file),
+                                })
+                                if len(results) >= 10:
+                                    break
+                    except Exception:
+                        continue
+                    if len(results) >= 10:
+                        break
+
             return web.json_response({"results": results})
         except Exception as e:
             logger.warning("Memory search API error: {}", e)
@@ -884,10 +907,6 @@ class WebVoiceChannel(BaseChannel):
                 except Exception:
                     pass
 
-            # Check ToolsDNS for available tools
-            from nanobot.config.loader import load_config
-            config = load_config()
-            td = getattr(getattr(config, "tools", None), "toolsdns", None)
             tools = []
 
             # Built-in tools
@@ -914,35 +933,6 @@ class WebVoiceChannel(BaseChannel):
                 t["successRate"] = round(score_data["success"] / total * 100, 1) if total > 0 else None
                 t["lastUsed"] = score_data.get("last_used", "")
                 tools.append(t)
-
-            # ToolsDNS tools
-            if td and td.url:
-                try:
-                    import httpx
-                    resp = httpx.get(
-                        f"{td.url}/v1/health",
-                        headers={"Authorization": f"Bearer {td.api_key}"},
-                        timeout=3,
-                    )
-                    if resp.status_code == 200:
-                        td_tools = resp.json().get("tools", [])
-                        if isinstance(td_tools, int):
-                            pass  # Just a count, no detail
-                        elif isinstance(td_tools, list):
-                            for tt in td_tools:
-                                name = tt if isinstance(tt, str) else tt.get("id", "")
-                                score_data = scores.get(name, {})
-                                total = score_data.get("success", 0) + score_data.get("fail", 0)
-                                tools.append({
-                                    "name": name,
-                                    "type": "toolsdns",
-                                    "desc": tt.get("description", "") if isinstance(tt, dict) else "",
-                                    "calls": total,
-                                    "successRate": round(score_data["success"] / total * 100, 1) if total > 0 else None,
-                                    "lastUsed": score_data.get("last_used", ""),
-                                })
-                except Exception:
-                    pass
 
             return web.json_response({"tools": tools})
         except Exception as e:
@@ -1122,23 +1112,53 @@ class WebVoiceChannel(BaseChannel):
             logger.warning("Generated cleanup error: {}", e)
             return web.json_response({"error": "Internal error"}, status=500)
 
-    async def _toolsdns_health_handler(self, request: web.Request) -> web.Response:
-        """Return ToolsDNS health status + cache stats."""
+    async def _reaction_handler(self, request: web.Request) -> web.Response:
+        """Process emoji reaction feedback. POST /api/reaction."""
         try:
+            from nanobot.config.paths import get_workspace_path
             from nanobot.config.loader import load_config
-            config = load_config()
-            td = getattr(getattr(config, "tools", None), "toolsdns", None)
-            if not td or not td.url:
-                return web.json_response({"status": "not_configured"})
 
-            from nanobot.agent.tools.toolsdns_cache import get_cache
-            cache = get_cache(td.url, td.api_key)
-            health = await cache.check_health()
-            stats = cache.get_stats()
-            return web.json_response({**health, **stats})
+            body = await request.json()
+            reaction = body.get("reaction", "")
+            message_content = body.get("messageContent", "")
+            message_role = body.get("messageRole", "assistant")
+
+            if not reaction or not message_content:
+                return web.json_response({"error": "reaction and messageContent required"}, status=400)
+
+            workspace = get_workspace_path()
+            config = load_config()
+            provider_name = config.agents.defaults.provider
+            model = config.agents.defaults.model
+
+            # Get provider
+            from nanobot.providers.registry import get_provider
+            provider = get_provider(provider_name, config)
+
+            from nanobot.hooks.builtin.reaction_feedback import ReactionFeedback, REACTION_MEANINGS
+            feedback = ReactionFeedback(workspace, provider, model)
+
+            # Save the reaction
+            feedback.save_reaction(message_content, reaction, message_role)
+
+            meaning = REACTION_MEANINGS.get(reaction, {"signal": "neutral"})
+            lesson = None
+
+            if meaning["signal"] == "negative":
+                # Extract lesson from negative reaction (async LLM call)
+                lesson = await feedback.process_negative_reaction(message_content, reaction)
+            elif meaning["signal"] == "positive":
+                # Reinforce positive pattern
+                feedback.process_positive_reaction(message_content, reaction)
+
+            return web.json_response({
+                "ok": True,
+                "signal": meaning["signal"],
+                "lesson": lesson,
+            })
         except Exception as e:
-            logger.warning("ToolsDNS health error: {}", e)
-            return web.json_response({"status": "error", "error": str(e)})
+            logger.warning("Reaction handler error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
 
     async def _autonomy_handler(self, request: web.Request) -> web.Response:
         """Return autonomy system stats for the settings page."""
@@ -1185,6 +1205,72 @@ class WebVoiceChannel(BaseChannel):
         except Exception as e:
             logger.warning("Autonomy API error: {}", e)
             return web.json_response({"error": str(e)}, status=500)
+
+    async def _usage_handler(self, request: web.Request) -> web.Response:
+        """Return token usage summary for the dashboard."""
+        from nanobot.hooks.builtin.usage_tracker import get_usage_summary
+        return web.json_response(get_usage_summary(self._get_workspace()))
+
+    async def _search_handler(self, request: web.Request) -> web.Response:
+        """Search conversations and memory."""
+        q = request.query.get("q", "").strip()
+        if not q:
+            return web.json_response({"sessions": [], "memory": []})
+        from nanobot.hooks.builtin.conversation_search import search_all
+        return web.json_response(search_all(self._get_workspace(), q))
+
+    async def _sessions_list_handler(self, request: web.Request) -> web.Response:
+        """List past sessions."""
+        from nanobot.hooks.builtin.session_manager import list_sessions
+        limit = int(request.query.get("limit", "50"))
+        return web.json_response({"sessions": list_sessions(self._get_workspace(), limit)})
+
+    async def _session_detail_handler(self, request: web.Request) -> web.Response:
+        """Get a single session's messages."""
+        key = request.match_info["key"]
+        from nanobot.hooks.builtin.session_manager import get_session
+        session = get_session(self._get_workspace(), key)
+        if not session:
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response(session)
+
+    async def _session_export_handler(self, request: web.Request) -> web.Response:
+        """Export a session as markdown."""
+        key = request.match_info["key"]
+        fmt = request.query.get("format", "markdown")
+        from nanobot.hooks.builtin.session_manager import export_session
+        content = export_session(self._get_workspace(), key, fmt)
+        if not content:
+            return web.json_response({"error": "not found"}, status=404)
+        ct = "text/markdown" if fmt == "markdown" else "application/json"
+        return web.Response(text=content, content_type=ct)
+
+    async def _session_delete_handler(self, request: web.Request) -> web.Response:
+        """Delete a session."""
+        key = request.match_info["key"]
+        from nanobot.hooks.builtin.session_manager import delete_session
+        ok = delete_session(self._get_workspace(), key)
+        return web.json_response({"deleted": ok})
+
+    async def _budget_handler(self, request: web.Request) -> web.Response:
+        """Get budget config and current status."""
+        from nanobot.hooks.builtin.cost_budget import load_budget, check_budget
+        return web.json_response({
+            "config": load_budget(self._get_workspace()),
+            "status": check_budget(self._get_workspace()),
+        })
+
+    async def _budget_update_handler(self, request: web.Request) -> web.Response:
+        """Update budget config."""
+        data = await request.json()
+        from nanobot.hooks.builtin.cost_budget import save_budget
+        save_budget(self._get_workspace(), data)
+        return web.json_response({"ok": True})
+
+    async def _favorites_handler(self, request: web.Request) -> web.Response:
+        """Get favorite tools based on usage."""
+        from nanobot.hooks.builtin.tool_favorites import get_favorites
+        return web.json_response({"favorites": get_favorites(self._get_workspace())})
 
     async def _credentials_list_handler(self, request: web.Request) -> web.Response:
         """List stored credentials — names only, NEVER actual values."""
@@ -1264,13 +1350,130 @@ class WebVoiceChannel(BaseChannel):
             logger.warning("Credentials update error: {}", e)
             return web.json_response({"error": "Internal error"}, status=500)
 
+    async def _mcp_servers_list_handler(self, request: web.Request) -> web.Response:
+        """List configured MCP servers. GET /api/mcp-servers."""
+        try:
+            import json as _json
+            config_path = Path("/root/.nanobot/config.json")
+            cfg = _json.loads(config_path.read_text())
+            servers = cfg.get("tools", {}).get("mcpServers", {})
+
+            result = []
+            for name, srv in servers.items():
+                result.append({
+                    "name": name,
+                    "type": srv.get("type", "streamableHttp"),
+                    "url": srv.get("url", ""),
+                    "hasHeaders": bool(srv.get("headers")),
+                    "enabledTools": srv.get("enabledTools", ["*"]),
+                    "toolTimeout": srv.get("toolTimeout", 30),
+                })
+            return web.json_response({"servers": result})
+        except Exception as e:
+            logger.warning("MCP servers list error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _mcp_servers_save_handler(self, request: web.Request) -> web.Response:
+        """Add or update an MCP server. POST /api/mcp-servers."""
+        try:
+            import json as _json
+            from nanobot.setup.vault import save_to_vault
+
+            body = await request.json()
+            name = body.get("name", "").strip()
+            if not name:
+                return web.json_response({"error": "name required"}, status=400)
+            url = body.get("url", "").strip()
+            if not url:
+                return web.json_response({"error": "url required"}, status=400)
+
+            transport = body.get("type", "streamableHttp")
+            headers = body.get("headers", {})
+            enabled_tools = body.get("enabledTools", ["*"])
+            tool_timeout = body.get("toolTimeout", 30)
+
+            config_path = Path("/root/.nanobot/config.json")
+            cfg = _json.loads(config_path.read_text())
+            mcp = cfg.setdefault("tools", {}).setdefault("mcpServers", {})
+
+            # Store secrets in vault, put references in config
+            vault_secrets = {}
+            config_headers = {}
+            for hk, hv in headers.items():
+                if hv and len(hv) > 5:
+                    vault_key = f"tools.mcpServers.{name}.headers.{hk}"
+                    vault_secrets[vault_key] = hv
+                    config_headers[hk] = f"${{vault:{vault_key}}}"
+                else:
+                    config_headers[hk] = hv
+
+            # Store URL in vault if it contains secrets (API keys in query params)
+            if "api_key" in url.lower() or "token" in url.lower() or len(url) > 100:
+                vault_key = f"tools.mcpServers.{name}.url"
+                vault_secrets[vault_key] = url
+                config_url = f"${{vault:{vault_key}}}"
+            else:
+                config_url = url
+
+            if vault_secrets:
+                save_to_vault(vault_secrets)
+
+            mcp[name] = {
+                "type": transport,
+                "url": config_url,
+            }
+            if config_headers:
+                mcp[name]["headers"] = config_headers
+            if enabled_tools != ["*"]:
+                mcp[name]["enabledTools"] = enabled_tools
+            if tool_timeout != 30:
+                mcp[name]["toolTimeout"] = tool_timeout
+
+            config_path.write_text(_json.dumps(cfg, indent=2))
+            return web.json_response({"ok": True, "result": f"MCP server '{name}' saved. Restart nanobot to connect."})
+        except Exception as e:
+            logger.warning("MCP servers save error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _mcp_servers_delete_handler(self, request: web.Request) -> web.Response:
+        """Delete an MCP server. DELETE /api/mcp-servers/{name}."""
+        try:
+            import json as _json
+            name = request.match_info.get("name", "")
+            if not name:
+                return web.json_response({"error": "name required"}, status=400)
+
+            config_path = Path("/root/.nanobot/config.json")
+            cfg = _json.loads(config_path.read_text())
+            mcp = cfg.get("tools", {}).get("mcpServers", {})
+
+            if name not in mcp:
+                return web.json_response({"error": f"Server '{name}' not found"}, status=404)
+
+            del mcp[name]
+            config_path.write_text(_json.dumps(cfg, indent=2))
+            return web.json_response({"ok": True, "result": f"MCP server '{name}' removed. Restart nanobot to apply."})
+        except Exception as e:
+            logger.warning("MCP servers delete error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
     def _get_active_profile_name(self) -> str:
-        """Get the name of the currently active LLM profile."""
+        """Get the name of the currently active LLM profile.
+
+        Matches the current config's model+provider against defined profiles.
+        """
         try:
             from nanobot.config.loader import load_config
             config = load_config()
-            # The active profile is stored in the agent loop, not easily accessible here
-            # Return "default" as fallback
+            current_model = config.agents.defaults.model
+            current_provider = config.agents.defaults.provider
+            for name, p in (config.profiles or {}).items():
+                if p.model == current_model and p.provider == current_provider:
+                    return name
+            # If no profile matches, check just model
+            for name, p in (config.profiles or {}).items():
+                if p.model == current_model:
+                    return name
             return "default"
         except Exception:
             return "default"
