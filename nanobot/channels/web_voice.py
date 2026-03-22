@@ -1403,19 +1403,15 @@ class WebVoiceChannel(BaseChannel):
             return web.json_response({"error": str(e)}, status=500)
 
     async def _shortcut_download_handler(self, request: web.Request) -> web.Response:
-        """Generate and serve an Apple Shortcut .shortcut (plist) file."""
-        import plistlib
-
+        """Serve a helper page that guides the user to create an Apple Shortcut."""
         action = request.match_info.get("action", "")
         if not action:
             return web.json_response({"error": "action required"}, status=400)
 
-        # Get the base URL for this server
         host = request.headers.get("Host", "localhost:3000")
         scheme = "https" if "taile" in host or request.secure else "http"
         base_url = f"{scheme}://{host}"
 
-        # Map actions to URLs and names
         shortcuts = {
             "check-email": ("Check Email", f"{base_url}/?action=check-email"),
             "check-calendar": ("Today's Schedule", f"{base_url}/?action=check-calendar"),
@@ -1430,46 +1426,73 @@ class WebVoiceChannel(BaseChannel):
             return web.json_response({"error": f"Unknown shortcut: {action}"}, status=404)
 
         name, url = shortcuts[action]
+        import urllib.parse
+        encoded_url = urllib.parse.quote(url, safe="")
 
-        # Build the Apple Shortcut plist
-        shortcut_plist = {
-            "WFWorkflowMinimumClientVersionString": "900",
-            "WFWorkflowMinimumClientVersion": 900,
-            "WFWorkflowIcon": {
-                "WFWorkflowIconStartColor": 946986751,  # Teal
-                "WFWorkflowIconGlyphNumber": 59511,  # Globe icon
-            },
-            "WFWorkflowClientVersion": "2302.0.4",
-            "WFWorkflowOutputContentItemClasses": [],
-            "WFWorkflowHasOutputFallback": False,
-            "WFWorkflowActions": [
-                {
-                    "WFWorkflowActionIdentifier": "is.workflow.actions.openurl",
-                    "WFWorkflowActionParameters": {
-                        "WFInput": {
-                            "Value": {"string": url},
-                            "WFSerializationType": "WFTextTokenString",
-                        },
-                    },
-                }
-            ],
-            "WFWorkflowImportQuestions": [],
-            "WFWorkflowTypes": ["NCWidget", "WatchKit"],
-            "WFQuickActionSurfaces": [],
-            "WFWorkflowHasShortcutInputVariables": False,
-            "WFWorkflowName": f"Mawa: {name}",
-        }
+        # Serve a page that opens the Shortcuts app with a pre-built shortcut
+        html = f"""<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Add Siri Shortcut: {name}</title>
+<style>
+body {{ font-family: -apple-system, sans-serif; background: #0a0a0a; color: #e0e0e0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  min-height: 100vh; margin: 0; padding: 20px; text-align: center; }}
+h1 {{ font-size: 1.5em; margin-bottom: 8px; }}
+p {{ color: #888; font-size: 0.9em; max-width: 320px; line-height: 1.5; }}
+.url {{ background: #1a1a1a; padding: 12px; border-radius: 12px; font-family: monospace;
+  font-size: 0.75em; word-break: break-all; margin: 16px 0; color: #14b8a6; max-width: 320px; }}
+.btn {{ display: inline-block; background: #14b8a6; color: #000; padding: 14px 28px;
+  border-radius: 12px; font-weight: 600; text-decoration: none; margin: 8px; font-size: 1em; }}
+.btn-secondary {{ background: #222; color: #e0e0e0; }}
+.steps {{ text-align: left; max-width: 320px; margin: 20px 0; }}
+.steps li {{ margin: 8px 0; font-size: 0.85em; color: #aaa; }}
+.steps strong {{ color: #e0e0e0; }}
+</style>
+</head><body>
+<h1>Mawa: {name}</h1>
+<p>Add this as a Siri Shortcut to trigger with your voice.</p>
+<div class="url">{url}</div>
 
-        # Serialize as binary plist (what Shortcuts expects)
-        plist_data = plistlib.dumps(shortcut_plist, fmt=plistlib.FMT_BINARY)
+<a class="btn" href="shortcuts://create-shortcut" id="openBtn">Open Shortcuts App</a>
+<button class="btn btn-secondary" onclick="copy()">Copy URL</button>
 
-        return web.Response(
-            body=plist_data,
-            content_type="application/x-apple-shortcut",
-            headers={
-                "Content-Disposition": f'attachment; filename="Mawa - {name}.shortcut"',
-            },
-        )
+<ol class="steps">
+  <li>Tap <strong>"Open Shortcuts App"</strong> above</li>
+  <li>Tap <strong>+</strong> to create a new shortcut</li>
+  <li>Search <strong>"Open URL"</strong> and add it</li>
+  <li>Tap the URL field → <strong>Paste</strong> (already copied!)</li>
+  <li>Tap the name → rename to <strong>"Mawa: {name}"</strong></li>
+  <li>Tap <strong>"Add to Siri"</strong> and record your phrase</li>
+</ol>
+
+<a href="{base_url}/" class="btn btn-secondary" style="margin-top: 20px;">← Back to Mawa</a>
+
+<script>
+// Auto-copy the URL to clipboard when page loads
+async function copy() {{
+  try {{
+    await navigator.clipboard.writeText("{url}");
+    document.querySelector('.btn-secondary').textContent = 'Copied!';
+    setTimeout(() => document.querySelector('.btn-secondary').textContent = 'Copy URL', 2000);
+  }} catch(e) {{
+    // Fallback for iOS
+    const ta = document.createElement('textarea');
+    ta.value = "{url}";
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    document.querySelector('.btn-secondary').textContent = 'Copied!';
+  }}
+}}
+// Auto-copy on page load
+copy();
+</script>
+</body></html>"""
+
+        return web.Response(text=html, content_type="text/html")
 
     async def _credentials_list_handler(self, request: web.Request) -> web.Response:
         """List stored credentials — names only, NEVER actual values."""
