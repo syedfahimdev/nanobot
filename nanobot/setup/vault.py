@@ -86,6 +86,23 @@ def save_to_vault(secrets: dict[str, str]) -> bool:
     return True
 
 
+def replace_vault(secrets: dict[str, str]) -> bool:
+    """Replace the entire vault contents (for delete operations)."""
+    f = _get_fernet()
+    if f is None:
+        _VAULT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _VAULT_FILE.write_text(json.dumps(secrets, indent=2))
+        _VAULT_FILE.chmod(0o600)
+        return True
+
+    encrypted = f.encrypt(json.dumps(secrets).encode())
+    _VAULT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _VAULT_FILE.write_bytes(encrypted)
+    _VAULT_FILE.chmod(0o600)
+    logger.info("Vault: replaced with {} secrets", len(secrets))
+    return True
+
+
 def load_vault() -> dict[str, str]:
     """Load secrets from the vault."""
     if not _VAULT_FILE.exists():

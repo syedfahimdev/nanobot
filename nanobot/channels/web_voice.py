@@ -1536,7 +1536,9 @@ copy();
 
                 del vault[key]
                 vault.pop(f"cred.{name}.username", None)
-                save_to_vault(vault)
+                # Use replace_vault (not save_to_vault which merges and re-adds deleted keys)
+                from nanobot.setup.vault import replace_vault
+                replace_vault(vault)
                 return web.json_response({"ok": True, "result": f"Credential '{name}' deleted"})
 
             else:
