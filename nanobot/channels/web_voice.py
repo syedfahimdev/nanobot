@@ -363,6 +363,17 @@ class WebVoiceChannel(BaseChannel):
                 self._enqueue_tts(cid, msg.content)
             return
 
+        # Proactive notification — send with notification type for browser push
+        if meta.get("_notification") or meta.get("_proactive") or meta.get("_briefing"):
+            await broadcast({
+                "type": "notification",
+                "text": msg.content,
+                "priority": meta.get("_priority", "normal"),
+                "proactive": bool(meta.get("_proactive")),
+                "briefing": bool(meta.get("_briefing")),
+            })
+            return
+
         # Structured tool result — send data for generative UI rendering
         if meta.get("_tool_result"):
             await broadcast({

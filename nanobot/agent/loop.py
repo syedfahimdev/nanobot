@@ -17,7 +17,7 @@ from nanobot.agent.context import ContextBuilder
 
 _SENTENCE_RE = re.compile(r'(?<=[.!?])\s+|(?<=\n)')
 from nanobot.agent.memory import MemoryConsolidator
-from nanobot.agent.subagent import PreflightCache, SubagentManager
+from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -33,7 +33,7 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, ProfileConfig, ToolsDNSConfig, WebSearchConfig
+    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, ProfileConfig, WebSearchConfig
     from nanobot.cron.service import CronService
 
 
@@ -67,7 +67,6 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
-        toolsdns_config: ToolsDNSConfig | None = None,
         profiles: "dict[str, ProfileConfig] | None" = None,
         profile_factory: "Callable[[str], LLMProvider] | None" = None,
         profile_save_callback: "Callable[[str], None] | None" = None,
@@ -88,7 +87,6 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
-        self._toolsdns_config = toolsdns_config
         self._profiles: dict[str, "ProfileConfig"] = profiles or {}
         self._profile_factory = profile_factory
         self._profile_save_callback = profile_save_callback
@@ -101,12 +99,9 @@ class AgentLoop:
         from nanobot.hooks import HookEngine
         from nanobot.hooks.builtin import register_builtin_hooks
         self.hooks = HookEngine()
-        _td_url = toolsdns_config.url if toolsdns_config else ""
-        _td_key = toolsdns_config.api_key if toolsdns_config else ""
-        register_builtin_hooks(self.hooks, workspace, bus, _td_url, _td_key)
+        register_builtin_hooks(self.hooks, workspace, bus)
 
         self.tools = ToolRegistry(hooks=self.hooks)
-        self._preflight_cache = PreflightCache()
         self.subagents = SubagentManager(
             provider=provider,
             workspace=workspace,
@@ -116,9 +111,7 @@ class AgentLoop:
             web_proxy=web_proxy,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
-            toolsdns_config=toolsdns_config,
             session_manager=self.sessions,
-            preflight_cache=self._preflight_cache,
         )
 
         self._running = False
@@ -150,9 +143,7 @@ class AgentLoop:
 
         # Inbox indexer — auto-indexes uploaded files for RAG search
         from nanobot.hooks.builtin.inbox_indexer import make_inbox_indexer_hook
-        _td_url2 = toolsdns_config.url if toolsdns_config else ""
-        _td_key2 = toolsdns_config.api_key if toolsdns_config else ""
-        self.hooks.on("turn_completed", make_inbox_indexer_hook(workspace, provider, self.model, _td_url2, _td_key2))
+        self.hooks.on("turn_completed", make_inbox_indexer_hook(workspace, provider, self.model))
 
         # Workflow recorder — detects repeated tool sequences
         from nanobot.hooks.builtin.workflow_recorder import make_workflow_recorder_tool_hook, make_workflow_recorder_turn_hook
@@ -163,6 +154,10 @@ class AgentLoop:
         from nanobot.hooks.builtin.prompt_optimizer import make_prompt_optimizer_tool_hook, make_prompt_optimizer_turn_hook
         self.hooks.on("tool_after", make_prompt_optimizer_tool_hook(workspace))
         self.hooks.on("turn_completed", make_prompt_optimizer_turn_hook(workspace))
+
+        # Proactive notifications — checks goals, bills, calendar
+        from nanobot.hooks.builtin.proactive import make_proactive_hook
+        self.hooks.on("turn_completed", make_proactive_hook(workspace, bus))
 
         self._register_default_tools()
 
@@ -188,20 +183,10 @@ class AgentLoop:
         self.tools.register(ListSubagentsTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
-        if self._toolsdns_config and self._toolsdns_config.enabled:
-            from nanobot.agent.tools.toolsdns import ToolsDNSTool
-            self.tools.register(ToolsDNSTool(
-                base_url=self._toolsdns_config.url,
-                api_key=self._toolsdns_config.api_key,
-                timeout=self._toolsdns_config.timeout,
-            ))
-            from nanobot.agent.tools.memory_search import MemorySearchTool
-            self.tools.register(MemorySearchTool(
-                base_url=self._toolsdns_config.url,
-                api_key=self._toolsdns_config.api_key,
-            ))
         from nanobot.agent.tools.memory_save import MemorySaveTool
         self.tools.register(MemorySaveTool(workspace=self.workspace))
+        from nanobot.agent.tools.memory_search import MemorySearchTool
+        self.tools.register(MemorySearchTool(workspace=self.workspace))
         from nanobot.agent.tools.goals import GoalsTool
         self.tools.register(GoalsTool(workspace=self.workspace))
         from nanobot.agent.tools.media_memory import MediaMemoryTool
@@ -217,7 +202,7 @@ class AgentLoop:
         # Credentials — securely store and use passwords
         from nanobot.agent.tools.credentials import CredentialsTool
         self.tools.register(CredentialsTool())
-        # Native Playwright browser — works without ToolsDNS/Composio
+        # Native Playwright browser
         try:
             from nanobot.agent.tools.browser import BrowserTool
             self.tools.register(BrowserTool())
@@ -274,11 +259,8 @@ class AgentLoop:
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
-    # ------------------------------------------------------------------
-    # ToolsDNS pre-flight search (multi-strategy)
-    # ------------------------------------------------------------------
-
-    _TOOLSDNS_SKIP_PATTERNS = re.compile(
+    # Conversational message detection patterns
+    _CONVERSATIONAL_SKIP_PATTERNS = re.compile(
         r"^(/\w|hi\b|hello\b|hey\b|thanks|ok\b|yes\b|no\b|good|how are|what's up"
         r"|why\b|what do you|who are you|tell me about yourself|how do you|are you"
         r"|do you|can you help|what can you|nice|cool|great|sure|alright|bye|see you"
@@ -286,525 +268,17 @@ class AgentLoop:
         re.IGNORECASE,
     )
 
-    _QUERY_CLEAN_RE = re.compile(
-        r"\S+@\S+\.\S+|https?://\S+|\b\d{3}[-.]?\d{3}[-.]?\d{4}\b|\b\d{4}[-/]\d{2}[-/]\d{2}\b",
-    )
-
-    # Intent patterns: natural language → tool-friendly search queries
-    # Each entry: (regex, [list of search queries])
-    # Multiple queries per pattern: descriptive (matches description) + name-style (matches tool name)
-    # ToolsDNS searches both name and description fields, so we hit both angles.
-    _INTENT_MAP = [
-        # Email — send
-        (re.compile(r"\b(send|write|draft|compose|shoot|fire off)\b.*\b(email|mail|message|note)\b", re.I),
-         ["GMAIL_SEND_EMAIL", "gmail send email", "send an email message"]),
-        (re.compile(r"\b(check|read|fetch|get|see|look at)\b.*\b(email|mail|inbox)\b", re.I),
-         ["GMAIL_FETCH_EMAILS", "gmail get inbox emails", "fetch email messages"]),
-        (re.compile(r"\b(reply|respond)\b.*\b(email|mail|thread)\b", re.I),
-         ["GMAIL_REPLY_TO_THREAD", "gmail reply email thread"]),
-        # Slack
-        (re.compile(r"\b(send|post|write|notify|tell|message)\b.*\b(slack|channel|team)\b", re.I),
-         ["SLACK_SEND_MESSAGE", "SLACK_SENDS_A_MESSAGE_TO_A_SLACK", "slack send message channel"]),
-        (re.compile(r"\b(slack)\b", re.I),
-         ["SLACK_SEND_MESSAGE", "slack channel message"]),
-        # Calendar
-        (re.compile(r"\b(schedule|create|book|set up|add)\b.*\b(meeting|event|appointment|call|calendar)\b", re.I),
-         ["GOOGLECALENDAR_CREATE_EVENT", "google calendar create event meeting"]),
-        (re.compile(r"\b(check|show|list|what's on|see)\b.*\b(calendar|schedule|agenda|meetings)\b", re.I),
-         ["GOOGLECALENDAR_FIND_EVENT", "google calendar list events schedule"]),
-        # GitHub
-        (re.compile(r"\b(create|open|file|submit)\b.*\b(issue|bug|ticket)\b", re.I),
-         ["GITHUB_CREATE_AN_ISSUE", "github create issue bug"]),
-        (re.compile(r"\b(create|open|submit)\b.*\b(pr|pull request)\b", re.I),
-         ["GITHUB_CREATE_A_PULL_REQUEST", "github create pull request"]),
-        (re.compile(r"\b(merge|review)\b.*\b(pr|pull request)\b", re.I),
-         ["GITHUB_MERGE_A_PULL_REQUEST", "github merge pull request review"]),
-        (re.compile(r"\b(star|fork|clone)\b.*\b(repo|repository)\b", re.I),
-         ["GITHUB_STAR_A_REPOSITORY", "github star fork repository"]),
-        (re.compile(r"\b(github|repo)\b", re.I),
-         ["GITHUB_LIST_REPOS", "github repository actions"]),
-        # Browser — try name patterns for playwright tools
-        (re.compile(r"\b(open|go to|navigate|visit|browse|check)\b.*\b(website|page|site|url|link)\b", re.I),
-         ["browser_navigate", "playwright navigate open webpage url"]),
-        (re.compile(r"\b(click|press|tap)\b.*\b(button|link|element)\b", re.I),
-         ["browser_click", "playwright click button element"]),
-        (re.compile(r"\b(fill|type|enter|input)\b.*\b(form|field|text|box)\b", re.I),
-         ["browser_fill", "playwright fill form input type"]),
-        (re.compile(r"\b(screenshot|capture|snap)\b", re.I),
-         ["browser_screenshot", "playwright screenshot capture page"]),
-        (re.compile(r"\b(browse|search the web|look up|google)\b", re.I),
-         ["browser_navigate", "web browser search navigate"]),
-        # Salesforce
-        (re.compile(r"\b(salesforce|sfdc|sf)\b.*\b(task|create|check)\b", re.I),
-         ["SALESFORCE_CREATE_TASK", "salesforce create task opportunity"]),
-        (re.compile(r"\b(salesforce|sfdc|sf)\b.*\b(contact|lead|account)\b", re.I),
-         ["SALESFORCE_FETCH_CONTACT", "salesforce contact lead account"]),
-        (re.compile(r"\b(salesforce|sfdc|sf)\b", re.I),
-         ["SALESFORCE", "salesforce CRM"]),
-        # Files & docs
-        (re.compile(r"\b(create|generate|make)\b.*\b(spreadsheet|excel|csv|sheet)\b", re.I),
-         ["GOOGLESHEETS_CREATE_GOOGLE_SHEET", "google sheets create spreadsheet"]),
-        (re.compile(r"\b(create|write|generate|make)\b.*\b(doc|document|report)\b", re.I),
-         ["GOOGLEDOCS_CREATE_DOCUMENT", "google docs create document write"]),
-        (re.compile(r"\b(upload|download|share)\b.*\b(file|document|pdf)\b", re.I),
-         ["GOOGLEDRIVE_UPLOAD_FILE", "google drive upload download file"]),
-        # Tasks / todo
-        (re.compile(r"\b(create|add|make)\b.*\b(task|todo|reminder)\b", re.I),
-         ["create task todo", "TODOIST_CREATE_TASK"]),
-        (re.compile(r"\b(list|show|check)\b.*\b(tasks?|todos?)\b", re.I),
-         ["list tasks", "TODOIST_GET_TASKS"]),
-        # Twitter / social
-        (re.compile(r"\b(tweet|post|publish)\b.*\b(twitter|x\.com|social)\b", re.I),
-         ["TWITTER_CREATION_OF_A_TWEET", "twitter post tweet publish"]),
-        (re.compile(r"\b(tweet|post on twitter)\b", re.I),
-         ["TWITTER_CREATION_OF_A_TWEET", "twitter create tweet"]),
-        # Notion
-        (re.compile(r"\b(notion)\b.*\b(page|create|add|write)\b", re.I),
-         ["NOTION_CREATE_A_PAGE", "notion create page database"]),
-        (re.compile(r"\b(notion)\b", re.I),
-         ["NOTION", "notion page workspace"]),
-        # Linear
-        (re.compile(r"\b(linear)\b.*\b(issue|ticket|bug)\b", re.I),
-         ["LINEAR_CREATE_LINEAR_ISSUE", "linear create issue ticket"]),
-        (re.compile(r"\b(linear)\b", re.I),
-         ["LINEAR", "linear project issue"]),
-        # Report / weekly
-        (re.compile(r"\b(weekly|report|fill)\b.*\b(report|cea|weekly)\b", re.I),
-         ["weekly report", "CEA weekly report fill"]),
-        # Jira
-        (re.compile(r"\b(jira)\b.*\b(issue|ticket|create)\b", re.I),
-         ["JIRA_CREATE_ISSUE", "jira create issue ticket"]),
-        (re.compile(r"\b(jira)\b", re.I),
-         ["JIRA", "jira project issue"]),
-        # Discord
-        (re.compile(r"\b(discord)\b.*\b(send|message|post)\b", re.I),
-         ["DISCORD_SEND_MESSAGE", "discord send message channel"]),
-        (re.compile(r"\b(discord)\b", re.I),
-         ["DISCORD", "discord server channel"]),
-        # Telegram
-        (re.compile(r"\b(telegram)\b.*\b(send|message)\b", re.I),
-         ["TELEGRAM_SEND_MESSAGE", "telegram send message chat"]),
-        (re.compile(r"\b(telegram)\b", re.I),
-         ["TELEGRAM", "telegram bot message"]),
-        # WhatsApp
-        (re.compile(r"\b(whatsapp|whats app)\b", re.I),
-         ["WHATSAPP_SEND_MESSAGE", "whatsapp send message"]),
-        # Weather
-        (re.compile(r"\b(weather|temperature|forecast|rain|snow|humid|wind)\b", re.I),
-         ["WEATHERMAP_WEATHER", "WEATHERMAP_GEOCODE_LOCATION", "weather temperature forecast"]),
-        # Generic send/notify — broad fallback
-        (re.compile(r"\b(notify|alert|inform|tell)\b.*\b(someone|team|user|them)\b", re.I),
-         ["send notification", "SLACK_SEND_MESSAGE", "GMAIL_SEND_EMAIL"]),
-    ]
-
-    # ── Meta-tools to filter from preflight results ──
-    _META_TOOL_PREFIXES = frozenset({
-        "COMPOSIO_SEARCH_TOOLS",
-        "COMPOSIO_GET_TOOL_SCHEMAS",
-        "COMPOSIO_MANAGE_CONNECTIONS",
-        "COMPOSIO_MULTI_EXECUTE_TOOL",
-        "COMPOSIO_CHECK_CONNECTION",
-    })
-
-    # ── App prefix pattern: Composio tools follow APPNAME_TOOLACTION ──
-    _APP_PREFIX_RE = re.compile(r"^([A-Z][A-Z0-9]+)_")
-
-    @staticmethod
-    def _clean_query(text: str) -> str:
-        """Strip user data (emails, URLs, numbers) to get a cleaner tool search query."""
-        cleaned = AgentLoop._QUERY_CLEAN_RE.sub("", text)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip()
-        return cleaned if len(cleaned) >= 8 else text
-
-    @staticmethod
-    def _extract_intent_queries(text: str) -> list[str]:
-        """Extract tool-friendly search queries from natural language using intent patterns.
-
-        Each intent map entry returns multiple queries (name-style + descriptive).
-        We collect from the first matching pattern (most specific) and deduplicate.
-        """
-        queries: list[str] = []
-        seen = set()
-        matched = 0
-        for pattern, query_list in AgentLoop._INTENT_MAP:
-            if pattern.search(text):
-                if isinstance(query_list, str):
-                    query_list = [query_list]
-                for q in query_list:
-                    q_lower = q.lower()
-                    if q_lower not in seen:
-                        seen.add(q_lower)
-                        queries.append(q)
-                matched += 1
-                if matched >= 2 or len(queries) >= 4:
-                    break
-        return queries
-
-    @staticmethod
-    def _compact_schema(schema: dict, max_params: int = 10) -> str:
-        """Build a compact one-line-per-param schema summary."""
-        props = schema.get("properties", {})
-        required = set(schema.get("required", []))
-        if not props:
-            return "    (no parameters)"
-        lines = []
-        for name, info in list(props.items())[:max_params]:
-            ptype = info.get("type", "any")
-            desc = info.get("description", "").split(".")[0].split("\n")[0][:60]
-            req = " [REQUIRED]" if name in required else ""
-            default = f" (default: {info['default']})" if "default" in info else ""
-            lines.append(f"      {name}: {ptype}{req}{default} — {desc}")
-        if len(props) > max_params:
-            lines.append(f"      ... and {len(props) - max_params} more params")
-        return "\n".join(lines)
-
-    @staticmethod
-    def _extract_app_prefix(tool_name: str) -> str | None:
-        """Extract app prefix from tool name (e.g., GMAIL_SEND_EMAIL → GMAIL)."""
-        m = AgentLoop._APP_PREFIX_RE.match(tool_name)
-        return m.group(1) if m else None
-
-    @staticmethod
-    def _detect_dominant_app(tools: list[dict]) -> str | None:
-        """Find the most common app prefix among non-meta tools."""
-        from collections import Counter
-        prefixes = []
-        for t in tools:
-            name = t.get("name", "")
-            if name in AgentLoop._META_TOOL_PREFIXES:
-                continue
-            prefix = AgentLoop._extract_app_prefix(name)
-            if prefix and prefix != "COMPOSIO":
-                prefixes.append(prefix)
-        if not prefixes:
-            return None
-        # Return the most common prefix
-        counts = Counter(prefixes)
-        return counts.most_common(1)[0][0]
-
-    async def _toolsdns_preflight(self, user_message: str, timeout: float = 8.0) -> str | None:
-        """
-        Two-tier ToolsDNS preflight with app-aware fallback.
-
-        Tier 1: Standard preflight search across all tools.
-        Tier 2: If results only contain meta-tools (COMPOSIO_SEARCH_TOOLS etc.),
-                 detect the app from user intent and do a targeted search
-                 within that app's tools.
-        """
-        if os.environ.get("NANOBOT_TOOLSDNS_PREFLIGHT", "1").lower() in ("0", "false", "off", "no"):
-            return None
-        if not self._toolsdns_config or not self._toolsdns_config.enabled:
-            return None
-
-        text = user_message.strip()
-        if len(text) < 10 or self._TOOLSDNS_SKIP_PATTERNS.match(text):
-            return None
-        # Skip ToolsDNS for queries that map to built-in tools
-        _builtin_patterns = re.compile(
-            r"\b(goal|goals|my goals|list.*goals|check.*goals|add.*goal|complete.*goal|"
-            r"inbox|my docs|my documents|search.*inbox|upload|"
-            r"open.*website|browse|go to.*\.com|go to.*\.org|navigate.*url|screenshot|playwright|"
-            r"open.*page|visit.*site|browser)\b", re.I,
-        )
-        if _builtin_patterns.search(text):
-            return None
-        # Skip ToolsDNS for queries that match known skill names (dynamic)
-        if hasattr(self, "_skill_match_phrases") and self._skill_match_phrases:
-            text_lower = text.lower()
-            for phrase in self._skill_match_phrases:
-                if phrase in text_lower:
-                    return None
-        # Skip conversational messages that have no action intent
-        # (saves 1-2s per message on voice channels)
-        if not re.search(
-            r"\b(check|send|create|search|find|get|show|list|open|set|book|schedule|fetch|"
-            r"delete|update|remove|add|play|read|write|call|email|calendar|weather|stock|"
-            r"news|reddit|github|slack|salesforce|browse|navigate|report|remind|task)\b",
-            text, re.I,
-        ):
-            return None
-
-        # Check preflight cache first
-        cached = self._preflight_cache.get(text)
-        if cached is not PreflightCache._MISS:
-            if cached:
-                logger.info("ToolsDNS preflight cache hit for: '{}'", text[:60])
-            return cached
-
-        try:
-            import httpx
-            url = self._toolsdns_config.url.rstrip("/")
-            headers = {
-                "Authorization": f"Bearer {self._toolsdns_config.api_key}",
-                "Content-Type": "application/json",
-            }
-
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                # ── Tier 1: Preflight with context_block format ──
-                resp = await client.post(
-                    f"{url}/v1/preflight",
-                    headers=headers,
-                    json={
-                        "message": text,
-                        "top_k": 5,
-                        "threshold": 0.1,
-                        "max_results": 5,
-                        "include_schemas": True,
-                        "include_call_templates": True,
-                        "include_macros": True,
-                        "agent_id": "mawa",
-                        "format": "context_block",
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-
-            # Check tool names in context_block for meta-tools
-            context_block = data.get("context_block", "")
-            has_meta = any(meta in context_block for meta in self._META_TOOL_PREFIXES)
-
-            # Check if intent map detects a specific app for this query
-            app_prefix = None
-            intent_queries = self._extract_intent_queries(text)
-            for iq in intent_queries:
-                prefix = self._extract_app_prefix(iq)
-                if prefix and prefix != "COMPOSIO":
-                    app_prefix = prefix
-                    break
-
-            # If intent map detected an app, check if tier 1 results contain it
-            app_missing = False
-            if app_prefix and context_block:
-                app_missing = (app_prefix + "_") not in context_block
-
-            if data.get("found") and context_block and not has_meta and not app_missing:
-                # Tier 1 found relevant tools — use as-is
-                queries = data.get("queries_used", [])
-                logger.info("ToolsDNS preflight: tools found via '{}'",
-                             " + ".join(queries[:3])[:80])
-                context_block = await self._enrich_with_hints(context_block)
-                self._preflight_cache.set(text, context_block)
-                return context_block
-
-            # ── Tier 2: Targeted search to find real tools ──
-            # Triggered when: meta-tools detected, or expected app missing from results
-
-            logger.info("ToolsDNS tier 2: {} for '{}'",
-                         f"app={app_prefix}" if app_prefix else "broad re-search",
-                         text[:60])
-            try:
-                all_results: list[dict] = []
-                seen_ids: set[str] = set()
-
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    # Strategy A: Fetch exact tools by ID from intent map
-                    # (bypasses semantic search — guaranteed to find the right tools)
-                    exact_tool_names = [
-                        iq for iq in intent_queries
-                        if self._extract_app_prefix(iq) is not None
-                    ]
-                    for tool_name in exact_tool_names:
-                        tool_id = f"tooldns__{tool_name}"
-                        if tool_id in seen_ids:
-                            continue
-                        try:
-                            resp_t = await client.get(
-                                f"{url}/v1/tool/{tool_id}",
-                                headers=headers,
-                            )
-                            if resp_t.status_code == 200:
-                                tool_data = resp_t.json()
-                                tool_data["confidence"] = 0.95  # high confidence — exact match
-                                seen_ids.add(tool_id)
-                                all_results.append(tool_data)
-                        except Exception:
-                            pass
-
-                    # Strategy B: Semantic search as supplement
-                    cleaned = self._clean_query(text)
-                    search_queries = []
-                    if app_prefix:
-                        search_queries.append(f"{app_prefix} {cleaned}")
-                    # Add descriptive intent queries (not tool names)
-                    for iq in intent_queries:
-                        if self._extract_app_prefix(iq) is None and iq not in search_queries:
-                            search_queries.append(iq)
-                    if cleaned not in search_queries:
-                        search_queries.append(cleaned)
-
-                    for sq in search_queries[:3]:
-                        resp3 = await client.post(
-                            f"{url}/v1/search",
-                            headers=headers,
-                            json={"query": sq, "top_k": 8, "threshold": 0.3},
-                        )
-                        resp3.raise_for_status()
-                        for t in resp3.json().get("results", []):
-                            tid = t.get("id", t.get("name", ""))
-                            if tid not in seen_ids and t.get("name") not in self._META_TOOL_PREFIXES:
-                                seen_ids.add(tid)
-                                all_results.append(t)
-
-                # If we know the app, prefer tools from that app
-                if app_prefix:
-                    app_tools = [t for t in all_results if t.get("name", "").startswith(app_prefix + "_")]
-                    if app_tools:
-                        all_results = app_tools
-
-                # Filter low-confidence results and sort
-                from nanobot.agent.tools.toolsdns_cache import ToolsDNSCache
-                all_results = ToolsDNSCache.filter_by_confidence(all_results, min_confidence=0.3)
-                all_results.sort(key=lambda t: t.get("confidence", t.get("score", 0)), reverse=True)
-                if all_results:
-                    result_block = self._build_context_block(all_results[:5])
-                    result_block = await self._enrich_with_hints(result_block)
-                    names = [t["name"] for t in all_results[:5]]
-                    logger.info("ToolsDNS tier 2: found {} tools: {}", len(names), ", ".join(names))
-                    self._preflight_cache.set(text, result_block)
-                    return result_block
-            except Exception as e:
-                logger.debug("ToolsDNS tier 2 search failed: {}", e)
-
-            # Fallback: return original context_block if available
-            if data.get("found") and context_block:
-                context_block = await self._enrich_with_hints(context_block)
-                self._preflight_cache.set(text, context_block)
-                return context_block
-
-            self._preflight_cache.set(text, None)
-            return None
-
-        except Exception as e:
-            logger.debug("ToolsDNS preflight failed (non-blocking): {}", e)
-            return None
-
-    async def _enrich_with_hints(self, context_block: str, timeout: float = 3.0) -> str:
-        """Append [TOOL MEMORY] hints to a context block if available."""
-        if not context_block or not self._toolsdns_config.enabled:
-            return context_block
-        try:
-            import httpx
-            # Extract all TOOL_IDs from the context block
-            tool_ids = re.findall(r'TOOL_ID: (\S+)', context_block)
-            if not tool_ids:
-                return context_block
-            url = self._toolsdns_config.url.rstrip("/")
-            headers = {"Authorization": f"Bearer {self._toolsdns_config.api_key}"}
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(
-                    f"{url}/v1/tool-hints",
-                    headers=headers,
-                    json={"agent_id": "mawa", "tool_ids": tool_ids},
-                )
-                if resp.status_code != 200:
-                    return context_block
-                data = resp.json()
-                hints = data.get("hints", {})
-                if not hints:
-                    return context_block
-                hint_lines = []
-                for tool_id, entries in hints.items():
-                    if entries:
-                        args = entries[0].get("arguments", {})
-                        # Filter out empty/null values
-                        args = {k: v for k, v in args.items() if v}
-                        if args:
-                            import json as _json
-                            short_name = tool_id.replace("tooldns__", "")
-                            hint_lines.append(
-                                f"  {short_name}: {_json.dumps(args)}"
-                            )
-                if hint_lines:
-                    context_block += "\n\n[TOOL MEMORY] Previously successful args:\n" + "\n".join(hint_lines)
-        except Exception:
-            pass  # Non-blocking
-        return context_block
-
-    @staticmethod
-    def _build_context_block(tools: list[dict]) -> str:
-        """Build a context block matching the ToolsDNS preflight format."""
-        lines = ["[ToolsDNS Auto-Discovery] — tools already found, DO NOT search again.\n"]
-
-        # Build call template for the best match
-        if tools:
-            best = tools[0]
-            best_name = best.get("name", "unknown")
-            best_id = f"tooldns__{best_name}"
-            # Build example arguments from required params + key optional ones
-            schema = best.get("input_schema", {})
-            required = schema.get("required", [])
-            props = schema.get("properties", {})
-            example_args = {}
-            # Always include required params
-            for param in required:
-                ptype = props.get(param, {}).get("type", "string")
-                if ptype == "string":
-                    example_args[param] = f"<{param}>"
-                elif ptype == "number":
-                    example_args[param] = 0
-                elif ptype == "boolean":
-                    example_args[param] = True
-                else:
-                    example_args[param] = f"<{param}>"
-            # If no required params, include up to 3 useful optional params
-            # so the LLM knows to pass useful arguments
-            if not required:
-                for param, info in list(props.items())[:3]:
-                    ptype = info.get("type", "string")
-                    if ptype == "string":
-                        example_args[param] = f"<{param}>"
-                    elif ptype == "integer" or ptype == "number":
-                        example_args[param] = 10
-                    elif ptype == "boolean":
-                        example_args[param] = True
-                    else:
-                        example_args[param] = f"<{param}>"
-            import json as _json
-            args_str = _json.dumps(example_args) if example_args else "{}"
-            best_desc = best.get("description", "").split("\n")[0][:80]
-            lines.append(f'>>> CALL THIS NOW: toolsdns(action="call", tool_id="{best_id}", arguments={args_str})')
-            lines.append(f"    (tool: {best_name} — {best_desc})\n")
-
-        lines.append("RULES: Your FIRST tool call must be toolsdns action=call with real argument values (not placeholders). Do NOT pass extra params like workflow_id or top_k. Do NOT action=search. Do NOT action=get. Do NOT use mcp_tooldns_* tools.\n")
-
-        for i, t in enumerate(tools):
-            name = t.get("name", "unknown")
-            tool_id = f"tooldns__{name}"
-            desc = t.get("description", "").split("\n")[0][:120]
-            confidence = t.get("confidence", 0)
-            label = "BEST MATCH" if i == 0 else f"Match {i + 1}"
-            lines.append(f"{label}  [{confidence:.0%}]  TOOL_ID: {tool_id}")
-            lines.append(f"  {name} — {desc}")
-
-            schema = t.get("input_schema", {})
-            # Full schema for best match only; others get one-liner + CALL template
-            if i == 0 and schema and schema.get("properties"):
-                req_set = set(schema.get("required", []))
-                for pname, info in list(schema["properties"].items())[:10]:
-                    ptype = info.get("type", "any")
-                    pdesc = info.get("description", "").split(".")[0].split("\n")[0][:60]
-                    req = " [REQUIRED]" if pname in req_set else ""
-                    lines.append(f"    {pname}: {ptype}{req} — {pdesc}")
-                if not req_set:
-                    lines.append("  NOTE: All params optional — fill in what's relevant to the user's request")
-            elif i > 0:
-                # Compact: just a CALL template for alternates
-                req_set = set(schema.get("required", []))
-                call_args = {p: f"<{p}>" for p in req_set}
-                lines.append(f'  CALL: toolsdns(action="call", tool_id="{tool_id}", arguments={_json.dumps(call_args)})')
-            lines.append("")
-        return "\n".join(lines)
-
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
-    ) -> tuple[str | None, list[str], list[dict]]:
-        """Run the agent iteration loop."""
+    ) -> tuple[str | None, list[str], list[dict], dict]:
+        """Run the agent iteration loop. Returns (content, tools, messages, usage)."""
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        total_usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         _last_call_sig: str | None = None  # detect repeated identical tool calls
         _repeat_count = 0
 
@@ -821,6 +295,10 @@ class AgentLoop:
                 tools=tool_defs,
                 model=current_model,
             )
+
+            # Accumulate token usage across iterations
+            for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                total_usage[k] += response.usage.get(k, 0)
 
             if response.has_tool_calls:
                 if on_progress:
@@ -922,14 +400,14 @@ class AgentLoop:
                 "without completing the task. You can try breaking the task into smaller steps."
             )
 
-        return final_content, tools_used, messages
+        return final_content, tools_used, messages, total_usage
 
     async def _run_agent_loop_streaming(
         self,
         initial_messages: list[dict],
         on_sentence: Callable[[str], Awaitable[None]] | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
-    ) -> tuple[str | None, list[str], list[dict]]:
+    ) -> tuple[str | None, list[str], list[dict], dict]:
         """Streaming variant of agent loop — fires on_sentence as sentences complete.
 
         Used by voice channels for low-latency TTS: each sentence is sent to TTS
@@ -940,6 +418,7 @@ class AgentLoop:
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        total_usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         _last_call_sig: str | None = None
         _repeat_count = 0
 
@@ -987,6 +466,10 @@ class AgentLoop:
                 logger.error("Streaming error: {}", e)
                 # Fall back to non-streaming
                 return await self._run_agent_loop(initial_messages, on_progress)
+
+            # Accumulate token usage across iterations
+            for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                total_usage[k] += (usage or {}).get(k, 0)
 
             # Flush remaining sentence buffer
             if on_sentence and sentence_buffer.strip() and len(sentence_buffer.strip()) >= 3:
@@ -1073,18 +556,12 @@ class AgentLoop:
                 "without completing the task."
             )
 
-        return final_content, tools_used, messages
+        return final_content, tools_used, messages, total_usage
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         self._running = True
         await self._connect_mcp()
-        self._schedule_background(self._start_memory_indexer())
-        # Start ToolsDNS health monitor
-        if self._toolsdns_config and self._toolsdns_config.enabled:
-            from nanobot.agent.tools.toolsdns_cache import get_cache
-            cache = get_cache(self._toolsdns_config.url, self._toolsdns_config.api_key)
-            self._schedule_background(cache.start_health_monitor())
         from nanobot.hooks.builtin.backup import start_backup_loop
         self._schedule_background(start_backup_loop(self.workspace))
         logger.info("Agent loop started")
@@ -1170,7 +647,7 @@ class AgentLoop:
         """Check if message is conversational (not a task worth spawning)."""
         stripped = text.strip()
         # Short messages matching common conversational patterns
-        if len(stripped) < 15 and self._TOOLSDNS_SKIP_PATTERNS.match(stripped):
+        if len(stripped) < 15 and self._CONVERSATIONAL_SKIP_PATTERNS.match(stripped):
             return True
         # Single/two word acknowledgments
         normalized = stripped.lower().rstrip(".!?,")
@@ -1211,7 +688,7 @@ class AgentLoop:
         """Check if message matches a known skill (requires interactive main agent).
 
         Dynamically loads skill names and trigger phrases from the workspace
-        and ToolsDNS. Refreshes every 5 minutes. Matches on skill names as
+        Refreshes every 5 minutes. Matches on skill names as
         phrases (e.g. "weekly report", "cea report") not individual words,
         to avoid false positives.
         """
@@ -1246,29 +723,10 @@ class AgentLoop:
         return phrases
 
     def _refresh_skill_patterns(self) -> None:
-        """Build skill match patterns from ToolsDNS skills and workspace skills."""
+        """Build skill match patterns from workspace skills."""
         phrases: set[str] = {"skill"}  # "use the skill" always routes to main agent
 
-        # Primary source: ToolsDNS skills API (has all skills with descriptions)
-        if self._toolsdns_config and self._toolsdns_config.enabled:
-            try:
-                import httpx
-                url = self._toolsdns_config.url.rstrip("/")
-                resp = httpx.get(
-                    f"{url}/v1/skills",
-                    headers={"Authorization": f"Bearer {self._toolsdns_config.api_key}"},
-                    timeout=3.0,
-                )
-                if resp.status_code == 200:
-                    for skill_data in resp.json().get("skills", []):
-                        phrases |= self._extract_skill_phrases(
-                            skill_data.get("name", ""),
-                            skill_data.get("description", ""),
-                        )
-            except Exception:
-                pass
-
-        # Fallback: workspace skills directory
+        # Workspace skills directory
         try:
             for skills_dir in [self.workspace / "skills"]:
                 if not skills_dir.is_dir():
@@ -1488,32 +946,6 @@ class AgentLoop:
         self._background_tasks.append(task)
         task.add_done_callback(self._background_tasks.remove)
 
-    async def _start_memory_indexer(self) -> None:
-        """Index memory files on startup, then re-index every 30 minutes."""
-        if not self._toolsdns_config or not self._toolsdns_config.enabled:
-            return
-        try:
-            from nanobot.memory.indexer import MemoryIndexer
-            indexer = MemoryIndexer(
-                self.workspace, self._toolsdns_config.url, self._toolsdns_config.api_key,
-            )
-            count = await indexer.index_all()
-            if count:
-                logger.info("Memory indexer: initial sync indexed {} chunks", count)
-        except Exception as e:
-            logger.warning("Memory indexer startup failed: {}", e)
-            return
-
-        async def _periodic():
-            while self._running:
-                await asyncio.sleep(1800)
-                try:
-                    await indexer.index_all()
-                except Exception as e:
-                    logger.warning("Memory periodic reindex failed: {}", e)
-
-        asyncio.create_task(_periodic())
-
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
@@ -1554,11 +986,11 @@ class AgentLoop:
                             metadata={"_tts_sentence": True},
                         ))
 
-                final_content, _, all_msgs = await self._run_agent_loop_streaming(
+                final_content, _, all_msgs, _sys_usage = await self._run_agent_loop_streaming(
                     messages, on_sentence=_sys_on_sentence,
                 )
             else:
-                final_content, _, all_msgs = await self._run_agent_loop(messages)
+                final_content, _, all_msgs, _sys_usage = await self._run_agent_loop(messages)
 
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
@@ -1614,7 +1046,6 @@ class AgentLoop:
             from nanobot.hooks.builtin.health import run_doctor
             report = await run_doctor(
                 workspace=self.workspace,
-                toolsdns_config=self._toolsdns_config,
                 provider=self.provider,
                 model=self.model,
             )
@@ -1635,9 +1066,6 @@ class AgentLoop:
         _turn_t0 = __import__("time").monotonic()
 
         _is_voice = msg.channel in ("discord_voice", "web_voice")
-        toolsdns_context = await self._toolsdns_preflight(
-            msg.content, timeout=2.0 if _is_voice else 5.0,
-        )
 
         history = session.get_history(max_messages=0)
         enriched_content = msg.content
@@ -1655,9 +1083,6 @@ class AgentLoop:
             for t in running:
                 lines.append(f"- id={t['id']} label=\"{t['label']}\" task=\"{t['task'][:80]}\"")
             enriched_content = f"{enriched_content}\n\n" + "\n".join(lines)
-
-        if toolsdns_context:
-            enriched_content = f"{enriched_content}\n\n{toolsdns_context}"
 
         initial_messages = self.context.build_messages(
             history=history,
@@ -1689,12 +1114,12 @@ class AgentLoop:
                         metadata={"_tts_sentence": True},
                     ))
 
-            final_content, _, all_msgs = await self._run_agent_loop_streaming(
+            final_content, _, all_msgs, turn_usage = await self._run_agent_loop_streaming(
                 initial_messages, on_sentence=_on_sentence,
                 on_progress=on_progress or _bus_progress,
             )
         else:
-            final_content, _, all_msgs = await self._run_agent_loop(
+            final_content, _, all_msgs, turn_usage = await self._run_agent_loop(
                 initial_messages, on_progress=on_progress or _bus_progress,
             )
 
@@ -1704,6 +1129,19 @@ class AgentLoop:
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
         self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
+
+        # Broadcast token usage as activity entry
+        if turn_usage and turn_usage.get("total_tokens", 0) > 0:
+            from nanobot.hooks.builtin.usage_tracker import record_usage, estimate_cost
+            cost = estimate_cost(turn_usage, self.model)
+            cost_str = f" · ${cost:.4f}" if cost > 0 else ""
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content=f"⬡ {turn_usage['prompt_tokens']:,} in · {turn_usage['completion_tokens']:,} out · {turn_usage['total_tokens']:,} total{cost_str}",
+                metadata={"_token_usage": True, "_usage_data": {**turn_usage, "cost": cost}},
+            ))
+            # Persist to daily usage file
+            self._schedule_background(record_usage(self.workspace, turn_usage, msg.channel, self.model))
 
         # Emit turn_completed for lifecycle tracking
         _turn_elapsed = (__import__("time").monotonic() - _turn_t0) * 1000
