@@ -1198,8 +1198,11 @@ class WebVoiceChannel(BaseChannel):
             result = subprocess.run(
                 ["npx", "skills", "find", query],
                 capture_output=True, text=True, timeout=15,
+                env={**__import__("os").environ, "NO_COLOR": "1", "FORCE_COLOR": "0"},
             )
-            output = result.stdout
+            # Strip ANSI escape codes
+            ansi_re = re.compile(r'\x1b\[[0-9;]*m')
+            output = ansi_re.sub("", result.stdout)
 
             # Parse results: "owner/repo@skill-name" and "N installs"
             results = []
@@ -1209,6 +1212,9 @@ class WebVoiceChannel(BaseChannel):
                 m = re.search(r"(\S+/\S+@\S+)", line)
                 if m:
                     skill_id = m.group(1)
+                    # Skip template/example lines
+                    if "<" in skill_id or ">" in skill_id:
+                        continue
                     # Extract install count from same line
                     installs_m = re.search(r"([\d.]+[KM]?)\s*installs", line)
                     installs = installs_m.group(1) if installs_m else "0"

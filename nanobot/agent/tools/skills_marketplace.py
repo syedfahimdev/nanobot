@@ -69,14 +69,18 @@ class SkillsMarketplaceTool(Tool):
             return "Error: query required (at least 2 characters)."
 
         try:
+            import os
             result = subprocess.run(
                 ["npx", "skills", "find", query],
                 capture_output=True, text=True, timeout=15,
+                env={**os.environ, "NO_COLOR": "1", "FORCE_COLOR": "0"},
             )
 
-            # Parse results
+            # Strip ANSI escape codes and parse
+            ansi_re = re.compile(r'\x1b\[[0-9;]*m')
+            output = ansi_re.sub("", result.stdout)
             results = []
-            lines = result.stdout.split("\n")
+            lines = output.split("\n")
             for i, line in enumerate(lines):
                 m = re.search(r"(\S+/\S+@\S+)", line)
                 if m:
