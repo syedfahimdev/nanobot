@@ -80,11 +80,33 @@ class ReactionFeedback:
         with open(self._feedback_file, "a", encoding="utf-8") as f:
             f.write(entry)
 
+    def _count_similar_negative(self, content_preview: str) -> int:
+        """Count how many times similar content has been 👎'd."""
+        if not self._feedback_file.exists():
+            return 0
+        existing = self._feedback_file.read_text(encoding="utf-8")
+        # Count 👎 entries with overlapping keywords
+        words = set(content_preview.lower().split()[:5])
+        count = 0
+        for line in existing.split("\n"):
+            if "👎" in line or "disapproved" in line:
+                line_words = set(line.lower().split())
+                if len(words & line_words) >= 2:
+                    count += 1
+        return count
+
     async def process_negative_reaction(self, message_content: str, reaction: str) -> str | None:
-        """For 👎 reactions, extract a lesson via LLM."""
+        """For 👎 reactions, extract a lesson via LLM. Escalates on repeated issues."""
+        # Check if this is a repeated complaint
+        repeat_count = self._count_similar_negative(message_content[:100])
+        escalation = ""
+        if repeat_count >= 3:
+            escalation = " This is a CRITICAL rule — the user has flagged this same issue multiple times. NEVER do this again."
+        elif repeat_count >= 2:
+            escalation = " The user has flagged this issue before. Make this rule stronger."
         prompt = f"""The user reacted with {reaction} (disapproval) to this assistant message:
 
-"{message_content[:500]}"
+"{message_content[:500]}"{escalation}
 
 What was likely wrong? Extract a concise behavioral rule to prevent this in the future.
 Call save_feedback_lesson with the lesson."""
