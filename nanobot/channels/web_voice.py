@@ -254,6 +254,10 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/api/inbox", self._inbox_list_handler)
         self._app.router.add_post("/api/reaction", self._reaction_handler)
         self._app.router.add_get("/api/autonomy", self._autonomy_handler)
+        self._app.router.add_get("/api/skills/search", self._skills_search_handler)
+        self._app.router.add_post("/api/skills/install", self._skills_install_handler)
+        self._app.router.add_get("/api/skills/installed", self._skills_installed_handler)
+        self._app.router.add_post("/api/skills/remove", self._skills_remove_handler)
         self._app.router.add_get("/api/search", self._search_handler)
         self._app.router.add_get("/api/sessions", self._sessions_list_handler)
         self._app.router.add_post("/api/sessions/switch", self._sessions_switch_handler)
@@ -1182,6 +1186,106 @@ class WebVoiceChannel(BaseChannel):
         except Exception as e:
             logger.warning("Reaction handler error: {}", e)
             return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _skills_search_handler(self, request: web.Request) -> web.Response:
+        """Search skills.sh via npx skills find. GET /api/skills/search?q=..."""
+        try:
+            import subprocess, re
+            query = request.query.get("q", "").strip()
+            if not query or len(query) < 2:
+                return web.json_response({"results": []})
+
+            result = subprocess.run(
+                ["npx", "skills", "find", query],
+                capture_output=True, text=True, timeout=15,
+            )
+            output = result.stdout
+
+            # Parse results: "owner/repo@skill-name" and "N installs"
+            results = []
+            lines = output.split("\n")
+            for i, line in enumerate(lines):
+                # Match skill lines like "anthropics/skills@frontend-design"
+                m = re.search(r"(\S+/\S+@\S+)", line)
+                if m:
+                    skill_id = m.group(1)
+                    # Extract install count from same line
+                    installs_m = re.search(r"([\d.]+[KM]?)\s*installs", line)
+                    installs = installs_m.group(1) if installs_m else "0"
+                    # Extract URL from next line
+                    url = ""
+                    if i + 1 < len(lines):
+                        url_m = re.search(r"(https://skills\.sh/\S+)", lines[i + 1])
+                        if url_m:
+                            url = url_m.group(1)
+                    results.append({
+                        "id": skill_id,
+                        "installs": installs,
+                        "url": url,
+                    })
+
+            return web.json_response({"results": results, "query": query})
+        except subprocess.TimeoutExpired:
+            return web.json_response({"results": [], "error": "Search timed out"})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _skills_install_handler(self, request: web.Request) -> web.Response:
+        """Install a skill via npx skills add. POST /api/skills/install."""
+        try:
+            import subprocess
+            body = await request.json()
+            skill_id = body.get("id", "").strip()
+            if not skill_id:
+                return web.json_response({"error": "id required"}, status=400)
+
+            result = subprocess.run(
+                ["npx", "skills", "add", skill_id],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0:
+                return web.json_response({"ok": True, "output": result.stdout[:500]})
+            else:
+                return web.json_response({"error": result.stderr[:300] or result.stdout[:300]}, status=400)
+        except subprocess.TimeoutExpired:
+            return web.json_response({"error": "Install timed out"}, status=408)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _skills_installed_handler(self, request: web.Request) -> web.Response:
+        """List installed skills via npx skills list. GET /api/skills/installed."""
+        try:
+            import subprocess, re
+            result = subprocess.run(
+                ["npx", "skills", "list"],
+                capture_output=True, text=True, timeout=10,
+            )
+            # Parse installed skills
+            skills = []
+            for line in result.stdout.split("\n"):
+                line = line.strip()
+                if line and not line.startswith("No ") and "@" in line:
+                    skills.append({"id": line.strip()})
+            return web.json_response({"skills": skills})
+        except Exception as e:
+            return web.json_response({"skills": [], "error": str(e)})
+
+    async def _skills_remove_handler(self, request: web.Request) -> web.Response:
+        """Remove a skill via npx skills remove. POST /api/skills/remove."""
+        try:
+            import subprocess
+            body = await request.json()
+            skill_id = body.get("id", "").strip()
+            if not skill_id:
+                return web.json_response({"error": "id required"}, status=400)
+
+            result = subprocess.run(
+                ["npx", "skills", "remove", skill_id],
+                capture_output=True, text=True, timeout=15,
+            )
+            return web.json_response({"ok": True, "output": result.stdout[:500]})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
 
     async def _autonomy_handler(self, request: web.Request) -> web.Response:
         """Return autonomy system stats for the settings page."""
