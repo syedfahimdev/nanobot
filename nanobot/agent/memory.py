@@ -57,6 +57,12 @@ _SAVE_MEMORY_TOOL = [
                         "milestones, emotional events, breakthroughs. Only set if something notable happened. "
                         "Start with [YYYY-MM-DD HH:MM].",
                     },
+                    "behavioral_insight": {
+                        "type": "string",
+                        "description": "If you noticed a user preference, communication style, or behavioral "
+                        "pattern (e.g., 'user prefers concise summaries', 'user dislikes verbose responses', "
+                        "'user always checks email first'), save it here. Only set if genuinely new insight.",
+                    },
                 },
                 "required": ["history_entry", "long_term"],
             },
@@ -362,6 +368,25 @@ Categorize information into layers:
                 ep_text = _ensure_text(episode).strip()
                 if ep_text:
                     self.append_episode(ep_text)
+
+            # Save behavioral insights to LEARNINGS.md
+            insight = args.get("behavioral_insight")
+            if insight:
+                insight_text = _ensure_text(insight).strip()
+                if insight_text and len(insight_text) > 10:
+                    learnings_file = self.memory_dir / "LEARNINGS.md"
+                    existing = ""
+                    if learnings_file.exists():
+                        existing = learnings_file.read_text(encoding="utf-8")
+                    # Dedup
+                    if insight_text.lower() not in existing.lower():
+                        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        lines = [l for l in existing.split("\n") if l.strip().startswith("- ")]
+                        lines.append(f"- {insight_text} [{ts}]")
+                        if len(lines) > 30:
+                            lines = lines[-30:]
+                        learnings_file.write_text("# Learned Rules\n\n" + "\n".join(lines) + "\n", encoding="utf-8")
+                        logger.info("Consolidation: saved behavioral insight — {}", insight_text[:60])
 
             self._consecutive_failures = 0
             logger.info("Memory consolidation done for {} messages", len(messages))
