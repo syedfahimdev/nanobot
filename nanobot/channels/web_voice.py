@@ -493,7 +493,14 @@ class WebVoiceChannel(BaseChannel):
     async def _spa_handler(self, request: web.Request) -> web.Response:
         """Serve React SPA — all routes get index.html (client-side routing)."""
         dist = Path("/root/mawabot/dist")
-        return web.FileResponse(dist / "index.html")
+        return web.FileResponse(
+            dist / "index.html",
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
 
     async def _pwa_asset_handler(self, request: web.Request) -> web.Response:
         """Serve PWA assets (manifest, service worker, icons)."""
