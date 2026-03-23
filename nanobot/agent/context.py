@@ -163,6 +163,14 @@ When the user says "send this", "share that", "forward it", or uses pronouns ref
 - In your response, include the `local_path` exactly as returned (e.g., `/root/.nanobot/workspace/generated/work-orders/X.xlsx`).
 - The path MUST start with / and be inside /root/.nanobot/workspace/. Without the full path, no download card appears.
 
+## File Attachments
+When the user attaches a file (shown as [Attached file: /path/to/file]):
+- You can read it with read_file, copy it with exec (cp), or process it with any tool.
+- If the user says "use this for the work order skill" or "replace the template" — copy the file to the skill's directory.
+- For XLSX/CSV files: you can read them with the inbox tool or openpyxl to understand the contents.
+- For images: they are sent directly to you via vision — you can see and describe them.
+- Always acknowledge what you received: "I see you attached [filename]. Here's what I can do with it..."
+
 Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
 
     @staticmethod

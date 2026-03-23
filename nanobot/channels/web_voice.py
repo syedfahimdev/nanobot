@@ -2490,10 +2490,11 @@ copy();
                     # Base64 image — pass directly to LLM vision
                     processed_media.append(item)
                 elif isinstance(item, str) and item.startswith("data:"):
-                    # Non-image data URI — save to inbox
+                    # Non-image data URI — save to inbox and give LLM the full path
                     saved = await self._save_data_uri_to_inbox(item)
                     if saved:
-                        text = f"{text}\n\n[Attached file: {saved}]"
+                        full_path = str(self._get_workspace() / "inbox" / "general" / saved)
+                        text = f"{text}\n\n[Attached file: {full_path}]\nYou can read, copy, or process this file using your tools. If the user asks to use it with a skill, copy it to the skill's workspace."
                 elif isinstance(item, str):
                     # File path from upload endpoint
                     processed_media.append(item)
