@@ -156,6 +156,9 @@ def _is_sentence_complete(text: str) -> bool:
 
 
 def _strip_markdown(text: str) -> str:
+    # Strip thinking/reasoning blocks that some models embed
+    text = re.sub(r"<think>[\s\S]*?</think>", "", text)
+    text = re.sub(r"<reasoning>[\s\S]*?</reasoning>", "", text)
     text = re.sub(r"```[\s\S]*?```", " ", text)
     text = re.sub(r"`[^`]+`", "", text)
     text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
