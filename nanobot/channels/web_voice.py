@@ -332,6 +332,11 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/api/export/conversation", self._export_conversation_handler)
         self._app.router.add_get("/api/undo", self._undo_handler)
         self._app.router.add_post("/api/maintenance", self._maintenance_handler)
+        self._app.router.add_get("/api/features", self._features_manifest_handler)
+        self._app.router.add_post("/api/features", self._features_save_handler)
+        self._app.router.add_post("/api/budget", self._budget_save_handler)
+        self._app.router.add_post("/api/behavior", self._behavior_save_handler)
+        self._app.router.add_post("/api/maintenance/settings", self._maintenance_settings_handler)
         self._app.router.add_get("/api/search", self._search_handler)
         self._app.router.add_get("/api/sessions", self._sessions_list_handler)
         self._app.router.add_get("/api/sessions/{key:.+}/export", self._session_export_handler)
@@ -1699,6 +1704,73 @@ class WebVoiceChannel(BaseChannel):
         from nanobot.hooks.builtin.maintenance import run_maintenance
         results = run_maintenance(self._get_workspace())
         return web.json_response(results)
+
+    async def _features_manifest_handler(self, request: web.Request) -> web.Response:
+        """GET /api/features — full manifest of all configurable features."""
+        from nanobot.hooks.builtin.feature_registry import get_feature_manifest, get_feature_categories
+        ws = self._get_workspace()
+        return web.json_response({
+            "features": get_feature_manifest(ws),
+            "categories": get_feature_categories(),
+        })
+
+    async def _features_save_handler(self, request: web.Request) -> web.Response:
+        """POST /api/features — save a feature value. Body: {key, value}."""
+        body = await request.json()
+        key = body.get("key", "")
+        value = body.get("value")
+        category = body.get("category", "")
+
+        ws = self._get_workspace()
+
+        # Route to the right config file based on category
+        if category == "intelligence":
+            path = ws / "intelligence.json"
+            data = json.loads(path.read_text()) if path.exists() else {}
+            data[key] = value
+            path.write_text(json.dumps(data, indent=2))
+        elif category == "notifications":
+            path = ws / "quiet_hours.json"
+            data = json.loads(path.read_text()) if path.exists() else {}
+            field_map = {"quietHoursEnabled": "enabled", "quietHoursStart": "start", "quietHoursEnd": "end"}
+            data[field_map.get(key, key)] = value
+            path.write_text(json.dumps(data, indent=2))
+        elif category == "budget":
+            from nanobot.hooks.builtin.cost_budget import load_budget, save_budget
+            budget = load_budget(ws)
+            budget[key] = value
+            save_budget(ws, budget)
+        elif category in ("behavior", "maintenance"):
+            path = ws / f"{category}_settings.json"
+            data = json.loads(path.read_text()) if path.exists() else {}
+            data[key] = value
+            path.write_text(json.dumps(data, indent=2))
+
+        return web.json_response({"ok": True, "key": key, "value": value})
+
+    async def _budget_save_handler(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        from nanobot.hooks.builtin.cost_budget import load_budget, save_budget
+        budget = load_budget(self._get_workspace())
+        budget.update(body)
+        save_budget(self._get_workspace(), budget)
+        return web.json_response({"ok": True})
+
+    async def _behavior_save_handler(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        path = self._get_workspace() / "behavior_settings.json"
+        data = json.loads(path.read_text()) if path.exists() else {}
+        data.update(body)
+        path.write_text(json.dumps(data, indent=2))
+        return web.json_response({"ok": True})
+
+    async def _maintenance_settings_handler(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        path = self._get_workspace() / "maintenance_settings.json"
+        data = json.loads(path.read_text()) if path.exists() else {}
+        data.update(body)
+        path.write_text(json.dumps(data, indent=2))
+        return web.json_response({"ok": True})
 
     async def _intelligence_get_handler(self, request: web.Request) -> web.Response:
         """GET /api/intelligence — return current intelligence toggle states."""
