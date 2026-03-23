@@ -321,6 +321,7 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/api/tools/alternatives", self._tool_alternatives_handler)
         self._app.router.add_post("/api/snapshot", self._snapshot_handler)
         self._app.router.add_get("/api/snapshot/diff", self._snapshot_diff_handler)
+        self._app.router.add_get("/api/sessions/health", self._session_health_handler)
         self._app.router.add_get("/api/search", self._search_handler)
         self._app.router.add_get("/api/sessions", self._sessions_list_handler)
         self._app.router.add_get("/api/sessions/{key:.+}/export", self._session_export_handler)
@@ -1619,6 +1620,10 @@ class WebVoiceChannel(BaseChannel):
         from nanobot.hooks.builtin.claude_capabilities import compare_snapshot
         result = compare_snapshot(self._get_workspace(), name)
         return web.json_response(result)
+
+    async def _session_health_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.smart_responses import get_all_session_health
+        return web.json_response(get_all_session_health())
 
     async def _intelligence_get_handler(self, request: web.Request) -> web.Response:
         """GET /api/intelligence — return current intelligence toggle states."""

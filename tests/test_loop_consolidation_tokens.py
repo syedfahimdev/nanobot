@@ -191,7 +191,7 @@ async def test_preflight_consolidation_runs_alongside_llm_call(tmp_path, monkeyp
         return (1000 if call_count[0] <= 1 else 80, "test")
     loop.memory_consolidator.estimate_session_prompt_tokens = mock_estimate  # type: ignore[method-assign]
 
-    await loop.process_direct("hello", session_key="cli:test")
+    await loop.process_direct("please summarize the project status", session_key="cli:test")
     await _drain_background(loop)
 
     assert "consolidate" in order

@@ -1336,18 +1336,57 @@ class AgentLoop:
 
         _is_voice = msg.channel in ("discord_voice", "web_voice")
 
-        # [Pre-LLM] Try to answer with pure code — zero tokens
+        from nanobot.hooks.builtin.smart_responses import (
+            is_duplicate, get_cached_response, cache_response,
+            get_greeting_response, detect_frustration, get_frustration_preamble,
+            detect_priority, build_entity_context, enrich_urls,
+            detect_loop, get_loop_breaker,
+            get_retry_context, record_failure_context, clear_retry_context,
+            record_turn_metric, humanize_error,
+        )
+
+        # [#11] Message dedup — skip if same message sent within 30s
+        if is_duplicate(key, msg.content):
+            self.model = _original_model
+            return None  # Silently drop duplicate
+
+        # [#1] Response cache — skip LLM for identical questions
+        cached = get_cached_response(msg.content)
+        if cached:
+            session.add_message("user", msg.content)
+            session.add_message("assistant", cached)
+            self.sessions.save(session)
+            self.model = _original_model
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="(cached) " + cached)
+
+        # [#9] Time-aware greeting — zero tokens
+        greeting = get_greeting_response(msg.content, self.workspace)
+        if greeting:
+            session.add_message("user", msg.content)
+            session.add_message("assistant", greeting)
+            self.sessions.save(session)
+            self.model = _original_model
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=greeting)
+
+        # [Pre-LLM] Try to answer with pure code — zero tokens (math, timezone, regex)
         from nanobot.hooks.builtin.claude_capabilities import try_code_answer
         code_answer = try_code_answer(msg.content, self.workspace)
         if code_answer:
-            # Save to session for history continuity
             session.add_message("user", msg.content)
             session.add_message("assistant", code_answer)
             self.sessions.save(session)
             logger.info("Pre-LLM answer (zero tokens): {}", code_answer[:60])
-            # Restore model if it was downgraded
             self.model = _original_model
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=code_answer)
+
+        # [#2] Priority detection — log urgency level
+        priority = detect_priority(msg.content)
+        if priority == "high":
+            logger.info("HIGH PRIORITY message from {}: {}", key, msg.content[:60])
+
+        # [#10] Frustration detection — adjust response tone
+        is_frustrated, frustration_score = detect_frustration(msg.content, key)
+        _frustration_preamble = get_frustration_preamble(frustration_score) if is_frustrated else ""
 
         history = session.get_history(max_messages=0)
         enriched_content = msg.content
@@ -1358,12 +1397,31 @@ class AgentLoop:
         if detected_secrets:
             self._schedule_background(save_detected_secrets(detected_secrets))
 
-        # [#2] Inject active intent context so the LLM maintains conversation coherence
+        # [#2] Inject active intent context
         _intelligence = self._get_intelligence_settings()
         if _intelligence.get("intentTracking", True):
             intent_block = intent_tracker.get_intent_block()
             if intent_block:
                 enriched_content = f"{enriched_content}\n\n{intent_block}"
+
+        # [#3] Entity extraction — inject detected entities
+        entity_ctx = build_entity_context(msg.content)
+        if entity_ctx:
+            enriched_content = f"{enriched_content}\n\n{entity_ctx}"
+
+        # [#8] Link enrichment — add URL context
+        url_ctx = enrich_urls(msg.content)
+        if url_ctx:
+            enriched_content = f"{enriched_content}\n\n{url_ctx}"
+
+        # [#10] Frustration preamble — inject if user is frustrated
+        if _frustration_preamble:
+            enriched_content = f"{enriched_content}\n\n[User seems frustrated. Start your response with: {_frustration_preamble}]"
+
+        # [#14] Retry context — inject previous failure info
+        retry_ctx = get_retry_context(key)
+        if retry_ctx:
+            enriched_content = f"{enriched_content}\n\n{retry_ctx}"
 
         # Inject running subagent context so the main agent can route updates
         running = self.subagents.get_running_tasks()
@@ -1418,6 +1476,31 @@ class AgentLoop:
         # Security filter — strip any leaked credentials from outbound response
         from nanobot.hooks.builtin.capabilities import _sanitize
         final_content = _sanitize(final_content)
+
+        # [#7] Error translation — humanize technical errors
+        final_content = humanize_error(final_content)
+
+        # [#4] Loop detection — detect and break repetitive responses
+        if detect_loop(key, final_content):
+            # Inject loop breaker for next turn
+            session.add_message("user", get_loop_breaker())
+
+        # [#1] Cache the response for future identical questions
+        cache_response(msg.content, final_content)
+
+        # [#14] Clear retry context on success (no error in response)
+        if not (final_content.startswith("Error") or "failed" in final_content.lower()[:50]):
+            clear_retry_context(key)
+
+        # [#15] Session health metrics
+        _turn_elapsed_ms = (__import__("time").monotonic() - _turn_t0) * 1000
+        record_turn_metric(
+            key,
+            tokens=turn_usage.get("total_tokens", 0) if turn_usage else 0,
+            tools_used=len([m for m in all_msgs if m.get("role") == "tool"]),
+            duration_ms=_turn_elapsed_ms,
+            error=final_content.startswith("Error") if final_content else False,
+        )
 
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
