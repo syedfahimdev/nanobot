@@ -2366,8 +2366,9 @@ copy();
 
                     elif action == "text":
                         text = data.get("text", "").strip()
-                        if text:
-                            self._enqueue_message(session_id, text)
+                        media = data.get("media", [])  # List of base64 data URIs or file paths
+                        if text or media:
+                            self._enqueue_message(session_id, text or "(attachment)", media=media if media else None)
 
                 elif msg.type == aiohttp.WSMsgType.BINARY:
                     if dg_ws:
@@ -2423,7 +2424,7 @@ copy();
 
     # ── Message queue (serialize per session) ──────────────────────
 
-    def _enqueue_message(self, session_id: str, text: str) -> None:
+    def _enqueue_message(self, session_id: str, text: str, media: list[str] | None = None) -> None:
         """Submit a message to the agent immediately (no queuing).
 
         The agent loop handles concurrency: if it's already busy on this session,
@@ -2431,6 +2432,7 @@ copy();
         sees it on its next iteration.
 
         Interrupt patterns ('no', 'stop', 'wait') still cancel via /stop.
+        media: list of base64 data URIs (images) or file paths.
         """
         is_interrupt = bool(_INTERRUPT_PATTERNS.search(text.strip()))
 
@@ -2442,7 +2444,7 @@ copy();
                 asyncio.create_task(ws.send_json({"type": "queue_status", "pending": 0}))
 
         # Fire directly to the agent — no channel-level queue
-        asyncio.create_task(self._submit_to_agent(session_id, text))
+        asyncio.create_task(self._submit_to_agent(session_id, text, media=media))
 
     async def _send_stop(self, session_id: str) -> None:
         """Send /stop command to cancel any running agent task for this session."""
@@ -2463,8 +2465,8 @@ copy();
 
     # ── Agent integration ──────────────────────────────────────────
 
-    async def _submit_to_agent(self, session_id: str, text: str) -> None:
-        logger.info("Web Voice heard: '{}'", text)
+    async def _submit_to_agent(self, session_id: str, text: str, media: list[str] | None = None) -> None:
+        logger.info("Web Voice heard: '{}' (media: {})", text, len(media) if media else 0)
 
         ws = self._clients.get(session_id)
         if ws and not ws.closed:
@@ -2474,22 +2476,64 @@ copy();
         self._activity_ts[session_id] = time.time()
 
         # Fire-and-forget: intel goes to activity feed + stashed for LLM enrichment
-        # Runs concurrently with the agent loop's preflight — zero added latency
         if len(text.split()) >= 4:
             asyncio.create_task(self._get_intel_for_llm(session_id, text))
 
         # Use fixed chat_id so all devices share the same nanobot session
         shared_chat_id = "voice"
 
+        # Save non-image attachments to inbox and convert media to paths
+        processed_media = []
+        if media:
+            for item in media:
+                if isinstance(item, str) and item.startswith("data:image/"):
+                    # Base64 image — pass directly to LLM vision
+                    processed_media.append(item)
+                elif isinstance(item, str) and item.startswith("data:"):
+                    # Non-image data URI — save to inbox
+                    saved = await self._save_data_uri_to_inbox(item)
+                    if saved:
+                        text = f"{text}\n\n[Attached file: {saved}]"
+                elif isinstance(item, str):
+                    # File path from upload endpoint
+                    processed_media.append(item)
+
         await self._handle_message(
             sender_id=session_id,
             chat_id=shared_chat_id,
             content=text,
+            media=processed_media if processed_media else None,
             metadata={
                 "source": "voice",
                 "_ws_session_id": session_id,
             },
         )
+
+    async def _save_data_uri_to_inbox(self, data_uri: str) -> str | None:
+        """Save a data URI to the inbox and return the filename."""
+        import base64 as b64
+        try:
+            # Parse data URI: data:application/pdf;base64,xxxx
+            header, encoded = data_uri.split(",", 1)
+            mime = header.split(":")[1].split(";")[0]
+            ext_map = {
+                "application/pdf": ".pdf", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+                "text/csv": ".csv", "text/plain": ".txt", "application/json": ".json",
+                "application/zip": ".zip",
+            }
+            ext = ext_map.get(mime, ".bin")
+            name = f"upload_{int(time.time())}{ext}"
+
+            inbox_dir = self._get_workspace() / "inbox" / "general"
+            inbox_dir.mkdir(parents=True, exist_ok=True)
+            path = inbox_dir / name
+            path.write_bytes(b64.b64decode(encoded))
+            logger.info("Saved attachment to inbox: {} ({})", name, mime)
+            return name
+        except Exception as e:
+            logger.warning("Failed to save data URI: {}", e)
+            return None
 
     async def _get_intel_for_llm(self, session_id: str, text: str) -> str | None:
         """Analyze speech, send to activity feed, and return summary for LLM context."""
