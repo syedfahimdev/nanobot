@@ -336,8 +336,18 @@ def get_time_greeting(name: str = "") -> str:
 
 
 def is_greeting(text: str) -> bool:
-    """Detect if the message is a greeting."""
-    return bool(re.match(r"^(hi|hello|hey|yo|sup|good morning|good evening|good afternoon|howdy|greetings)\b", text.strip(), re.I))
+    """Detect if the message is ONLY a greeting — not a greeting followed by a question.
+
+    'Hey' → True, 'Hey Mawa' → True, 'Hey, what's the bitcoin price?' → False
+    """
+    stripped = text.strip()
+    # If it has a question mark, it's a question not just a greeting
+    if "?" in stripped:
+        return False
+    # If it's longer than 5 words, it probably has a real request after the greeting
+    if len(stripped.split()) > 5:
+        return False
+    return bool(re.match(r"^(hi|hello|hey|yo|sup|good morning|good evening|good afternoon|howdy|greetings)\b", stripped, re.I))
 
 
 def get_greeting_response(text: str, workspace: Path) -> str | None:
