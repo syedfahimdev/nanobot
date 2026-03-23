@@ -11,7 +11,6 @@ from loguru import logger
 
 async def run_doctor(
     workspace: Path,
-    toolsdns_config: Any = None,
     provider: Any = None,
     model: str | None = None,
 ) -> str:
@@ -21,7 +20,6 @@ async def run_doctor(
     checks.append(_check_disk(workspace))
     checks.append(_check_sessions(workspace))
     checks.append(_check_memory(workspace))
-    checks.append(await _check_toolsdns(toolsdns_config))
     checks.append(await _check_llm(provider, model))
 
     lines = ["Health Check Results:", ""]
@@ -81,24 +79,6 @@ def _check_memory(workspace: Path) -> tuple[str, bool, str]:
     # Warn if HISTORY.md > 500KB
     ok = not history.exists() or history.stat().st_size < 512_000
     return ("Memory", ok, detail)
-
-
-async def _check_toolsdns(config: Any) -> tuple[str, bool, str]:
-    if not config or not getattr(config, "enabled", False):
-        return ("ToolsDNS", False, "Not configured")
-    try:
-        import httpx
-        url = config.url.rstrip("/")
-        headers = {"Authorization": f"Bearer {config.api_key}"}
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{url}/v1/health", headers=headers)
-            if resp.status_code == 200:
-                data = resp.json()
-                tools = data.get("total_tools", "?")
-                return ("ToolsDNS", True, f"Online — {tools} tools indexed")
-            return ("ToolsDNS", False, f"HTTP {resp.status_code}")
-    except Exception as e:
-        return ("ToolsDNS", False, f"Unreachable: {e}")
 
 
 async def _check_llm(provider: Any, model: str | None) -> tuple[str, bool, str]:

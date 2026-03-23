@@ -133,6 +133,14 @@ Your workspace is at: {workspace_path}
 - If a relevant skill exists, suggest installing it to the user
 - You can also install skills directly: `skills_marketplace(action="install", skill_id="owner/repo@skill")`
 
+## Pronoun Resolution — CRITICAL
+When the user says "send this", "share that", "forward it", or uses pronouns referencing recent content:
+- ALWAYS resolve the pronoun by looking at your previous messages in the conversation.
+- "Send this to X" means send the content from your LAST response to person X.
+- "Share that with X" means share what you just said/found/generated.
+- NEVER ask "what do you want to send?" when the answer is clearly in the conversation.
+- Include the full referenced content in the message you send.
+
 ## Tool Routing — ALWAYS use the correct tool
 - "check my goals" / "list goals" / "what am I working on" → call `goals(action="list")`
 - "add a goal" / "track this" → call `goals(action="add", ...)`
@@ -141,6 +149,7 @@ Your workspace is at: {workspace_path}
 - "what do you know about me" / recall facts → call `memory_search`
 - Before drafting work emails → call `inbox(action="search", folder="work", query="...")`
 - "open website" / "go to URL" / "browse" / "screenshot" → call `browser(action="navigate", url="...")` (built-in Playwright browser)
+- "send this to X" / "share with X" / "forward to X" → resolve "this" from your last response, then send via the appropriate channel (Telegram, email, etc.)
 
 ## Skill Workflow Rules — CRITICAL
 - BEFORE using a skill, read its SKILL.md file first. The file contains the exact workflow, phases, and rules.
@@ -192,6 +201,43 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
 
         return "\n\n".join(parts) if parts else ""
 
+    @staticmethod
+    def _build_conversation_recap(history: list[dict[str, Any]], max_turns: int = 6) -> str:
+        """Build a short extractive recap of the recent conversation.
+
+        Scans the last *max_turns* user↔assistant exchanges and produces a
+        bullet-point summary so the LLM always has a condensed "story so far"
+        even when the raw history is long.  Costs zero extra tokens (no LLM
+        call) — purely extractive.
+        """
+        if len(history) < 4:
+            return ""
+
+        # Collect recent user/assistant pairs (skip tool messages)
+        pairs: list[tuple[str, str]] = []
+        last_user = ""
+        for msg in history:
+            role = msg.get("role")
+            content = msg.get("content", "")
+            if not isinstance(content, str):
+                continue
+            if role == "user":
+                last_user = content.strip()[:120]
+            elif role == "assistant" and last_user and content.strip():
+                pairs.append((last_user, content.strip()[:120]))
+                last_user = ""
+
+        if not pairs:
+            return ""
+
+        recent = pairs[-max_turns:]
+        lines = ["[Conversation recap — what has been discussed so far]"]
+        for user_msg, assistant_msg in recent:
+            lines.append(f"- User: {user_msg}")
+            lines.append(f"  Assistant: {assistant_msg}")
+
+        return "\n".join(lines)
+
     def build_messages(
         self,
         history: list[dict[str, Any]],
@@ -204,6 +250,13 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         """Build the complete message list for an LLM call."""
         runtime_ctx = self._build_runtime_context(channel, chat_id)
         user_content = self._build_user_content(current_message, media)
+
+        # Build a short extractive recap of the conversation so far.
+        # This helps the LLM resolve pronouns ("this", "that") and maintain
+        # coherence across long multi-turn conversations.
+        recap = self._build_conversation_recap(history)
+        if recap:
+            runtime_ctx = f"{runtime_ctx}\n\n{recap}"
 
         # Merge runtime context and user content into a single user message
         # to avoid consecutive same-role messages that some providers reject.

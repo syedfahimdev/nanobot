@@ -6,7 +6,7 @@ Features:
   - Auto-screenshot on every action (fallback for mobile)
   - Location/geolocation spoofing
   - Full page scraping + link extraction
-  - No ToolsDNS, no Composio, no MCP — runs Playwright directly
+  - Runs Playwright directly (no external tool services)
 """
 
 from __future__ import annotations

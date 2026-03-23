@@ -2,7 +2,7 @@
 
 When the agent sees an image or document, it can save a structured summary
 to memory/MEDIA.md with a reference to the original file. These summaries
-are searchable via memory_search (indexed by ToolsDNS).
+are searchable via memory_search.
 
 Stored format:
   ## [2026-03-20 14:30] Receipt — Amazon order

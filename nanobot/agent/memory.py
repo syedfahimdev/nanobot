@@ -199,14 +199,24 @@ class MemoryStore:
             top = "\n".join(lines[:5])
             parts.append(f"## Patterns\n{top}")
 
-        # Inject learned rules from reflection
+        # Inject learned rules from user corrections (high priority)
         learnings_file = self.memory_dir / "LEARNINGS.md"
         if learnings_file.exists():
             content = learnings_file.read_text(encoding="utf-8")
             rules = [l for l in content.split("\n") if l.strip().startswith("- ")]
             if rules:
                 top_rules = "\n".join(rules[-10:])
-                parts.append(f"## Learned Rules\n{top_rules}")
+                parts.append(f"## User Preferences (MUST follow)\n{top_rules}")
+
+        # Inject tool reliability warnings (lower priority, just awareness)
+        tool_learnings_file = self.memory_dir / "TOOL_LEARNINGS.md"
+        if tool_learnings_file.exists():
+            content = tool_learnings_file.read_text(encoding="utf-8")
+            rules = [l for l in content.split("\n") if l.strip().startswith("- ")]
+            if rules:
+                # Only inject top 5 tool warnings to save tokens
+                top_rules = "\n".join(rules[-5:])
+                parts.append(f"## Tool Warnings\n{top_rules}")
 
         # Inject tool reliability warnings from tool_scores.json
         scores_file = self.memory_dir / "tool_scores.json"
@@ -496,7 +506,7 @@ class MemoryConsolidator:
                 return True
         return True
 
-    _MSG_COUNT_THRESHOLD = 50  # Force consolidation after this many unconsolidated messages
+    _MSG_COUNT_THRESHOLD = 20  # Force consolidation after this many unconsolidated messages
 
     async def maybe_consolidate_by_tokens(self, session: Session) -> None:
         """Loop: archive old messages until prompt fits within half the context window.

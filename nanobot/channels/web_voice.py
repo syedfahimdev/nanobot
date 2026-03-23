@@ -189,6 +189,34 @@ class WebVoiceConfig(Base):
     app_name: str = "Mawa"  # Display name for the assistant
 
 
+_INTELLIGENCE_DEFAULTS = {
+    "smartErrorRecovery": True,
+    "intentTracking": True,
+    "dynamicContextBudget": True,
+    "responseQualityGate": True,
+    "mcpAutoReconnect": True,
+}
+
+
+def _load_intelligence_settings(workspace: Path) -> dict:
+    """Load intelligence settings from workspace/intelligence.json."""
+    path = workspace / "intelligence.json"
+    if path.exists():
+        try:
+            return {**_INTELLIGENCE_DEFAULTS, **json.loads(path.read_text())}
+        except Exception:
+            pass
+    return dict(_INTELLIGENCE_DEFAULTS)
+
+
+def _save_intelligence_settings(workspace: Path, settings: dict) -> None:
+    """Save intelligence settings to workspace/intelligence.json."""
+    path = workspace / "intelligence.json"
+    # Only save known keys
+    clean = {k: bool(v) for k, v in settings.items() if k in _INTELLIGENCE_DEFAULTS}
+    path.write_text(json.dumps(clean, indent=2))
+
+
 class WebVoiceChannel(BaseChannel):
     """Web-based voice channel using browser mic + Deepgram STT/TTS."""
 
@@ -239,6 +267,8 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_post("/api/config", self._config_update_handler)
         self._app.router.add_get("/api/memory", self._memory_handler)
         self._app.router.add_post("/api/memory/clear-short-term", self._memory_clear_short_term_handler)
+        self._app.router.add_post("/api/memory/consolidate", self._memory_consolidate_handler)
+        self._app.router.add_get("/api/memory/timeline", self._memory_timeline_handler)
         self._app.router.add_post("/api/events", self._events_handler)
         self._app.router.add_get("/api/goals", self._goals_handler)
         self._app.router.add_post("/api/goals", self._goals_update_handler)
@@ -254,6 +284,9 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/api/inbox", self._inbox_list_handler)
         self._app.router.add_post("/api/reaction", self._reaction_handler)
         self._app.router.add_get("/api/autonomy", self._autonomy_handler)
+        self._app.router.add_get("/api/intelligence", self._intelligence_get_handler)
+        self._app.router.add_get("/api/learnings", self._learnings_handler)
+        self._app.router.add_post("/api/intelligence", self._intelligence_set_handler)
         self._app.router.add_get("/api/skills/search", self._skills_search_handler)
         self._app.router.add_post("/api/skills/install", self._skills_install_handler)
         self._app.router.add_get("/api/skills/installed", self._skills_installed_handler)
@@ -661,16 +694,124 @@ class WebVoiceChannel(BaseChannel):
             return web.json_response({"error": "Internal error"}, status=500)
 
     async def _memory_clear_short_term_handler(self, request: web.Request) -> web.Response:
-        """Clear SHORT_TERM.md (archives to HISTORY.md first)."""
+        """Clear SHORT_TERM.md — consolidates via LLM first, then archives to HISTORY.md."""
         try:
-            from nanobot.config.paths import get_workspace_path
+            workspace = self._get_workspace()
             from nanobot.agent.memory import MemoryStore
-            store = MemoryStore(get_workspace_path())
+            store = MemoryStore(workspace)
+
+            # Read current short-term content before clearing
+            short_term = store.read_short_term().strip()
+            if short_term:
+                # Consolidate short-term content through LLM before archiving
+                try:
+                    from nanobot.providers.litellm_provider import LiteLLMProvider
+                    provider = LiteLLMProvider()
+                    model = provider.get_default_model()
+                    messages = [{"role": "user", "content": short_term, "timestamp": "today"}]
+                    await store.consolidate(messages, provider, model)
+                    logger.info("Memory clear: consolidated short-term via LLM before clearing")
+                except Exception as e:
+                    logger.warning("Memory clear: LLM consolidation failed ({}), falling back to raw archive", e)
+
             store.daily_cleanup()
-            return web.json_response({"ok": True})
+            return web.json_response({"ok": True, "consolidated": bool(short_term)})
         except Exception as e:
             logger.warning("Memory clear error: {}", e)
             return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _memory_consolidate_handler(self, request: web.Request) -> web.Response:
+        """POST /api/memory/consolidate — manually trigger LLM consolidation of session history."""
+        try:
+            workspace = self._get_workspace()
+
+            # Find active session and consolidate unconsolidated messages
+            from nanobot.session.manager import SessionManager
+            sessions = SessionManager(workspace)
+            # Use the web_voice:voice session (the active one)
+            session = sessions.get_or_create("web_voice:voice")
+            unconsolidated = session.messages[session.last_consolidated:]
+
+            if not unconsolidated:
+                return web.json_response({"ok": True, "consolidated": 0, "message": "Nothing to consolidate"})
+
+            from nanobot.agent.memory import MemoryStore
+            from nanobot.providers.litellm_provider import LiteLLMProvider
+            store = MemoryStore(workspace)
+            provider = LiteLLMProvider()
+            model = provider.get_default_model()
+
+            result = await store.consolidate(unconsolidated, provider, model)
+            if result:
+                session.last_consolidated = len(session.messages)
+                sessions.save(session)
+                return web.json_response({
+                    "ok": True,
+                    "consolidated": len(unconsolidated),
+                    "message": f"Consolidated {len(unconsolidated)} messages into memory layers",
+                })
+
+            return web.json_response({"ok": False, "message": "Consolidation failed"}, status=500)
+        except Exception as e:
+            logger.warning("Memory consolidate error: {}", e)
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _memory_timeline_handler(self, request: web.Request) -> web.Response:
+        """GET /api/memory/timeline — return memory activity events for timeline visualization."""
+        try:
+            workspace = self._get_workspace()
+            mem_dir = workspace / "memory"
+            events = []
+
+            # Parse HISTORY.md for timestamped events
+            history = mem_dir / "HISTORY.md"
+            if history.exists():
+                import re
+                for line in history.read_text().split("\n"):
+                    m = re.match(r"\[(\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2})?)\](.+)", line.strip())
+                    if m:
+                        events.append({
+                            "ts": m.group(1).strip(),
+                            "type": "history",
+                            "text": m.group(2).strip()[:150],
+                        })
+
+            # Parse LEARNINGS.md
+            learnings = mem_dir / "LEARNINGS.md"
+            if learnings.exists():
+                import re
+                for line in learnings.read_text().split("\n"):
+                    m = re.search(r"\[(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\]", line)
+                    if m:
+                        text = line.strip().lstrip("- ").split("[")[0].strip()
+                        events.append({"ts": m.group(1), "type": "learning", "text": text[:150]})
+
+            # Parse EPISODES.md
+            episodes = mem_dir / "EPISODES.md"
+            if episodes.exists():
+                import re
+                for line in episodes.read_text().split("\n"):
+                    m = re.search(r"\[(\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2})?)\]", line)
+                    if m:
+                        text = line.strip().lstrip("- ").split("[")[0].strip()
+                        events.append({"ts": m.group(1), "type": "episode", "text": text[:150]})
+
+            # Parse FEEDBACK.md
+            feedback = mem_dir / "FEEDBACK.md"
+            if feedback.exists():
+                import re
+                for line in feedback.read_text().split("\n"):
+                    m = re.search(r"\[(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\]", line)
+                    if m:
+                        text = line.strip().lstrip("- ").split("[")[0].strip()
+                        events.append({"ts": m.group(1), "type": "feedback", "text": text[:100]})
+
+            # Sort by timestamp descending, limit to 50
+            events.sort(key=lambda e: e["ts"], reverse=True)
+            return web.json_response({"events": events[:50]})
+        except Exception as e:
+            logger.warning("Memory timeline error: {}", e)
+            return web.json_response({"events": []})
 
     async def _events_handler(self, request: web.Request) -> web.Response:
         """Ingest external events via webhook. POST /api/events."""
@@ -1338,6 +1479,36 @@ class WebVoiceChannel(BaseChannel):
         except Exception as e:
             logger.warning("Autonomy API error: {}", e)
             return web.json_response({"error": str(e)}, status=500)
+
+    async def _learnings_handler(self, request: web.Request) -> web.Response:
+        """GET /api/learnings — return what Mawa has learned."""
+        ws = self._get_workspace()
+        user_file = ws / "memory" / "LEARNINGS.md"
+        tool_file = ws / "memory" / "TOOL_LEARNINGS.md"
+
+        def _parse(path):
+            if not path.exists():
+                return []
+            return [l.strip().lstrip("- ") for l in path.read_text().split("\n") if l.strip().startswith("- ")]
+
+        return web.json_response({
+            "userLearnings": _parse(user_file),
+            "toolLearnings": _parse(tool_file),
+        })
+
+    async def _intelligence_get_handler(self, request: web.Request) -> web.Response:
+        """GET /api/intelligence — return current intelligence toggle states."""
+        settings = _load_intelligence_settings(self._get_workspace())
+        return web.json_response(settings)
+
+    async def _intelligence_set_handler(self, request: web.Request) -> web.Response:
+        """POST /api/intelligence — save intelligence toggle states."""
+        try:
+            body = await request.json()
+            _save_intelligence_settings(self._get_workspace(), body)
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
 
     async def _usage_handler(self, request: web.Request) -> web.Response:
         """Return token usage summary for the dashboard."""
@@ -2072,6 +2243,28 @@ copy();
             if tts_worker:
                 tts_worker.cancel()
             self._tts_queues.pop(session_id, None)
+
+            # Auto-consolidate on disconnect so no conversation is lost
+            try:
+                workspace = self._get_workspace()
+                from nanobot.session.manager import SessionManager
+                sessions = SessionManager(workspace)
+                session = sessions.get_or_create("web_voice:voice")
+                unconsolidated = session.messages[session.last_consolidated:]
+                if len(unconsolidated) >= 6:  # Only if there's meaningful content
+                    from nanobot.agent.memory import MemoryStore
+                    from nanobot.providers.litellm_provider import LiteLLMProvider
+                    store = MemoryStore(workspace)
+                    provider = LiteLLMProvider()
+                    model = provider.get_default_model()
+                    result = await store.consolidate(unconsolidated, provider, model)
+                    if result:
+                        session.last_consolidated = len(session.messages)
+                        sessions.save(session)
+                        logger.info("Auto-consolidated {} messages on disconnect", len(unconsolidated))
+            except Exception as e:
+                logger.debug("Auto-consolidation on disconnect failed: {}", e)
+
             logger.info("Web Voice client disconnected: {}", session_id)
 
         return ws

@@ -1,1 +1,1 @@
-"""Unified setup wizard for nanobot + ToolsDNS + mawabot."""
+"""Unified setup wizard for nanobot."""

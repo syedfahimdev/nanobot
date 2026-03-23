@@ -1,7 +1,7 @@
 """Generative UI hook — sends structured tool results to the frontend.
 
-When a ToolsDNS tool call completes, this hook parses the JSON result
-and broadcasts it to all connected web voice clients as a `tool_result`
+When a tool call completes, this hook parses the JSON result and
+broadcasts it to all connected web voice clients as a `tool_result`
 message. The frontend maps tool names to React components for rich
 inline rendering (email cards, calendar events, weather widgets, etc.).
 """
@@ -33,7 +33,6 @@ def _parse_tool_result(result: str) -> dict | None:
     """Try to extract structured data from a tool result string."""
     try:
         parsed = json.loads(result)
-        # Handle ToolsDNS wrapper format
         if isinstance(parsed, dict):
             # Composio tools wrap in content[].text
             content = parsed.get("content", [])
@@ -56,13 +55,7 @@ def make_tool_ui_hook(bus: "MessageBus"):
         if event.error or not event.channel:
             return
 
-        # Only process toolsdns calls
-        tool_name = ""
-        if event.name == "toolsdns" and event.params.get("action") == "call":
-            tool_id = event.params.get("tool_id", "")
-            tool_name = tool_id.replace("tooldns__", "")
-        else:
-            return
+        tool_name = event.name
 
         # Check if this tool has a UI component
         if tool_name not in _UI_TOOLS:

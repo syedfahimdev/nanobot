@@ -4,7 +4,6 @@ Following Anthropic's skill-creator patterns:
 - Skills are SKILL.md files with YAML frontmatter (name, description)
 - Progressive disclosure: metadata → instructions → bundled resources
 - Description optimized for triggering accuracy
-- Skills registered in ToolsDNS for discovery
 
 Actions:
   create: Generate a new skill from a description + optional docs URL
@@ -205,38 +204,13 @@ description: "{skill_desc}"
 """
             (skill_dir / "SKILL.md").write_text(skill_md, encoding="utf-8")
 
-            # Register with ToolsDNS if available
-            registered = await self._register_skill(skill_name, skill_desc, instructions)
-
             logger.info("Skill created: {} at {}", skill_name, skill_dir)
             result = f"Skill '{skill_name}' created at {skill_dir}/SKILL.md"
-            if registered:
-                result += "\nRegistered with ToolsDNS for discovery."
             result += f"\n\nDescription: {skill_desc[:200]}"
             return result
 
         except Exception as e:
             return f"Error creating skill: {e}"
-
-    async def _register_skill(self, name: str, description: str, content: str) -> bool:
-        """Register the skill with ToolsDNS MCP."""
-        try:
-            from nanobot.config.loader import load_config
-            config = load_config()
-            td = getattr(getattr(config, "tools", None), "toolsdns", None)
-            if not td or not td.url:
-                return False
-
-            import httpx
-            resp = httpx.post(
-                f"{td.url}/v1/skills",
-                json={"name": name, "description": description, "content": content},
-                headers={"Authorization": f"Bearer {td.api_key}"},
-                timeout=10,
-            )
-            return resp.status_code in (200, 201)
-        except Exception:
-            return False
 
     async def _improve(self, name: str, feedback: str) -> str:
         if not name:
@@ -288,7 +262,6 @@ description: "{skill_desc}"
 {instructions}
 """
             skill_file.write_text(skill_md, encoding="utf-8")
-            await self._register_skill(name, skill_desc, instructions)
 
             return f"Skill '{name}' improved and saved."
         except Exception as e:

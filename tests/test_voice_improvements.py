@@ -77,58 +77,6 @@ class TestSkipSummarization:
         assert "failed" in msg.content
 
 
-# ── Improvement #3: Cache ToolsDNS preflight ──
-
-class TestPreflightCache:
-    def test_cache_miss_returns_sentinel(self):
-        from nanobot.agent.subagent import PreflightCache
-
-        cache = PreflightCache(ttl_seconds=60)
-        result = cache.get("some query")
-        assert result is PreflightCache._MISS
-
-    def test_cache_hit_returns_value(self):
-        from nanobot.agent.subagent import PreflightCache
-
-        cache = PreflightCache(ttl_seconds=60)
-        cache.set("check my email", "context block data")
-        result = cache.get("check my email")
-        assert result == "context block data"
-
-    def test_cache_normalizes_whitespace(self):
-        from nanobot.agent.subagent import PreflightCache
-
-        cache = PreflightCache(ttl_seconds=60)
-        cache.set("check   my  email", "data")
-        result = cache.get("check my email")
-        assert result == "data"
-
-    def test_cache_case_insensitive(self):
-        from nanobot.agent.subagent import PreflightCache
-
-        cache = PreflightCache(ttl_seconds=60)
-        cache.set("Check My Email", "data")
-        result = cache.get("check my email")
-        assert result == "data"
-
-    def test_cache_none_values(self):
-        from nanobot.agent.subagent import PreflightCache
-
-        cache = PreflightCache(ttl_seconds=60)
-        cache.set("hello", None)
-        result = cache.get("hello")
-        assert result is None  # None is a valid cached result (no tools found)
-
-    def test_cache_eviction(self):
-        from nanobot.agent.subagent import PreflightCache
-
-        cache = PreflightCache(ttl_seconds=0)  # Instant expiry
-        cache.set("query", "data")
-        time.sleep(0.01)
-        result = cache.get("query")
-        assert result is PreflightCache._MISS
-
-
 # ── Improvement #7: Smarter auto-spawn vs direct ──
 
 class TestSmartAutoSpawn:
@@ -267,90 +215,6 @@ class TestStreamChat:
 
 # ── Two-tier preflight: meta-tool filtering + app detection ──
 
-class TestTwoTierPreflight:
-    def _make_loop(self):
-        from nanobot.agent.loop import AgentLoop
-        from nanobot.bus.queue import MessageBus
-
-        bus = MessageBus()
-        provider = MagicMock()
-        provider.get_default_model.return_value = "test-model"
-        workspace = MagicMock()
-        workspace.__truediv__ = MagicMock(return_value=MagicMock())
-
-        with patch("nanobot.agent.loop.ContextBuilder"), \
-             patch("nanobot.agent.loop.SessionManager"), \
-             patch("nanobot.agent.loop.SubagentManager") as MockSubMgr:
-            MockSubMgr.return_value.cancel_by_session = AsyncMock(return_value=0)
-            MockSubMgr.return_value.spawn = AsyncMock(return_value="spawned")
-            MockSubMgr.return_value.get_running_tasks.return_value = []
-            loop = AgentLoop(bus=bus, provider=provider, workspace=workspace)
-        return loop
-
-    def test_extract_app_prefix(self):
-        from nanobot.agent.loop import AgentLoop
-        assert AgentLoop._extract_app_prefix("GMAIL_SEND_EMAIL") == "GMAIL"
-        assert AgentLoop._extract_app_prefix("WEATHERMAP_WEATHER") == "WEATHERMAP"
-        assert AgentLoop._extract_app_prefix("GOOGLECALENDAR_CREATE_EVENT") == "GOOGLECALENDAR"
-        assert AgentLoop._extract_app_prefix("browser_navigate") is None
-        assert AgentLoop._extract_app_prefix("work_order") is None
-
-    def test_meta_tool_detection(self):
-        from nanobot.agent.loop import AgentLoop
-        meta_names = AgentLoop._META_TOOL_PREFIXES
-        assert "COMPOSIO_SEARCH_TOOLS" in meta_names
-        assert "COMPOSIO_GET_TOOL_SCHEMAS" in meta_names
-        assert "GMAIL_SEND_EMAIL" not in meta_names
-
-    def test_weather_in_intent_map(self):
-        loop = self._make_loop()
-        queries = loop._extract_intent_queries("what's the weather in New York")
-        tool_names = [q for q in queries if q.startswith("WEATHERMAP")]
-        assert len(tool_names) > 0, "Weather intent should extract WEATHERMAP tool names"
-
-    def test_build_context_block(self):
-        loop = self._make_loop()
-        tools = [
-            {
-                "name": "GMAIL_SEND_EMAIL",
-                "description": "Sends an email via Gmail API",
-                "confidence": 0.81,
-                "how_to_call": {"server": "composio", "tool_name": "GMAIL_SEND_EMAIL"},
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "recipient_email": {"type": "string", "description": "Email address"},
-                        "subject": {"type": "string", "description": "Subject line"},
-                    },
-                    "required": ["recipient_email"],
-                },
-            }
-        ]
-        block = loop._build_context_block(tools)
-        assert "GMAIL_SEND_EMAIL" in block
-        assert "toolsdns" in block
-        assert "recipient_email" in block
-        assert "81%" in block
-
-    def test_detect_dominant_app(self):
-        from nanobot.agent.loop import AgentLoop
-        tools = [
-            {"name": "GMAIL_SEND_EMAIL"},
-            {"name": "GMAIL_FETCH_EMAILS"},
-            {"name": "COMPOSIO_SEARCH_TOOLS"},
-            {"name": "GMAIL_REPLY_TO_THREAD"},
-        ]
-        assert AgentLoop._detect_dominant_app(tools) == "GMAIL"
-
-    def test_detect_dominant_app_ignores_meta(self):
-        from nanobot.agent.loop import AgentLoop
-        tools = [
-            {"name": "COMPOSIO_SEARCH_TOOLS"},
-            {"name": "COMPOSIO_GET_TOOL_SCHEMAS"},
-        ]
-        assert AgentLoop._detect_dominant_app(tools) is None
-
-
 # ── Improvement #5: App name config ──
 
 class TestAppNameConfig:
@@ -413,14 +277,14 @@ class TestSubagentContext:
         user_md.write_text("# User\n- **Name:** TestUser\n- **Timezone:** ET\n" + "\n".join(f"Line {i}" for i in range(50)))
 
         tools_md = tmp_path / "TOOLS.md"
-        tools_md.write_text("# Tools\n- Use ToolsDNS first\n" + "\n".join(f"Rule {i}" for i in range(30)))
+        tools_md.write_text("# Tools\n- Use MCP tools first\n" + "\n".join(f"Rule {i}" for i in range(30)))
 
         ctx = ContextBuilder(tmp_path)
         result = ctx.build_subagent_context()
 
         assert "TestUser" in result
         assert "Timezone" in result
-        assert "ToolsDNS" in result
+        assert "MCP tools" in result
         assert "... (truncated)" in result  # Both files exceed limit
 
     def test_empty_workspace(self, tmp_path):

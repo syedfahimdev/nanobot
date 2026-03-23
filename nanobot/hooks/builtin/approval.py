@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     from nanobot.bus.queue import MessageBus
 
 # Tool patterns that require user confirmation before execution.
-# Matches against the actual tool name (for toolsdns: the tool_id).
 CONFIRM_PATTERNS = [
     "GMAIL_SEND_*",
     "GMAIL_CREATE_*",
@@ -41,8 +40,6 @@ _NO_RE = re.compile(r"^(no|nope|nah|don'?t|cancel|stop|deny|denied|abort)\b", re
 
 def _get_tool_name(event: ToolBefore) -> str:
     """Extract the actual tool name for pattern matching."""
-    if event.name == "toolsdns" and event.params.get("action") == "call":
-        return event.params.get("tool_id", "").replace("tooldns__", "")
     return event.name
 
 

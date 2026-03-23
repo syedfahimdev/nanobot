@@ -14,6 +14,17 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.loop_enhancements import (
+    IntentTracker,
+    MCPReconnector,
+    check_response_quality,
+    classify_tool_error,
+    compute_tool_result_budget,
+    load_intelligence_settings,
+    partition_tool_calls,
+    truncate_tool_result,
+    validate_tool_call,
+)
 
 _SENTENCE_RE = re.compile(r'(?<=[.!?])\s+|(?<=\n)')
 from nanobot.agent.memory import MemoryConsolidator
@@ -133,6 +144,12 @@ class AgentLoop:
             get_tool_definitions=self.tools.get_definitions,
         )
 
+        # Intent tracking — maintains active conversational intent per session
+        self._intent_trackers: dict[str, IntentTracker] = {}
+
+        # MCP reconnection — detects dead MCP servers and reconnects
+        self._mcp_reconnector = MCPReconnector()
+
         # Reflection engine — learns from user corrections
         from nanobot.hooks.builtin.reflection import ReflectionEngine
         self.reflection = ReflectionEngine(workspace, provider, self.model)
@@ -213,16 +230,27 @@ class AgentLoop:
             pass  # Playwright not installed — skip silently
 
     async def _connect_mcp(self) -> None:
-        """Connect to configured MCP servers (one-time, lazy)."""
-        if self._mcp_connected or self._mcp_connecting or not self._mcp_servers:
+        """Connect to configured MCP servers. Supports reconnection (#9)."""
+        if self._mcp_connecting or not self._mcp_servers:
+            return
+        if self._mcp_connected:
             return
         self._mcp_connecting = True
         from nanobot.agent.tools.mcp import connect_mcp_servers
         try:
+            # [#9] Close existing stack if reconnecting
+            if self._mcp_stack:
+                try:
+                    await self._mcp_stack.aclose()
+                except Exception:
+                    pass
+                self._mcp_stack = None
+
             self._mcp_stack = AsyncExitStack()
             await self._mcp_stack.__aenter__()
             await connect_mcp_servers(self._mcp_servers, self.tools, self._mcp_stack)
             self._mcp_connected = True
+            logger.info("MCP servers connected successfully")
         except BaseException as e:
             logger.error("Failed to connect MCP servers (will retry next message): {}", e)
             if self._mcp_stack:
@@ -271,6 +299,61 @@ class AgentLoop:
         re.IGNORECASE,
     )
 
+    def _get_intelligence_settings(self) -> dict[str, bool]:
+        """Load intelligence settings (cached, ~0ms after first read)."""
+        return load_intelligence_settings(self.workspace)
+
+    _TOOL_TIMEOUT = 45  # Max seconds for any single tool call
+
+    async def _execute_tool_with_enhancements(
+        self,
+        tc,
+        budget: int,
+        on_progress: Callable[..., Awaitable[None]] | None = None,
+    ) -> str:
+        """Execute a single tool call with validation, error classification, budget, and MCP reconnect."""
+        settings = self._get_intelligence_settings()
+
+        # [#4] Pre-validation (always on — safety feature)
+        validation_err = validate_tool_call(tc.name, tc.arguments, self.tools.tool_names)
+        if validation_err:
+            return validation_err
+
+        # Execute with timeout to prevent hanging
+        try:
+            result = await asyncio.wait_for(
+                self.tools.execute(tc.name, tc.arguments),
+                timeout=self._TOOL_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Tool {} timed out after {}s", tc.name, self._TOOL_TIMEOUT)
+            result = f"Error: Tool '{tc.name}' timed out after {self._TOOL_TIMEOUT}s. Try a simpler approach or break the task into smaller steps."
+
+        # [#1] Classify errors with structured recovery hints
+        if settings.get("smartErrorRecovery", True):
+            result = classify_tool_error(tc.name, result)
+
+        # [#3] Dynamic context budgeting — truncate oversized results
+        if settings.get("dynamicContextBudget", True):
+            result = truncate_tool_result(result, budget)
+        else:
+            # Fallback to fixed cap
+            if isinstance(result, str) and len(result) > self._TOOL_RESULT_MAX_CHARS:
+                result = result[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
+
+        # [#9] MCP reconnection tracking
+        if settings.get("mcpAutoReconnect", True):
+            is_err = isinstance(result, str) and result.startswith("Error")
+            if is_err:
+                if self._mcp_reconnector.record_failure(tc.name, result):
+                    logger.warning("MCP reconnection triggered after repeated failures")
+                    self._mcp_connected = False
+                    self._schedule_background(self._connect_mcp())
+            else:
+                self._mcp_reconnector.record_success(tc.name)
+
+        return result
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
@@ -284,6 +367,12 @@ class AgentLoop:
         total_usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         _last_call_sig: str | None = None  # detect repeated identical tool calls
         _repeat_count = 0
+        _user_message = ""  # Track original user message for quality gate
+        # Extract original user message (last user message in initial_messages)
+        for m in reversed(initial_messages):
+            if m.get("role") == "user":
+                _user_message = m.get("content", "") if isinstance(m.get("content"), str) else ""
+                break
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -322,25 +411,48 @@ class AgentLoop:
                     thinking_blocks=response.thinking_blocks,
                 )
 
-                # Execute tool calls — parallel when multiple, sequential when single
+                # [#3] Compute dynamic budget based on remaining context window
+                prompt_tokens = total_usage.get("prompt_tokens", 0)
+                budget = compute_tool_result_budget(
+                    self.context_window_tokens, prompt_tokens, len(response.tool_calls),
+                )
+
+                # Execute tool calls — with parallel safety partitioning
                 if len(response.tool_calls) > 1:
-                    # Parallel execution for multiple independent tool calls
-                    logger.info("Parallel execution: {} tool calls", len(response.tool_calls))
+                    # [#5] Partition into parallel-safe and must-serialize groups
+                    parallel_batch, serial_batch = partition_tool_calls(response.tool_calls)
+                    logger.info("Parallel execution: {} parallel + {} serial tool calls",
+                                len(parallel_batch), len(serial_batch))
 
-                    async def _run_tool(tc):
-                        args_str = json.dumps(tc.arguments, ensure_ascii=False, sort_keys=True)
-                        logger.info("Tool call (parallel): {}({})", tc.name, args_str[:200])
-                        return await self.tools.execute(tc.name, tc.arguments)
+                    # Run parallel-safe tools concurrently
+                    if parallel_batch:
+                        async def _run_tool(tc):
+                            args_str = json.dumps(tc.arguments, ensure_ascii=False, sort_keys=True)
+                            logger.info("Tool call (parallel): {}({})", tc.name, args_str[:200])
+                            return await self._execute_tool_with_enhancements(tc, budget, on_progress)
 
-                    results = await asyncio.gather(
-                        *[_run_tool(tc) for tc in response.tool_calls],
-                        return_exceptions=True,
-                    )
-                    for tc, result in zip(response.tool_calls, results):
+                        results = await asyncio.gather(
+                            *[_run_tool(tc) for tc in parallel_batch],
+                            return_exceptions=True,
+                        )
+                        for tc, result in zip(parallel_batch, results):
+                            tools_used.append(tc.name)
+                            if isinstance(result, Exception):
+                                logger.error("Parallel tool call failed: {}: {}", tc.name, result)
+                                result = f"(Tool call failed: {type(result).__name__}: {result})"
+                            if on_progress:
+                                preview = str(result)[:300]
+                                await on_progress(f"[{tc.name}] → {preview}", tool_hint=True)
+                            messages = self.context.add_tool_result(
+                                messages, tc.id, tc.name, result
+                            )
+
+                    # Run serialized tools sequentially
+                    for tc in serial_batch:
                         tools_used.append(tc.name)
-                        if isinstance(result, Exception):
-                            logger.error("Parallel tool call failed: {}: {}", tc.name, result)
-                            result = f"(Tool call failed: {type(result).__name__}: {result})"
+                        args_str = json.dumps(tc.arguments, ensure_ascii=False, sort_keys=True)
+                        logger.info("Tool call (serial): {}({})", tc.name, args_str[:200])
+                        result = await self._execute_tool_with_enhancements(tc, budget, on_progress)
                         if on_progress:
                             preview = str(result)[:300]
                             await on_progress(f"[{tc.name}] → {preview}", tool_hint=True)
@@ -374,7 +486,7 @@ class AgentLoop:
                         _last_call_sig = call_sig
                         _repeat_count = 0
 
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    result = await self._execute_tool_with_enhancements(tool_call, budget, on_progress)
                     if on_progress:
                         preview = str(result)[:300]
                         await on_progress(f"[{tool_call.name}] → {preview}", tool_hint=True)
@@ -389,6 +501,25 @@ class AgentLoop:
                     logger.error("LLM returned error: {}", (clean or "")[:200])
                     final_content = clean or "Sorry, I encountered an error calling the AI model."
                     break
+
+                # [#6] Response quality gate — check if response addresses the question
+                _qg_settings = self._get_intelligence_settings()
+                is_ok, issue = True, ""
+                if _qg_settings.get("responseQualityGate", True):
+                    is_ok, issue = check_response_quality(_user_message, clean, tools_used)
+                if not is_ok and iteration < 3:
+                    # Retry once with a nudge to actually attempt the task
+                    logger.warning("Quality gate failed (iter {}): {}", iteration, issue)
+                    messages = self.context.add_assistant_message(messages, clean)
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"[System: Your response was inadequate — {issue} "
+                            "Please try again using available tools to actually complete the task.]"
+                        ),
+                    })
+                    continue
+
                 messages = self.context.add_assistant_message(
                     messages, clean, reasoning_content=response.reasoning_content,
                     thinking_blocks=response.thinking_blocks,
@@ -424,6 +555,7 @@ class AgentLoop:
         total_usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         _last_call_sig: str | None = None
         _repeat_count = 0
+        _stream_retries = 0  # [#7] Track stream failures to avoid infinite fallback
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -439,11 +571,24 @@ class AgentLoop:
             reasoning_content = None
 
             try:
+                _STREAM_CHUNK_TIMEOUT = 60  # Max seconds to wait for a chunk
+                _STREAM_TOTAL_TIMEOUT = 180  # Max total seconds for entire stream
+                _stream_start = asyncio.get_event_loop().time()
+
                 async for chunk in self.provider.stream_chat(
                     messages=messages,
                     tools=tool_defs,
                     model=current_model,
                 ):
+                    # Check total stream timeout
+                    elapsed = asyncio.get_event_loop().time() - _stream_start
+                    if elapsed > _STREAM_TOTAL_TIMEOUT:
+                        logger.warning("Stream total timeout ({}s) — breaking", _STREAM_TOTAL_TIMEOUT)
+                        if accumulated_content:
+                            # We got partial content — use it
+                            break
+                        raise TimeoutError(f"Stream exceeded {_STREAM_TOTAL_TIMEOUT}s total timeout")
+
                     if chunk.delta_content:
                         accumulated_content += chunk.delta_content
                         sentence_buffer += chunk.delta_content
@@ -465,10 +610,30 @@ class AgentLoop:
                         usage = chunk.usage
                         reasoning_content = chunk.reasoning_content
 
+            except (TimeoutError, asyncio.TimeoutError) as e:
+                logger.error("Stream timeout (iter {}): {}", iteration, e)
+                # If we got partial content, use it as the final response
+                if accumulated_content and len(accumulated_content) > 20:
+                    logger.info("Using partial streamed content ({} chars) as response", len(accumulated_content))
+                    clean = self._strip_think(accumulated_content)
+                    messages = self.context.add_assistant_message(messages, clean)
+                    final_content = clean
+                    break
+                _stream_retries += 1
+                if _stream_retries >= 2:
+                    return await self._run_agent_loop(messages, on_progress)
+                continue
+
             except Exception as e:
-                logger.error("Streaming error: {}", e)
-                # Fall back to non-streaming
-                return await self._run_agent_loop(initial_messages, on_progress)
+                logger.error("Streaming error (iter {}): {}", iteration, e)
+                _stream_retries += 1
+                # [#7] Only fall back to non-streaming after 2 stream failures,
+                # and use current messages (not initial) to preserve progress
+                if _stream_retries >= 2:
+                    logger.warning("Streaming failed {}x, falling back to non-streaming (preserving progress)", _stream_retries)
+                    return await self._run_agent_loop(messages, on_progress)
+                # First failure: retry streaming on next iteration
+                continue
 
             # Accumulate token usage across iterations
             for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
@@ -483,7 +648,14 @@ class AgentLoop:
                 final_content = accumulated_content or "Sorry, I encountered an error calling the AI model."
                 break
 
+            # [#3] Compute dynamic budget for tool results
+            prompt_tokens = total_usage.get("prompt_tokens", 0)
+
             if all_tool_calls:
+                budget = compute_tool_result_budget(
+                    self.context_window_tokens, prompt_tokens, len(all_tool_calls),
+                )
+
                 # Tool calls detected — process them
                 if on_progress:
                     thought = self._strip_think(accumulated_content)
@@ -499,21 +671,33 @@ class AgentLoop:
                     reasoning_content=reasoning_content,
                 )
 
-                # Execute tools (same logic as non-streaming)
+                # Execute tools with enhancements
                 if len(all_tool_calls) > 1:
-                    async def _run_tool(tc):
-                        args_str = json.dumps(tc.arguments, ensure_ascii=False, sort_keys=True)
-                        logger.info("Tool call (parallel): {}({})", tc.name, args_str[:200])
-                        return await self.tools.execute(tc.name, tc.arguments)
+                    # [#5] Partition into parallel-safe and serial groups
+                    parallel_batch, serial_batch = partition_tool_calls(all_tool_calls)
 
-                    results = await asyncio.gather(
-                        *[_run_tool(tc) for tc in all_tool_calls],
-                        return_exceptions=True,
-                    )
-                    for tc, result in zip(all_tool_calls, results):
+                    if parallel_batch:
+                        async def _run_tool(tc):
+                            args_str = json.dumps(tc.arguments, ensure_ascii=False, sort_keys=True)
+                            logger.info("Tool call (parallel): {}({})", tc.name, args_str[:200])
+                            return await self._execute_tool_with_enhancements(tc, budget, on_progress)
+
+                        results = await asyncio.gather(
+                            *[_run_tool(tc) for tc in parallel_batch],
+                            return_exceptions=True,
+                        )
+                        for tc, result in zip(parallel_batch, results):
+                            tools_used.append(tc.name)
+                            if isinstance(result, Exception):
+                                result = f"(Tool call failed: {type(result).__name__}: {result})"
+                            if on_progress:
+                                preview = str(result)[:300]
+                                await on_progress(f"[{tc.name}] → {preview}", tool_hint=True)
+                            messages = self.context.add_tool_result(messages, tc.id, tc.name, result)
+
+                    for tc in serial_batch:
                         tools_used.append(tc.name)
-                        if isinstance(result, Exception):
-                            result = f"(Tool call failed: {type(result).__name__}: {result})"
+                        result = await self._execute_tool_with_enhancements(tc, budget, on_progress)
                         if on_progress:
                             preview = str(result)[:300]
                             await on_progress(f"[{tc.name}] → {preview}", tool_hint=True)
@@ -539,7 +723,7 @@ class AgentLoop:
                         _last_call_sig = call_sig
                         _repeat_count = 0
 
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    result = await self._execute_tool_with_enhancements(tool_call, budget, on_progress)
                     if on_progress:
                         preview = str(result)[:300]
                         await on_progress(f"[{tool_call.name}] → {preview}", tool_hint=True)
@@ -842,22 +1026,40 @@ class AgentLoop:
                     content="Sorry, I encountered an error.",
                 ))
             finally:
-                # Process queued messages
+                # [#8] Process queued messages — acknowledge and re-dispatch
                 pending = self._pending_messages.pop(msg.session_key, [])
                 if pending:
                     key = msg.session_key
                     session = self.sessions.get_or_create(key)
-                    # Separate: conversational → add to history, tasks → re-dispatch
+                    task_msgs = []
+                    conversational_msgs = []
                     for pending_msg in pending:
                         if self._needs_main_agent(pending_msg.content):
-                            # Re-dispatch skill/interactive requests to main agent
-                            logger.info("Re-dispatching queued skill request: '{}'",
-                                        pending_msg.content[:60])
-                            asyncio.create_task(self._dispatch(pending_msg))
+                            task_msgs.append(pending_msg)
+                        elif self._is_context_dependent(pending_msg.content.strip()):
+                            # Context-dependent messages should be re-dispatched, not just logged
+                            task_msgs.append(pending_msg)
                         else:
-                            session.add_message("user", pending_msg.content)
-                            logger.info("Appended queued conversational msg to session: '{}'",
-                                        pending_msg.content[:40])
+                            conversational_msgs.append(pending_msg)
+
+                    # Conversational messages: add to history + send acknowledgment
+                    for pending_msg in conversational_msgs:
+                        session.add_message("user", pending_msg.content)
+                        logger.info("Appended queued conversational msg to session: '{}'",
+                                    pending_msg.content[:40])
+                    if conversational_msgs:
+                        # [#8] Send a brief acknowledgment so the user knows we heard them
+                        ack_texts = [m.content.strip()[:30] for m in conversational_msgs[:3]]
+                        logger.info("Acknowledging {} queued msgs for {}", len(conversational_msgs), key)
+                        # Add a note to session so the LLM knows about queued messages
+                        session.add_message("user", f"[While you were working, the user also said: {'; '.join(ack_texts)}]")
+
+                    # Task/context-dependent messages: re-dispatch to main agent
+                    for pending_msg in task_msgs:
+                        logger.info("Re-dispatching queued request: '{}'",
+                                    pending_msg.content[:60])
+                        asyncio.create_task(self._dispatch(pending_msg))
+
                     self.sessions.save(session)
 
     async def close_mcp(self) -> None:
@@ -1017,9 +1219,13 @@ class AgentLoop:
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
 
+        # [#2] Get or create intent tracker for this session
+        intent_tracker = self._intent_trackers.setdefault(key, IntentTracker())
+
         # Slash commands
         cmd = msg.content.strip().lower()
         if cmd == "/new":
+            intent_tracker.clear()  # Reset intent on new session
             snapshot = session.messages[session.last_consolidated:]
             session.clear()
             self.sessions.save(session)
@@ -1030,12 +1236,38 @@ class AgentLoop:
 
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started.")
+        if cmd == "/learnings" or cmd == "/learned":
+            # Show what Mawa has learned from user feedback
+            learnings_file = self.workspace / "memory" / "LEARNINGS.md"
+            tool_file = self.workspace / "memory" / "TOOL_LEARNINGS.md"
+            lines = ["**What I've learned from you:**\n"]
+            if learnings_file.exists():
+                rules = [l for l in learnings_file.read_text().split("\n") if l.strip().startswith("- ")]
+                if rules:
+                    for r in rules:
+                        lines.append(r)
+                else:
+                    lines.append("No user learnings yet. Give me feedback and I'll remember!")
+            else:
+                lines.append("No user learnings yet. Give me feedback and I'll remember!")
+
+            if tool_file.exists():
+                tool_rules = [l for l in tool_file.read_text().split("\n") if l.strip().startswith("- ")]
+                if tool_rules:
+                    lines.append(f"\n**Tool reliability notes:** ({len(tool_rules)} entries)")
+                    for r in tool_rules[-5:]:
+                        lines.append(r)
+
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines),
+            )
         if cmd == "/help":
             lines = [
                 "🐈 nanobot commands:",
                 "/new — Start a new conversation",
                 "/stop — Stop the current task",
                 "/restart — Restart the bot",
+                "/learnings — See what I've learned from you",
                 "/profile [name|list] — Switch provider profile",
                 "/doctor — Run health checks",
                 "/help — Show available commands",
@@ -1078,6 +1310,13 @@ class AgentLoop:
         enriched_content, detected_secrets = detect_and_mask_secrets(enriched_content)
         if detected_secrets:
             self._schedule_background(save_detected_secrets(detected_secrets))
+
+        # [#2] Inject active intent context so the LLM maintains conversation coherence
+        _intelligence = self._get_intelligence_settings()
+        if _intelligence.get("intentTracking", True):
+            intent_block = intent_tracker.get_intent_block()
+            if intent_block:
+                enriched_content = f"{enriched_content}\n\n{intent_block}"
 
         # Inject running subagent context so the main agent can route updates
         running = self.subagents.get_running_tasks()
@@ -1154,6 +1393,9 @@ class AgentLoop:
             tools_used=[], iterations=0, duration_ms=_turn_elapsed,
             channel=msg.channel, chat_id=msg.chat_id,
         ))
+
+        # [#2] Update intent tracker with this turn's content
+        intent_tracker.update(msg.content, final_content)
 
         # Reflection: record this turn for future correction detection
         self.reflection.on_turn_completed(key, msg.content, final_content or "")

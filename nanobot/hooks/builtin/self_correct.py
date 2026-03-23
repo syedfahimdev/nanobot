@@ -85,8 +85,6 @@ class SelfCorrector:
         """Format a correction entry for CORRECTIONS.md."""
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         tool_name = event.name
-        if event.name == "toolsdns" and event.params.get("action") == "call":
-            tool_name = event.params.get("tool_id", "toolsdns").replace("tooldns__", "")
 
         cats = ", ".join(categories)
         result_preview = (event.result or "")[:150].replace("\n", " ").strip()
@@ -135,8 +133,6 @@ class SelfCorrector:
             return
 
         tool_name = event.name
-        if event.name == "toolsdns" and event.params.get("action") == "call":
-            tool_name = event.params.get("tool_id", "toolsdns").replace("tooldns__", "")
 
         # Track error history
         self._error_history[tool_name].append({
@@ -155,7 +151,7 @@ class SelfCorrector:
         hint = self._check_repeated_errors(tool_name, categories)
         if hint:
             # Write hint to LEARNINGS.md so it gets injected into context
-            learnings_file = self._workspace / "memory" / "LEARNINGS.md"
+            learnings_file = self._workspace / "memory" / "TOOL_LEARNINGS.md"
             learnings_file.parent.mkdir(parents=True, exist_ok=True)
 
             existing = ""

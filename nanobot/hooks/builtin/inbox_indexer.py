@@ -1,8 +1,7 @@
-"""Inbox indexer hook — auto-indexes uploaded files for RAG search.
+"""Inbox indexer hook — auto-indexes uploaded files for local search.
 
-When files are added to the inbox folders, this hook extracts text,
-optionally generates an LLM summary, and pushes chunks to ToolsDNS
-for semantic search.
+When files are added to the inbox folders, this hook extracts text
+and optionally generates an LLM summary stored alongside the file.
 
 Runs on turn_completed to batch-process any new files.
 """
@@ -57,15 +56,12 @@ _SUMMARIZE_EXTENSIONS = frozenset({".pdf", ".docx", ".xlsx", ".xls"})
 class InboxIndexer:
     """Watches inbox folders and indexes new/changed files."""
 
-    def __init__(self, workspace: Path, provider: LLMProvider, model: str,
-                 toolsdns_url: str = "", toolsdns_api_key: str = ""):
+    def __init__(self, workspace: Path, provider: LLMProvider, model: str):
         self._workspace = workspace
         self._provider = provider
         self._model = model
         self._inbox_dir = workspace / "inbox"
         self._state_file = self._inbox_dir / _STATE_FILE_NAME
-        self._toolsdns_url = toolsdns_url
-        self._toolsdns_api_key = toolsdns_api_key
         self._state = self._load_state()
 
     def _load_state(self) -> dict[str, str]:
@@ -160,23 +156,6 @@ class InboxIndexer:
 
         return chunks
 
-    async def _push_to_toolsdns(self, chunks: list[dict[str, Any]]) -> bool:
-        """Push chunks to ToolsDNS for semantic indexing."""
-        if not self._toolsdns_url or not chunks:
-            return False
-        try:
-            import httpx
-            resp = httpx.post(
-                f"{self._toolsdns_url}/v1/memory/ingest",
-                json={"chunks": chunks},
-                headers={"Authorization": f"Bearer {self._toolsdns_api_key}"},
-                timeout=30,
-            )
-            return resp.status_code == 200
-        except Exception:
-            logger.opt(exception=True).debug("Inbox ToolsDNS push failed")
-            return False
-
     async def index_new_files(self) -> int:
         """Scan for new files, extract, optionally summarize, and index."""
         new_files = self._scan_new_files()
@@ -208,10 +187,6 @@ class InboxIndexer:
             all_chunks.extend(chunks)
             logger.info("Inbox indexed: {} ({} chunks)", key, len(chunks))
 
-        # Push to ToolsDNS
-        if all_chunks:
-            await self._push_to_toolsdns(all_chunks)
-
         self._save_state()
         return len(new_files)
 
@@ -220,11 +195,9 @@ def make_inbox_indexer_hook(
     workspace: Path,
     provider: "LLMProvider",
     model: str,
-    toolsdns_url: str = "",
-    toolsdns_api_key: str = "",
 ):
     """Create an inbox indexer hook that runs on turn_completed."""
-    indexer = InboxIndexer(workspace, provider, model, toolsdns_url, toolsdns_api_key)
+    indexer = InboxIndexer(workspace, provider, model)
     _call_count = [0]
 
     async def on_turn_completed(event: TurnCompleted) -> None:

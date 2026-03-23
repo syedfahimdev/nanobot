@@ -144,8 +144,46 @@ class HeartbeatService:
             except Exception as e:
                 logger.error("Heartbeat error: {}", e)
 
+    async def _consolidate_stale_sessions(self) -> None:
+        """Consolidate any sessions with 6+ unconsolidated messages.
+
+        Runs every heartbeat tick so conversations are never lost,
+        even if the user closes the browser without /new.
+        """
+        try:
+            from nanobot.session.manager import SessionManager
+            from nanobot.agent.memory import MemoryStore
+
+            sessions_mgr = SessionManager(self.workspace)
+            sessions_dir = self.workspace / "sessions"
+            if not sessions_dir.exists():
+                return
+
+            store = MemoryStore(self.workspace)
+            model = self._model() if callable(self._model) else self._model
+
+            for path in sessions_dir.glob("*.jsonl"):
+                key = path.stem.replace("_", ":", 1)  # web_voice_voice → web_voice:voice
+                session = sessions_mgr.get_or_create(key)
+                unconsolidated = session.messages[session.last_consolidated:]
+
+                if len(unconsolidated) < 6:
+                    continue
+
+                logger.info("Heartbeat: consolidating {} stale messages for {}", len(unconsolidated), key)
+                result = await store.consolidate(unconsolidated, self.provider, model)
+                if result:
+                    session.last_consolidated = len(session.messages)
+                    sessions_mgr.save(session)
+                    logger.info("Heartbeat: consolidated session {}", key)
+        except Exception as e:
+            logger.debug("Heartbeat consolidation error: {}", e)
+
     async def _tick(self) -> None:
         """Execute a single heartbeat tick."""
+        # Consolidate stale sessions first (no LLM cost if nothing to do)
+        await self._consolidate_stale_sessions()
+
         from nanobot.utils.evaluator import evaluate_response
 
         content = self._read_heartbeat_file()

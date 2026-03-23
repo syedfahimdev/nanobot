@@ -74,11 +74,23 @@ class MCPToolWrapper(Tool):
 async def connect_mcp_servers(
     mcp_servers: dict, registry: ToolRegistry, stack: AsyncExitStack
 ) -> None:
-    """Connect to configured MCP servers and register their tools."""
+    """Connect to configured MCP servers and register their tools.
+
+    Tools with enabledTools=["*"] (default) are indexed in the ToolCatalog
+    for lazy discovery via the search_tools built-in. Only tools explicitly
+    listed in enabledTools are registered immediately.
+
+    A search_tools tool is automatically registered if any server uses
+    catalog-based discovery.
+    """
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.sse import sse_client
     from mcp.client.stdio import stdio_client
     from mcp.client.streamable_http import streamable_http_client
+    from nanobot.agent.tools.tool_catalog import SearchToolsTool, ToolCatalog
+
+    catalog = ToolCatalog()
+    sessions: dict[str, ClientSession] = {}  # server_name -> session
 
     for name, cfg in mcp_servers.items():
         try:
@@ -87,7 +99,6 @@ async def connect_mcp_servers(
                 if cfg.command:
                     transport_type = "stdio"
                 elif cfg.url:
-                    # Convention: URLs ending with /sse use SSE transport; others use streamableHttp
                     transport_type = (
                         "sse" if cfg.url.rstrip("/").endswith("/sse") else "streamableHttp"
                     )
@@ -118,8 +129,6 @@ async def connect_mcp_servers(
                     sse_client(cfg.url, httpx_client_factory=httpx_client_factory)
                 )
             elif transport_type == "streamableHttp":
-                # Always provide an explicit httpx client so MCP HTTP transport does not
-                # inherit httpx's default 5s timeout and preempt the higher-level tool timeout.
                 http_client = await stack.enter_async_context(
                     httpx.AsyncClient(
                         headers=cfg.headers or None,
@@ -140,45 +149,28 @@ async def connect_mcp_servers(
             tools = await session.list_tools()
             enabled_tools = set(cfg.enabled_tools)
             allow_all_tools = "*" in enabled_tools
-            registered_count = 0
-            matched_enabled_tools: set[str] = set()
-            available_raw_names = [tool_def.name for tool_def in tools.tools]
-            available_wrapped_names = [f"mcp_{name}_{tool_def.name}" for tool_def in tools.tools]
-            for tool_def in tools.tools:
-                wrapped_name = f"mcp_{name}_{tool_def.name}"
-                if (
-                    not allow_all_tools
-                    and tool_def.name not in enabled_tools
-                    and wrapped_name not in enabled_tools
-                ):
-                    logger.debug(
-                        "MCP: skipping tool '{}' from server '{}' (not in enabledTools)",
-                        wrapped_name,
-                        name,
-                    )
-                    continue
-                wrapper = MCPToolWrapper(session, name, tool_def, tool_timeout=cfg.tool_timeout)
-                registry.register(wrapper)
-                logger.debug("MCP: registered tool '{}' from server '{}'", wrapper.name, name)
-                registered_count += 1
-                if enabled_tools:
-                    if tool_def.name in enabled_tools:
-                        matched_enabled_tools.add(tool_def.name)
-                    if wrapped_name in enabled_tools:
-                        matched_enabled_tools.add(wrapped_name)
 
-            if enabled_tools and not allow_all_tools:
-                unmatched_enabled_tools = sorted(enabled_tools - matched_enabled_tools)
-                if unmatched_enabled_tools:
-                    logger.warning(
-                        "MCP server '{}': enabledTools entries not found: {}. Available raw names: {}. "
-                        "Available wrapped names: {}",
-                        name,
-                        ", ".join(unmatched_enabled_tools),
-                        ", ".join(available_raw_names) or "(none)",
-                        ", ".join(available_wrapped_names) or "(none)",
-                    )
-
-            logger.info("MCP server '{}': connected, {} tools registered", name, registered_count)
+            if allow_all_tools:
+                # Catalog mode: index all tools for lazy discovery, register none now
+                catalog.add_server(name, tools.tools)
+                sessions[name] = session
+                logger.info("MCP server '{}': connected, {} tools cataloged for lazy discovery",
+                            name, len(tools.tools))
+            else:
+                # Explicit mode: register only listed tools immediately
+                registered_count = 0
+                for tool_def in tools.tools:
+                    wrapped_name = f"mcp_{name}_{tool_def.name}"
+                    if tool_def.name in enabled_tools or wrapped_name in enabled_tools:
+                        wrapper = MCPToolWrapper(session, name, tool_def, tool_timeout=cfg.tool_timeout)
+                        registry.register(wrapper)
+                        registered_count += 1
+                logger.info("MCP server '{}': connected, {} tools registered", name, registered_count)
         except Exception as e:
             logger.error("MCP server '{}': failed to connect: {}", name, e)
+
+    # Register search_tools if any server uses catalog-based discovery
+    if catalog.total_tools() > 0:
+        registry.register(SearchToolsTool(catalog, registry, sessions))
+        logger.info("ToolCatalog: {} total tools searchable via search_tools",
+                     catalog.total_tools())

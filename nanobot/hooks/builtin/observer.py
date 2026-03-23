@@ -39,9 +39,7 @@ def _get_time_bucket(hour: int) -> str:
 
 
 def _normalize_tool_name(event: ToolAfter) -> str:
-    """Get a human-readable tool name (expand toolsdns calls)."""
-    if event.name == "toolsdns" and event.params.get("action") == "call":
-        return event.params.get("tool_id", "toolsdns").replace("tooldns__", "")
+    """Get a human-readable tool name."""
     return event.name
 
 

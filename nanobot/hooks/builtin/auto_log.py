@@ -20,11 +20,7 @@ def make_auto_log_hook(workspace: Path):
     async def auto_log(event: ToolAfter) -> None:
         if event.name in _SKIP:
             return
-        # For toolsdns calls, log the actual tool being called
         tool_label = event.name
-        if event.name == "toolsdns" and event.params.get("action") == "call":
-            tool_id = event.params.get("tool_id", "")
-            tool_label = tool_id.replace("tooldns__", "")
 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         status = "ERR" if event.error else "OK"

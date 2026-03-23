@@ -135,10 +135,7 @@ def make_workflow_recorder_tool_hook(workspace: Path):
     recorder = get_recorder(workspace)
 
     async def on_tool_after(event) -> None:
-        tool_name = event.name
-        if event.name == "toolsdns" and event.params.get("action") == "call":
-            tool_name = event.params.get("tool_id", "toolsdns").replace("tooldns__", "")
-        recorder.record_tool(tool_name)
+        recorder.record_tool(event.name)
 
     return on_tool_after
 

@@ -1,21 +1,26 @@
-"""Memory search tool — semantic search with folder/type filtering."""
+"""Local grep-based memory search tool.
+
+Searches memory files (LONG_TERM.md, SHORT_TERM.md, EPISODES.md,
+OBSERVATIONS.md, HISTORY.md) and inbox files using keyword matching.
+No external dependencies — works entirely on local filesystem.
+"""
 
 from __future__ import annotations
 
-import json
+import re
+from pathlib import Path
 from typing import Any
-
-import httpx
 
 from nanobot.agent.tools.base import Tool
 
 
 class MemorySearchTool(Tool):
-    """Search your knowledge base, learnings, rules, inbox, and history."""
+    """Search memory and inbox files locally with keyword matching."""
 
-    def __init__(self, base_url: str, api_key: str) -> None:
-        self._url = base_url.rstrip("/")
-        self._api_key = api_key
+    def __init__(self, workspace: Path):
+        self._workspace = workspace
+        self._memory_dir = workspace / "memory"
+        self._inbox_dir = workspace / "inbox"
 
     @property
     def name(self) -> str:
@@ -24,9 +29,10 @@ class MemorySearchTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Search your knowledge base, learnings, rules, inbox files, and conversation history. "
-            "Use this to recall past decisions, people, preferences, events, or uploaded documents. "
-            "Filter by folder (work, personal) or source type."
+            "Search memory files and inbox documents for information. "
+            "Uses keyword matching across LONG_TERM.md, SHORT_TERM.md, "
+            "EPISODES.md, OBSERVATIONS.md, HISTORY.md, and uploaded inbox files. "
+            "Returns matching snippets with surrounding context."
         )
 
     @property
@@ -36,87 +42,99 @@ class MemorySearchTool(Tool):
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "What to search for in memory.",
-                },
-                "top_k": {
-                    "type": "integer",
-                    "description": "Max results (default 5, max 20).",
+                    "description": "Search query — keywords to find in memory files.",
                 },
                 "folder": {
                     "type": "string",
-                    "enum": ["all", "memory", "inbox", "inbox_work", "inbox_personal", "inbox_general"],
-                    "description": "Filter by source: 'memory' (facts, history), 'inbox_work' (work docs), 'inbox_personal', or 'all' (default).",
+                    "description": "Restrict search to a specific source: 'memory', 'inbox', or 'all'.",
+                    "enum": ["memory", "inbox", "all"],
+                    "default": "all",
                 },
-                "min_confidence": {
-                    "type": "number",
-                    "description": "Minimum confidence threshold 0.0-1.0 (default 0.15). Higher = fewer but more relevant results.",
+                "top_k": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return.",
+                    "default": 10,
                 },
             },
             "required": ["query"],
         }
 
-    async def execute(
-        self,
-        query: str,
-        top_k: int = 5,
-        folder: str = "all",
-        min_confidence: float = 0.15,
-        **kwargs: Any,
-    ) -> str:
-        top_k = min(max(top_k, 1), 20)
-        min_confidence = max(0.0, min(min_confidence, 1.0))
+    async def execute(self, **kwargs: Any) -> str:
+        query = kwargs.get("query", "").strip()
+        if not query:
+            return "Error: query is required."
 
-        # Build id_prefix filter based on folder
-        id_prefix = ""
-        if folder == "memory":
-            id_prefix = "memory__"
-        elif folder.startswith("inbox"):
-            parts = folder.split("_", 1)
-            if len(parts) > 1 and parts[1] in ("work", "personal", "general"):
-                id_prefix = f"inbox__{parts[1]}__"
-            else:
-                id_prefix = "inbox__"
-        # "all" = no prefix filter
+        folder = kwargs.get("folder", "all")
+        top_k = min(kwargs.get("top_k", 10), 20)
 
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                body: dict[str, Any] = {
-                    "query": query,
-                    "top_k": top_k,
-                    "threshold": min_confidence,
-                }
-                if id_prefix:
-                    body["id_prefix"] = id_prefix
+        results: list[dict[str, str]] = []
 
-                resp = await client.post(
-                    f"{self._url}/v1/search",
-                    headers={
-                        "Authorization": f"Bearer {self._api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=body,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-        except Exception as e:
-            return f"Error searching memory: {e}"
+        # Build search pattern — match any word in the query
+        words = [w for w in query.split() if len(w) >= 2]
+        if not words:
+            return "Error: query too short."
+        pattern = re.compile("|".join(re.escape(w) for w in words), re.IGNORECASE)
 
-        results = data.get("results", [])
+        # Search memory files
+        if folder in ("memory", "all") and self._memory_dir.exists():
+            for md_file in sorted(self._memory_dir.glob("*.md")):
+                if len(results) >= top_k:
+                    break
+                self._search_file(md_file, pattern, results, top_k)
+
+        # Search inbox files
+        if folder in ("inbox", "all") and self._inbox_dir.exists():
+            for subfolder in ("work", "personal", "general"):
+                inbox_sub = self._inbox_dir / subfolder
+                if not inbox_sub.exists():
+                    continue
+                for f in sorted(inbox_sub.iterdir()):
+                    if len(results) >= top_k:
+                        break
+                    if f.is_file() and f.suffix in (".md", ".txt", ".csv"):
+                        self._search_file(f, pattern, results, top_k)
+
         if not results:
-            return f"No relevant memories found for '{query}'" + (f" in {folder}" if folder != "all" else "") + "."
+            return f"No results found for '{query}'."
 
-        lines = [f"Found {len(results)} result(s):\n"]
-        for r in results:
-            title = r.get("name", r.get("title", ""))
-            desc = r.get("description", r.get("content", ""))
-            source = r.get("source_info", {})
-            file_path = source.get("file_path", "")
-            confidence = r.get("confidence", r.get("score", 0))
-
-            lines.append(f"## {title} [{confidence:.0%}]")
-            if file_path:
-                lines.append(f"Source: {file_path}")
-            lines.append(desc[:1000])
+        # Format output
+        lines = [f"Found {len(results)} result(s) for '{query}':\n"]
+        for i, r in enumerate(results, 1):
+            lines.append(f"--- Result {i} ({r['source']}) ---")
+            lines.append(r["snippet"])
             lines.append("")
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _search_file(
+        path: Path,
+        pattern: re.Pattern,
+        results: list[dict[str, str]],
+        top_k: int,
+    ) -> None:
+        """Search a single file and append matching snippets."""
+        try:
+            content = path.read_text(encoding="utf-8")
+        except Exception:
+            return
+
+        lines = content.split("\n")
+        matched_ranges: set[int] = set()
+
+        for i, line in enumerate(lines):
+            if pattern.search(line) and i not in matched_ranges:
+                # Context: 2 lines before, 2 lines after
+                start = max(0, i - 2)
+                end = min(len(lines), i + 3)
+                snippet = "\n".join(lines[start:end]).strip()
+                if snippet and len(snippet) > 5:
+                    results.append({
+                        "source": path.name,
+                        "snippet": snippet[:500],
+                    })
+                    # Mark lines as matched to avoid duplicate snippets
+                    for j in range(start, end):
+                        matched_ranges.add(j)
+                    if len(results) >= top_k:
+                        return

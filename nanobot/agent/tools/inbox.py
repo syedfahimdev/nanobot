@@ -1,8 +1,8 @@
 """RAG Inbox — file-based knowledge folders for contextual assistance.
 
 Users upload files into categorized folders (work/, personal/, general/).
-Files are auto-extracted to text, optionally summarized by LLM, and indexed
-via ToolsDNS embeddings for semantic search.
+Files are auto-extracted to text, optionally summarized by LLM, and searched
+via local text matching.
 
 When the agent needs context (e.g., drafting a work email), it searches
 the appropriate inbox folder for relevant information.
@@ -193,42 +193,10 @@ class InboxTool(Tool):
         return f"Unknown action: {action}"
 
     async def _search(self, query: str, folder: str) -> str:
-        """Search inbox files using extracted text + ToolsDNS if available."""
+        """Search inbox files using local text matching."""
         if not query:
             return "Error: query required for search"
 
-        # Try ToolsDNS semantic search first
-        try:
-            from nanobot.config.loader import load_config
-            config = load_config()
-            td = getattr(getattr(config, "tools", None), "toolsdns", None)
-            if td and td.url:
-                import httpx
-                prefix = f"inbox__{folder}__" if folder != "all" else "inbox__"
-                resp = httpx.post(
-                    f"{td.url}/v1/search",
-                    json={"query": query, "top_k": 5, "threshold": 0.1, "id_prefix": prefix},
-                    headers={"Authorization": f"Bearer {td.api_key}"},
-                    timeout=10,
-                )
-                if resp.status_code == 200:
-                    results = resp.json().get("results", [])
-                    if results:
-                        lines = [f"Found {len(results)} relevant sections:\n"]
-                        for r in results:
-                            score = round(r.get("score", 0) * 100, 1)
-                            title = r.get("title", "")
-                            content = r.get("description", r.get("content", ""))[:400]
-                            source = r.get("source_info", {}).get("file_path", "")
-                            lines.append(f"**{title}** ({score}% match)")
-                            if source:
-                                lines.append(f"Source: {source}")
-                            lines.append(f"{content}\n")
-                        return "\n".join(lines)
-        except Exception:
-            pass
-
-        # Fallback: local text search
         return self._local_search(query, folder)
 
     def _local_search(self, query: str, folder: str) -> str:

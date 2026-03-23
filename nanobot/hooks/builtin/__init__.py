@@ -15,8 +15,6 @@ def register_builtin_hooks(
     hooks: HookEngine,
     workspace: Path,
     bus: "MessageBus",
-    toolsdns_url: str = "",
-    toolsdns_api_key: str = "",
 ) -> None:
     """Wire up all built-in hooks to the engine."""
     from nanobot.hooks.builtin.auto_log import make_auto_log_hook
@@ -56,7 +54,3 @@ def register_builtin_hooks(
     from nanobot.hooks.builtin.tool_ui import make_tool_ui_hook
     hooks.on("tool_after", make_tool_ui_hook(bus))
 
-    # Memory re-index on file writes (fire-and-forget)
-    if toolsdns_url and toolsdns_api_key:
-        from nanobot.hooks.builtin.memory_reindex import make_memory_reindex_hook
-        hooks.on("tool_after", make_memory_reindex_hook(workspace, toolsdns_url, toolsdns_api_key))

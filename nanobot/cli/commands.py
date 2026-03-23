@@ -305,19 +305,19 @@ def onboard():
     console.print("    • OpenRouter: https://openrouter.ai/keys")
     console.print("    • Kimi Coding: https://api.kimi.com")
 
-    # Run the extended setup wizard (ToolsDNS + Mawabot + Security)
+    # Run the extended setup wizard (Web Dashboard + Security)
     # Only in interactive mode (skip in tests/CI)
     import sys
     if sys.stdin.isatty():
         from nanobot.setup.wizard import run_setup_wizard
         run_setup_wizard(config_path, workspace)
     else:
-        console.print("\n[dim]Run [cyan]nanobot setup[/cyan] to configure ToolsDNS, web dashboard, and security.[/dim]")
+        console.print("\n[dim]Run [cyan]nanobot setup[/cyan] to configure web dashboard and security.[/dim]")
 
 
 @app.command()
 def setup():
-    """Run the Mawa setup wizard (ToolsDNS + Web Dashboard + Security)."""
+    """Run the Mawa setup wizard (Web Dashboard + Security)."""
     from nanobot.config.loader import get_config_path
     from nanobot.config.paths import get_workspace_path
     from nanobot.setup.wizard import run_setup_wizard
@@ -599,7 +599,7 @@ def gateway(
         session_manager=session_manager,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
-        toolsdns_config=config.tools.toolsdns,
+
         profiles=config.profiles,
         profile_factory=_profile_factory if config.profiles else None,
         profile_save_callback=_profile_save if config.profiles else None,
@@ -830,7 +830,7 @@ def agent(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
-        toolsdns_config=config.tools.toolsdns,
+
         profiles=config.profiles,
         profile_factory=(lambda name: _make_provider(config.apply_profile(name))) if config.profiles else None,
         profile_save_callback=(lambda name: __import__("nanobot.config.loader", fromlist=["save_config"]).save_config(config.apply_profile(name))) if config.profiles else None,

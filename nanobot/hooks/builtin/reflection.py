@@ -26,20 +26,37 @@ if TYPE_CHECKING:
 
 # Correction signal patterns — weighted by strength
 _CORRECTION_PATTERNS: list[tuple[re.Pattern, float]] = [
+    # Strong corrections
     (re.compile(r"\bno[,.]?\s+(not|don'?t|never|stop)\b", re.I), 0.9),
     (re.compile(r"\bthat'?s (wrong|incorrect|not right|not what)\b", re.I), 0.9),
-    (re.compile(r"\bI (said|meant|asked|wanted)\b", re.I), 0.7),
-    (re.compile(r"\btry again\b", re.I), 0.8),
-    (re.compile(r"\bwrong\b", re.I), 0.6),
     (re.compile(r"\bnot what I\b", re.I), 0.9),
-    (re.compile(r"\bdon'?t (do|use|add|include|put)\b", re.I), 0.7),
-    (re.compile(r"\bstop (doing|adding|using)\b", re.I), 0.8),
     (re.compile(r"\bI already (told|said|mentioned)\b", re.I), 0.8),
+    (re.compile(r"\btry again\b", re.I), 0.8),
+    (re.compile(r"\bstop (doing|adding|using)\b", re.I), 0.8),
+    (re.compile(r"\bI (said|meant|asked|wanted)\b", re.I), 0.7),
+    (re.compile(r"\bdon'?t (do|use|add|include|put)\b", re.I), 0.7),
+    (re.compile(r"\bwrong\b", re.I), 0.6),
+    # Softer hints — "do this instead", "remember", "next time", "use X not Y"
+    (re.compile(r"\binstead\s+(?:of|do|use|try)\b", re.I), 0.6),
+    (re.compile(r"\bdo this\b", re.I), 0.5),
+    (re.compile(r"\bnext time\b", re.I), 0.6),
+    (re.compile(r"\bremember\s+(?:to|that|this|for)\b", re.I), 0.6),
+    (re.compile(r"\buse\s+\w+\s+(?:not|instead|rather)\b", re.I), 0.6),
+    (re.compile(r"\blike this\b", re.I), 0.4),
+    (re.compile(r"\bnot like\s+(?:this|that)\b", re.I), 0.6),
+    (re.compile(r"\bshould(?:n'?t| not)\b", re.I), 0.5),
+    (re.compile(r"\bprefer\s+\w+\s+over\b", re.I), 0.5),
+    (re.compile(r"\balways\s+(?:do|use|try)\b", re.I), 0.5),
+    (re.compile(r"\bnever\s+(?:do|use|add)\b", re.I), 0.7),
     (re.compile(r"\bplease (just|actually|instead)\b", re.I), 0.5),
     (re.compile(r"\bno,\s", re.I), 0.5),
+    # Implicit hints — sharing preferences
+    (re.compile(r"\bI (?:like|prefer|want) (?:it |you to )", re.I), 0.4),
+    (re.compile(r"\bfor (?:future|next|later)\b", re.I), 0.5),
+    (re.compile(r"\bkeep (?:in mind|that)\b", re.I), 0.5),
 ]
 
-_CORRECTION_THRESHOLD = 0.5  # Min score to trigger extraction
+_CORRECTION_THRESHOLD = 0.4  # Lowered — catch softer hints too
 _MAX_LEARNINGS = 20  # Keep file from growing too large
 
 _EXTRACT_TOOL = [

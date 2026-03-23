@@ -1,4 +1,4 @@
-"""Unified setup wizard — configures nanobot + ToolsDNS + mawabot + security.
+"""Unified setup wizard — configures nanobot + mawabot + security.
 
 Called from `nanobot onboard` after basic config is created.
 Each step is optional and can be skipped.
@@ -18,157 +18,6 @@ from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 
 console = Console()
-
-# ── ToolsDNS Setup ──
-
-def setup_toolsdns(config_path: Path) -> None:
-    """Step 2: Configure ToolsDNS for tool execution."""
-    console.print("\n")
-    console.print(Panel(
-        "[bold]ToolsDNS — Tool Execution Engine[/bold]\n\n"
-        "ToolsDNS enables Mawa to use external tools:\n"
-        "  Gmail, Google Calendar, Weather, Salesforce, GitHub,\n"
-        "  Slack, Reddit, Hacker News, browser automation, and 100+ more.\n\n"
-        "Without ToolsDNS, Mawa can still chat, search the web,\n"
-        "read/write files, and manage goals — but can't call external APIs.",
-        title="Step 2: Tools",
-        border_style="cyan",
-    ))
-
-    if not Confirm.ask("Set up ToolsDNS?", default=True):
-        console.print("[dim]Skipped ToolsDNS setup[/dim]")
-        return
-
-    choice = Prompt.ask(
-        "How do you want to connect?",
-        choices=["hosted", "docker", "skip"],
-        default="hosted",
-    )
-
-    if choice == "hosted":
-        _setup_toolsdns_hosted(config_path)
-    elif choice == "docker":
-        _setup_toolsdns_docker(config_path)
-    else:
-        console.print("[dim]Skipped[/dim]")
-
-
-def _setup_toolsdns_hosted(config_path: Path) -> None:
-    """Configure an existing ToolsDNS instance."""
-    url = Prompt.ask("ToolsDNS URL", default="https://toolsdns.example.com")
-    api_key = Prompt.ask("ToolsDNS API Key")
-
-    if not url or not api_key:
-        console.print("[yellow]Skipped — URL and API key required[/yellow]")
-        return
-
-    # Test connection
-    console.print("[dim]Testing connection...[/dim]")
-    try:
-        import httpx
-        resp = httpx.get(
-            f"{url.rstrip('/')}/v1/health",
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            total = data.get("total_tools", 0)
-            console.print(f"[green]✓[/green] Connected! {total} tools available")
-        else:
-            console.print(f"[yellow]⚠[/yellow] Server returned {resp.status_code}")
-    except Exception as e:
-        console.print(f"[yellow]⚠[/yellow] Connection failed: {e}")
-        if not Confirm.ask("Save anyway?", default=False):
-            return
-
-    # Save to config
-    _update_config(config_path, {
-        "tools": {
-            "toolsdns": {
-                "url": url.rstrip("/"),
-                "apiKey": api_key,
-            }
-        }
-    })
-    console.print("[green]✓[/green] ToolsDNS configured")
-
-
-def _setup_toolsdns_docker(config_path: Path) -> None:
-    """Start ToolsDNS locally via Docker."""
-    if not shutil.which("docker"):
-        console.print("[red]✗[/red] Docker not found. Install Docker first: https://docs.docker.com/get-docker/")
-        return
-
-    console.print("[dim]Setting up local ToolsDNS via Docker...[/dim]")
-
-    # Generate API key for local instance
-    local_key = f"td-local-{secrets.token_hex(16)}"
-    local_port = 8787
-
-    # Check if already running
-    try:
-        result = subprocess.run(
-            ["docker", "ps", "--filter", "name=nanobot-toolsdns", "--format", "{{.ID}}"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.stdout.strip():
-            console.print("[yellow]ToolsDNS container already running[/yellow]")
-            if not Confirm.ask("Restart it?", default=False):
-                # Just configure to use existing
-                _update_config(config_path, {
-                    "tools": {"toolsdns": {"url": f"http://localhost:{local_port}", "apiKey": local_key}}
-                })
-                return
-            subprocess.run(["docker", "rm", "-f", "nanobot-toolsdns"], capture_output=True, timeout=10)
-    except Exception:
-        pass
-
-    # Create docker-compose for ToolsDNS
-    compose_dir = Path.home() / ".nanobot" / "toolsdns"
-    compose_dir.mkdir(parents=True, exist_ok=True)
-
-    compose_content = f"""version: '3.8'
-services:
-  toolsdns:
-    image: toolsdns/toolsdns:latest
-    container_name: nanobot-toolsdns
-    restart: unless-stopped
-    ports:
-      - "{local_port}:8787"
-    environment:
-      - API_KEY={local_key}
-      - DATA_DIR=/data
-    volumes:
-      - toolsdns-data:/data
-
-volumes:
-  toolsdns-data:
-"""
-    compose_file = compose_dir / "docker-compose.yml"
-    compose_file.write_text(compose_content)
-
-    console.print(f"[dim]Starting ToolsDNS on port {local_port}...[/dim]")
-    try:
-        subprocess.run(
-            ["docker", "compose", "-f", str(compose_file), "up", "-d"],
-            capture_output=True, text=True, timeout=120,
-        )
-        console.print(f"[green]✓[/green] ToolsDNS running at http://localhost:{local_port}")
-    except Exception as e:
-        console.print(f"[red]✗[/red] Docker failed: {e}")
-        console.print(f"[dim]You can start manually: docker compose -f {compose_file} up -d[/dim]")
-
-    # Save to config
-    _update_config(config_path, {
-        "tools": {
-            "toolsdns": {
-                "url": f"http://localhost:{local_port}",
-                "apiKey": local_key,
-            }
-        }
-    })
-    console.print("[green]✓[/green] ToolsDNS configured (local Docker)")
 
 
 # ── Mawabot Frontend Setup ──
@@ -363,9 +212,8 @@ def run_setup_wizard(config_path: Path, workspace: Path) -> None:
     console.print(Panel(
         "[bold cyan]Mawa Setup Wizard[/bold cyan]\n\n"
         "Let's set up the full Mawa stack:\n"
-        "  Step 2: ToolsDNS (external tool execution)\n"
-        "  Step 3: Web Dashboard (mawabot frontend)\n"
-        "  Step 4: Security (Tailscale, webhooks, access control)\n\n"
+        "  Step 2: Web Dashboard (mawabot frontend)\n"
+        "  Step 3: Security (Tailscale, webhooks, access control)\n\n"
         "Each step is optional — press [bold]n[/bold] to skip.",
         border_style="cyan",
     ))
@@ -374,7 +222,6 @@ def run_setup_wizard(config_path: Path, workspace: Path) -> None:
         console.print("[dim]You can run this later with: nanobot onboard[/dim]")
         return
 
-    setup_toolsdns(config_path)
     setup_mawabot(config_path, workspace)
     setup_security(config_path)
 

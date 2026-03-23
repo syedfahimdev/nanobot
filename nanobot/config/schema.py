@@ -146,18 +146,6 @@ class MCPServerConfig(Base):
     tool_timeout: int = 30  # seconds before a tool call is cancelled
     enabled_tools: list[str] = Field(default_factory=lambda: ["*"])  # Only register these tools; accepts raw MCP names or wrapped mcp_<server>_<tool> names; ["*"] = all tools; [] = no tools
 
-class ToolsDNSConfig(Base):
-    """ToolsDNS semantic tool-search service configuration."""
-
-    url: str = ""
-    api_key: str = ""
-    timeout: float = 30.0
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.url and self.api_key)
-
-
 class ToolsConfig(Base):
     """Tools configuration."""
 
@@ -165,7 +153,6 @@ class ToolsConfig(Base):
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
-    toolsdns: ToolsDNSConfig = Field(default_factory=ToolsDNSConfig)
 
 
 class ProfileConfig(Base):

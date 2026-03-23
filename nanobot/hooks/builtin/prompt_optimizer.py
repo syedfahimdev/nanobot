@@ -153,8 +153,6 @@ def make_prompt_optimizer_tool_hook(workspace: Path):
 
     async def on_tool_after(event: ToolAfter) -> None:
         tool_name = event.name
-        if event.name == "toolsdns" and event.params.get("action") == "call":
-            tool_name = event.params.get("tool_id", "toolsdns").replace("tooldns__", "")
         session = event.session_key or "unknown"
         optimizer.on_tool_call(tool_name, session)
 
