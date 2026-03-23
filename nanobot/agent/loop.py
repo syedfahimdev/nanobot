@@ -1377,6 +1377,10 @@ class AgentLoop:
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
 
+        # Security filter — strip any leaked credentials from outbound response
+        from nanobot.hooks.builtin.capabilities import _sanitize
+        final_content = _sanitize(final_content)
+
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
         self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))

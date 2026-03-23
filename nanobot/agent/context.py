@@ -261,6 +261,14 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         if recap:
             runtime_ctx = f"{runtime_ctx}\n\n{recap}"
 
+        # Dynamic capabilities injection — when user asks about features
+        user_text = current_message if isinstance(user_content, str) else current_message
+        from nanobot.hooks.builtin.capabilities import should_inject_capabilities, generate_capabilities
+        if should_inject_capabilities(user_text):
+            caps = generate_capabilities(self.workspace)
+            if caps:
+                runtime_ctx = f"{runtime_ctx}\n\n{caps}"
+
         # Merge runtime context and user content into a single user message
         # to avoid consecutive same-role messages that some providers reject.
         if isinstance(user_content, str):
