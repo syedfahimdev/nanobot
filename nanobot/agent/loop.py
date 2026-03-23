@@ -1351,13 +1351,14 @@ class AgentLoop:
             return None  # Silently drop duplicate
 
         # Helper: send a pre-LLM answer with TTS support for voice channels
-        async def _send_quick_answer(answer: str, label: str = "pre-LLM") -> OutboundMessage:
+        async def _send_quick_answer(answer: str, label: str = "pre-LLM") -> OutboundMessage | None:
             session.add_message("user", msg.content)
             session.add_message("assistant", answer)
             self.sessions.save(session)
             logger.info("{} answer (zero tokens): {}", label, answer[:60])
-            # For voice channels, also push through TTS
+            self.model = _original_model
             if _is_voice:
+                # Voice: send TTS sentence + display text, return None to skip the duplicate voice path
                 from nanobot.channels.web_voice import _strip_markdown
                 clean = _strip_markdown(answer)
                 if clean and len(clean) >= 3:
@@ -1365,7 +1366,11 @@ class AgentLoop:
                         channel=msg.channel, chat_id=msg.chat_id,
                         content=clean, metadata={"_tts_sentence": True},
                     ))
-            self.model = _original_model
+                # Also send as response_text for display (no TTS — _streamed_text is set)
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id, content=answer,
+                ))
+                return None
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=answer)
 
         # [#1] Response cache — skip LLM for identical questions
