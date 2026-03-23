@@ -176,6 +176,10 @@ class AgentLoop:
         from nanobot.hooks.builtin.proactive import make_proactive_hook
         self.hooks.on("turn_completed", make_proactive_hook(workspace, bus))
 
+        # Background job completion notifier
+        from nanobot.hooks.builtin.background_jobs import make_background_job_hook
+        self.hooks.on("turn_completed", make_background_job_hook(bus))
+
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -189,6 +193,11 @@ class AgentLoop:
             working_dir=str(self.workspace),
             timeout=self.exec_config.timeout,
             restrict_to_workspace=self.restrict_to_workspace,
+            path_append=self.exec_config.path_append,
+        ))
+        from nanobot.agent.tools.background_shell import BackgroundShellTool
+        self.tools.register(BackgroundShellTool(
+            working_dir=str(self.workspace),
             path_append=self.exec_config.path_append,
         ))
         self.tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
