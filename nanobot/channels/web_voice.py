@@ -528,14 +528,10 @@ class WebVoiceChannel(BaseChannel):
             if remaining > 0:
                 await broadcast({"type": "queue_status", "pending": remaining})
 
-        # TTS: if this is a final response (not already streamed via _tts_sentence),
-        # split into sentences and TTS them. This covers:
-        # - Subagent results
-        # - Non-streaming fallback responses
-        # - Pre-LLM intercepted answers (greetings, math, cache hits)
-        # The streaming path already handles TTS per-sentence via _tts_sentence metadata.
-        _was_streamed = session_id in self._streamed_text  # If key was in _streamed_text before pop, streaming handled TTS
-        if not _was_streamed:
+        # TTS: only for responses that were NOT already streamed and NOT flagged as voice_final.
+        # Streaming path handles TTS per-sentence via _tts_sentence metadata.
+        # voice_final is the display-only message sent after streaming completes.
+        if not _was_streamed and not meta.get("_voice_final"):
             clean = _strip_markdown(msg.content)
             if clean:
                 sentences = _split_sentences(clean)
