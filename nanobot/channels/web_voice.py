@@ -505,6 +505,7 @@ class WebVoiceChannel(BaseChannel):
 
         # Final response
         is_subagent = meta.get("_subagent_result", False)
+        _was_streamed = session_id in self._streamed_text  # Check BEFORE popping
         self._streamed_text.pop(session_id, None)
         await broadcast({
             "type": "response_text",
@@ -525,11 +526,14 @@ class WebVoiceChannel(BaseChannel):
             if remaining > 0:
                 await broadcast({"type": "queue_status", "pending": remaining})
 
-        # TTS: subagent results and non-streamed responses need sentence-based TTS here.
-        # When streaming was active, sentences were already sent via _tts_sentence messages,
-        # so we only TTS if this is a subagent result (skip-summarization path) or
-        # the response came from a non-streaming path.
-        if is_subagent:
+        # TTS: if this is a final response (not already streamed via _tts_sentence),
+        # split into sentences and TTS them. This covers:
+        # - Subagent results
+        # - Non-streaming fallback responses
+        # - Pre-LLM intercepted answers (greetings, math, cache hits)
+        # The streaming path already handles TTS per-sentence via _tts_sentence metadata.
+        _was_streamed = session_id in self._streamed_text  # If key was in _streamed_text before pop, streaming handled TTS
+        if not _was_streamed:
             clean = _strip_markdown(msg.content)
             if clean:
                 sentences = _split_sentences(clean)

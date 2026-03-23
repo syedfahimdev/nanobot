@@ -1350,34 +1350,39 @@ class AgentLoop:
             self.model = _original_model
             return None  # Silently drop duplicate
 
+        # Helper: send a pre-LLM answer with TTS support for voice channels
+        async def _send_quick_answer(answer: str, label: str = "pre-LLM") -> OutboundMessage:
+            session.add_message("user", msg.content)
+            session.add_message("assistant", answer)
+            self.sessions.save(session)
+            logger.info("{} answer (zero tokens): {}", label, answer[:60])
+            # For voice channels, also push through TTS
+            if _is_voice:
+                from nanobot.channels.web_voice import _strip_markdown
+                clean = _strip_markdown(answer)
+                if clean and len(clean) >= 3:
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=msg.channel, chat_id=msg.chat_id,
+                        content=clean, metadata={"_tts_sentence": True},
+                    ))
+            self.model = _original_model
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=answer)
+
         # [#1] Response cache — skip LLM for identical questions
         cached = get_cached_response(msg.content)
         if cached:
-            session.add_message("user", msg.content)
-            session.add_message("assistant", cached)
-            self.sessions.save(session)
-            self.model = _original_model
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="(cached) " + cached)
+            return await _send_quick_answer(cached, "Cache hit")
 
         # [#9] Time-aware greeting — zero tokens
         greeting = get_greeting_response(msg.content, self.workspace)
         if greeting:
-            session.add_message("user", msg.content)
-            session.add_message("assistant", greeting)
-            self.sessions.save(session)
-            self.model = _original_model
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=greeting)
+            return await _send_quick_answer(greeting, "Greeting")
 
         # [Pre-LLM] Try to answer with pure code — zero tokens (math, timezone, regex)
         from nanobot.hooks.builtin.claude_capabilities import try_code_answer
         code_answer = try_code_answer(msg.content, self.workspace)
         if code_answer:
-            session.add_message("user", msg.content)
-            session.add_message("assistant", code_answer)
-            self.sessions.save(session)
-            logger.info("Pre-LLM answer (zero tokens): {}", code_answer[:60])
-            self.model = _original_model
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=code_answer)
+            return await _send_quick_answer(code_answer, "Code answer")
 
         # [#2] Priority detection — log urgency level
         priority = detect_priority(msg.content)
@@ -1418,11 +1423,15 @@ class AgentLoop:
         if _frustration_preamble:
             enriched_content = f"{enriched_content}\n\n[User seems frustrated. Start your response with: {_frustration_preamble}]"
 
-        # Multi-language detection — respond in user's language
+        # Multi-language detection — respond in user's language (text only, not voice)
         from nanobot.hooks.builtin.maintenance import detect_language
         user_lang = detect_language(msg.content)
         if user_lang != "english":
-            enriched_content = f"{enriched_content}\n\n[User is writing in {user_lang}. Respond in {user_lang}.]"
+            if _is_voice:
+                # Voice mode: TTS only supports English — respond in English but acknowledge their language
+                enriched_content = f"{enriched_content}\n\n[User is writing in {user_lang}. You understand it, but respond in English because voice TTS only supports English.]"
+            else:
+                enriched_content = f"{enriched_content}\n\n[User is writing in {user_lang}. Respond in {user_lang}.]"
 
         # Destructive action warning
         from nanobot.hooks.builtin.maintenance import is_destructive_message
