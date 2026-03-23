@@ -311,13 +311,18 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             return text
 
         images = []
-        for path in media:
-            p = Path(path)
+        for item in media:
+            # Already a data URI (from frontend attachment) — pass through directly
+            if isinstance(item, str) and item.startswith("data:image/"):
+                images.append({"type": "image_url", "image_url": {"url": item}})
+                continue
+
+            # File path — read and encode
+            p = Path(item)
             if not p.is_file():
                 continue
             raw = p.read_bytes()
-            # Detect real MIME type from magic bytes; fallback to filename guess
-            mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
+            mime = detect_image_mime(raw) or mimetypes.guess_type(item)[0]
             if not mime or not mime.startswith("image/"):
                 continue
             b64 = base64.b64encode(raw).decode()
