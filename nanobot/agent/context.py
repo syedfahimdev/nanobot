@@ -269,6 +269,21 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             if caps:
                 runtime_ctx = f"{runtime_ctx}\n\n{caps}"
 
+        # Task decomposition hint — when message has multiple steps
+        from nanobot.hooks.builtin.claude_capabilities import is_multi_step, decompose_task
+        if is_multi_step(user_text):
+            steps = decompose_task(user_text)
+            if steps:
+                plan = "[Task Plan — execute these steps in order]\n" + "\n".join(f"{i+1}. {s}" for i, s in enumerate(steps))
+                runtime_ctx = f"{runtime_ctx}\n\n{plan}"
+
+        # Paste pipeline — detect pasted content and add processing hint
+        from nanobot.hooks.builtin.claude_capabilities import detect_paste_type
+        paste = detect_paste_type(user_text)
+        if paste:
+            hint = f"[Detected paste: {paste['type']}] Suggestion: {paste['suggestion']}"
+            runtime_ctx = f"{runtime_ctx}\n\n{hint}"
+
         # Merge runtime context and user content into a single user message
         # to avoid consecutive same-role messages that some providers reject.
         if isinstance(user_content, str):

@@ -338,9 +338,18 @@ class AgentLoop:
             logger.warning("Tool {} timed out after {}s", tc.name, self._TOOL_TIMEOUT)
             result = f"Error: Tool '{tc.name}' timed out after {self._TOOL_TIMEOUT}s. Try a simpler approach or break the task into smaller steps."
 
-        # [#1] Classify errors with structured recovery hints
+        # [#1] Classify errors with structured recovery hints + strategy rotation
         if settings.get("smartErrorRecovery", True):
             result = classify_tool_error(tc.name, result)
+            # [#9-new] Suggest alternative tools on failure
+            if isinstance(result, str) and result.startswith("Error"):
+                from nanobot.hooks.builtin.claude_capabilities import get_failure_hint
+                hint = get_failure_hint(tc.name, result)
+                if hint:
+                    result = f"{result}\n{hint}"
+            else:
+                from nanobot.hooks.builtin.claude_capabilities import reset_failures
+                reset_failures(tc.name)
 
         # [#3] Dynamic context budgeting — truncate oversized results
         if settings.get("dynamicContextBudget", True):
@@ -1326,6 +1335,19 @@ class AgentLoop:
         _turn_t0 = __import__("time").monotonic()
 
         _is_voice = msg.channel in ("discord_voice", "web_voice")
+
+        # [Pre-LLM] Try to answer with pure code — zero tokens
+        from nanobot.hooks.builtin.claude_capabilities import try_code_answer
+        code_answer = try_code_answer(msg.content, self.workspace)
+        if code_answer:
+            # Save to session for history continuity
+            session.add_message("user", msg.content)
+            session.add_message("assistant", code_answer)
+            self.sessions.save(session)
+            logger.info("Pre-LLM answer (zero tokens): {}", code_answer[:60])
+            # Restore model if it was downgraded
+            self.model = _original_model
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=code_answer)
 
         history = session.get_history(max_messages=0)
         enriched_content = msg.content

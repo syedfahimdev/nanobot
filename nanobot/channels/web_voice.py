@@ -318,6 +318,9 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/api/sessions/tags", self._session_tags_handler)
         self._app.router.add_post("/api/sessions/tags", self._session_tags_set_handler)
         self._app.router.add_get("/api/inbox/batch", self._inbox_batch_handler)
+        self._app.router.add_get("/api/tools/alternatives", self._tool_alternatives_handler)
+        self._app.router.add_post("/api/snapshot", self._snapshot_handler)
+        self._app.router.add_get("/api/snapshot/diff", self._snapshot_diff_handler)
         self._app.router.add_get("/api/search", self._search_handler)
         self._app.router.add_get("/api/sessions", self._sessions_list_handler)
         self._app.router.add_get("/api/sessions/{key:.+}/export", self._session_export_handler)
@@ -1596,6 +1599,25 @@ class WebVoiceChannel(BaseChannel):
         action = request.query.get("action", "list")
         from nanobot.hooks.builtin.code_features import batch_process_inbox
         result = await batch_process_inbox(self._get_workspace(), action)
+        return web.json_response(result)
+
+    async def _tool_alternatives_handler(self, request: web.Request) -> web.Response:
+        tool = request.query.get("tool", "")
+        from nanobot.hooks.builtin.claude_capabilities import get_alternative_tool
+        alt = get_alternative_tool(tool) if tool else None
+        return web.json_response({"tool": tool, "alternative": alt})
+
+    async def _snapshot_handler(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        name = body.get("name", "auto")
+        from nanobot.hooks.builtin.claude_capabilities import take_snapshot
+        result = take_snapshot(self._get_workspace(), name)
+        return web.json_response(result)
+
+    async def _snapshot_diff_handler(self, request: web.Request) -> web.Response:
+        name = request.query.get("name", "auto")
+        from nanobot.hooks.builtin.claude_capabilities import compare_snapshot
+        result = compare_snapshot(self._get_workspace(), name)
         return web.json_response(result)
 
     async def _intelligence_get_handler(self, request: web.Request) -> web.Response:
