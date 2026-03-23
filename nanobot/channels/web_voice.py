@@ -2561,18 +2561,26 @@ copy();
         processed_media = []
         if media:
             for item in media:
-                if isinstance(item, str) and item.startswith("data:image/"):
-                    # Base64 image — pass directly to LLM vision
-                    processed_media.append(item)
-                elif isinstance(item, str) and item.startswith("data:"):
-                    # Non-image data URI — save to inbox and give LLM the full path
-                    saved = await self._save_data_uri_to_inbox(item)
-                    if saved:
-                        full_path = str(self._get_workspace() / "inbox" / "general" / saved)
-                        text = f"{text}\n\n[Attached file: {full_path}]\nYou can read, copy, or process this file using your tools. If the user asks to use it with a skill, copy it to the skill's workspace."
-                elif isinstance(item, str):
-                    # File path from upload endpoint
-                    processed_media.append(item)
+                # item can be: string (data URI or path) or dict {dataUri, name}
+                data_uri = item.get("dataUri", item) if isinstance(item, dict) else item
+                original_name = item.get("name", "") if isinstance(item, dict) else ""
+
+                if isinstance(data_uri, str) and data_uri.startswith("data:image/"):
+                    processed_media.append(data_uri)
+                elif isinstance(data_uri, str) and data_uri.startswith("data:"):
+                    # Route to folder based on message context
+                    folder = self._detect_inbox_folder(text)
+                    saved_name, saved_path = await self._save_data_uri_to_inbox(
+                        data_uri, original_name=original_name, folder=folder,
+                    )
+                    if saved_path:
+                        text = (
+                            f"{text}\n\n[Attached file: {saved_path} (original: {saved_name})]\n"
+                            "You can read, copy, or process this file using your tools. "
+                            "If the user asks to use it with a skill, copy it to the skill's workspace."
+                        )
+                elif isinstance(data_uri, str):
+                    processed_media.append(data_uri)
 
         await self._handle_message(
             sender_id=session_id,
@@ -2585,31 +2593,70 @@ copy();
             },
         )
 
-    async def _save_data_uri_to_inbox(self, data_uri: str) -> str | None:
-        """Save a data URI to the inbox and return the filename."""
+    @staticmethod
+    def _detect_inbox_folder(text: str) -> str:
+        """Detect which inbox folder to use based on message context."""
+        text_lower = text.lower()
+        # Work-related keywords
+        if any(w in text_lower for w in [
+            "work order", "work", "everi", "salesforce", "report",
+            "invoice", "order", "shipping", "business", "client",
+            "cea", "casino", "property", "task",
+        ]):
+            return "work"
+        # Personal keywords
+        if any(w in text_lower for w in [
+            "personal", "family", "wedding", "tonni", "receipt",
+            "photo", "vacation", "trip",
+        ]):
+            return "personal"
+        return "general"
+
+    async def _save_data_uri_to_inbox(
+        self, data_uri: str, original_name: str = "", folder: str = "general",
+    ) -> tuple[str, str] | tuple[None, None]:
+        """Save a data URI to the inbox. Returns (filename, full_path) or (None, None)."""
         import base64 as b64
         try:
-            # Parse data URI: data:application/pdf;base64,xxxx
             header, encoded = data_uri.split(",", 1)
             mime = header.split(":")[1].split(";")[0]
             ext_map = {
-                "application/pdf": ".pdf", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+                "application/pdf": ".pdf",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
                 "text/csv": ".csv", "text/plain": ".txt", "application/json": ".json",
                 "application/zip": ".zip",
             }
             ext = ext_map.get(mime, ".bin")
-            name = f"upload_{int(time.time())}{ext}"
 
-            inbox_dir = self._get_workspace() / "inbox" / "general"
+            # Use original filename if provided, sanitize it
+            if original_name:
+                # Sanitize: remove path separators, double dots
+                safe = original_name.replace("/", "_").replace("\\", "_").replace("..", "_")
+                # If no extension, append from MIME
+                if "." not in safe:
+                    safe = f"{safe}{ext}"
+                name = safe
+            else:
+                name = f"upload_{int(time.time())}{ext}"
+
+            inbox_dir = self._get_workspace() / "inbox" / folder
             inbox_dir.mkdir(parents=True, exist_ok=True)
-            path = inbox_dir / name
-            path.write_bytes(b64.b64decode(encoded))
-            logger.info("Saved attachment to inbox: {} ({})", name, mime)
-            return name
+            full_path = inbox_dir / name
+
+            # Avoid overwriting — add suffix if exists
+            if full_path.exists():
+                stem = full_path.stem
+                suffix = full_path.suffix
+                name = f"{stem}_{int(time.time())}{suffix}"
+                full_path = inbox_dir / name
+
+            full_path.write_bytes(b64.b64decode(encoded))
+            logger.info("Saved attachment: {}/{} ({})", folder, name, mime)
+            return name, str(full_path)
         except Exception as e:
             logger.warning("Failed to save data URI: {}", e)
-            return None
+            return None, None
 
     async def _get_intel_for_llm(self, session_id: str, text: str) -> str | None:
         """Analyze speech, send to activity feed, and return summary for LLM context."""
