@@ -2264,7 +2264,7 @@ copy();
     # ── WebSocket handler ──────────────────────────────────────────
 
     async def _ws_handler(self, request: web.Request) -> web.WebSocketResponse:
-        ws = web.WebSocketResponse()
+        ws = web.WebSocketResponse(max_msg_size=20 * 1024 * 1024)  # 20MB for image attachments
         await ws.prepare(request)
 
         session_id = f"webvoice_{id(ws)}"  # Default; overridden by identify action
