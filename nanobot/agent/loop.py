@@ -1418,6 +1418,17 @@ class AgentLoop:
         if _frustration_preamble:
             enriched_content = f"{enriched_content}\n\n[User seems frustrated. Start your response with: {_frustration_preamble}]"
 
+        # Multi-language detection — respond in user's language
+        from nanobot.hooks.builtin.maintenance import detect_language
+        user_lang = detect_language(msg.content)
+        if user_lang != "english":
+            enriched_content = f"{enriched_content}\n\n[User is writing in {user_lang}. Respond in {user_lang}.]"
+
+        # Destructive action warning
+        from nanobot.hooks.builtin.maintenance import is_destructive_message
+        if is_destructive_message(msg.content):
+            enriched_content = f"{enriched_content}\n\n[WARNING: User requested a destructive action. Ask for confirmation BEFORE executing. Do NOT proceed without explicit 'yes'.]"
+
         # [#14] Retry context — inject previous failure info
         retry_ctx = get_retry_context(key)
         if retry_ctx:

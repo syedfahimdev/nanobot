@@ -322,6 +322,16 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_post("/api/snapshot", self._snapshot_handler)
         self._app.router.add_get("/api/snapshot/diff", self._snapshot_diff_handler)
         self._app.router.add_get("/api/sessions/health", self._session_health_handler)
+        self._app.router.add_get("/api/contacts", self._contacts_handler)
+        self._app.router.add_post("/api/contacts", self._contacts_save_handler)
+        self._app.router.add_get("/api/habits", self._habits_handler)
+        self._app.router.add_post("/api/habits", self._habits_save_handler)
+        self._app.router.add_delete("/api/habits/{name}", self._habits_delete_handler)
+        self._app.router.add_get("/api/quiet-hours", self._quiet_hours_handler)
+        self._app.router.add_post("/api/quiet-hours", self._quiet_hours_save_handler)
+        self._app.router.add_get("/api/export/conversation", self._export_conversation_handler)
+        self._app.router.add_get("/api/undo", self._undo_handler)
+        self._app.router.add_post("/api/maintenance", self._maintenance_handler)
         self._app.router.add_get("/api/search", self._search_handler)
         self._app.router.add_get("/api/sessions", self._sessions_list_handler)
         self._app.router.add_get("/api/sessions/{key:.+}/export", self._session_export_handler)
@@ -435,6 +445,13 @@ class WebVoiceChannel(BaseChannel):
             # Always persist notification so it's not lost if offline
             from nanobot.hooks.builtin.notification_store import save_notification
             save_notification(self._get_workspace(), msg.content, meta)
+
+            # Respect quiet hours — defer non-urgent notifications
+            from nanobot.hooks.builtin.maintenance import should_send_notification
+            priority = meta.get("_priority", "normal")
+            if not should_send_notification(self._get_workspace(), priority):
+                logger.info("Notification deferred (quiet hours): {}", msg.content[:60])
+                return  # Saved but not sent — will be delivered on next connect
 
             if live_clients:
                 await broadcast(payload)
@@ -1624,6 +1641,64 @@ class WebVoiceChannel(BaseChannel):
     async def _session_health_handler(self, request: web.Request) -> web.Response:
         from nanobot.hooks.builtin.smart_responses import get_all_session_health
         return web.json_response(get_all_session_health())
+
+    async def _contacts_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.maintenance import get_contacts
+        q = request.query.get("q", "")
+        if q:
+            from nanobot.hooks.builtin.maintenance import find_contact
+            return web.json_response({"contacts": find_contact(self._get_workspace(), q)})
+        return web.json_response({"contacts": get_contacts(self._get_workspace())})
+
+    async def _contacts_save_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.maintenance import save_contact
+        body = await request.json()
+        save_contact(self._get_workspace(), body)
+        return web.json_response({"ok": True})
+
+    async def _habits_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.maintenance import get_habits, get_due_habits
+        return web.json_response({"habits": get_habits(self._get_workspace()), "due": get_due_habits(self._get_workspace())})
+
+    async def _habits_save_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.maintenance import save_habit
+        body = await request.json()
+        save_habit(self._get_workspace(), body)
+        return web.json_response({"ok": True})
+
+    async def _habits_delete_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.maintenance import delete_habit
+        name = request.match_info.get("name", "")
+        ok = delete_habit(self._get_workspace(), name)
+        return web.json_response({"ok": ok})
+
+    async def _quiet_hours_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.maintenance import load_quiet_hours
+        return web.json_response(load_quiet_hours(self._get_workspace()))
+
+    async def _quiet_hours_save_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.maintenance import save_quiet_hours
+        body = await request.json()
+        save_quiet_hours(self._get_workspace(), body)
+        return web.json_response({"ok": True})
+
+    async def _export_conversation_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.maintenance import export_conversation
+        fmt = request.query.get("format", "markdown")
+        session_key = request.query.get("session", "web_voice:voice")
+        content = export_conversation(self._get_workspace(), session_key, fmt)
+        if fmt == "json":
+            return web.json_response(json.loads(content) if content else {})
+        return web.Response(text=content, content_type="text/markdown")
+
+    async def _undo_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.maintenance import get_undo_history
+        return web.json_response({"actions": get_undo_history()})
+
+    async def _maintenance_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.maintenance import run_maintenance
+        results = run_maintenance(self._get_workspace())
+        return web.json_response(results)
 
     async def _intelligence_get_handler(self, request: web.Request) -> web.Response:
         """GET /api/intelligence — return current intelligence toggle states."""

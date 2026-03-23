@@ -184,6 +184,15 @@ class HeartbeatService:
         # Consolidate stale sessions first (no LLM cost if nothing to do)
         await self._consolidate_stale_sessions()
 
+        # Run maintenance: archive history, cleanup sessions, extract contacts
+        try:
+            from nanobot.hooks.builtin.maintenance import run_maintenance
+            results = run_maintenance(self.workspace)
+            if results.get("history", {}).get("archived", 0) > 0 or results.get("sessions", {}).get("deleted", 0) > 0:
+                logger.info("Heartbeat maintenance: {}", results)
+        except Exception as e:
+            logger.debug("Heartbeat maintenance error: {}", e)
+
         from nanobot.utils.evaluator import evaluate_response
 
         content = self._read_heartbeat_file()

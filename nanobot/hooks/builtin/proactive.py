@@ -115,6 +115,19 @@ def make_proactive_hook(workspace: Path, bus: "MessageBus"):
                 alerts.append(a)
                 _LAST_NOTIFIED[key] = today
 
+        # Check habits due for reminder
+        try:
+            from nanobot.hooks.builtin.maintenance import get_due_habits, mark_habit_reminded
+            for habit in get_due_habits(workspace):
+                name = habit.get("name", "")
+                key = f"habit:{name}"
+                if _LAST_NOTIFIED.get(key) != today or habit.get("interval_hours", 24) < 24:
+                    alerts.append(f"Habit reminder: {name}")
+                    mark_habit_reminded(workspace, name)
+                    _LAST_NOTIFIED[key] = today
+        except Exception:
+            pass
+
         if not alerts:
             return
 
