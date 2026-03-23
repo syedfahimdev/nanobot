@@ -286,6 +286,8 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/api/autonomy", self._autonomy_handler)
         self._app.router.add_get("/api/intelligence", self._intelligence_get_handler)
         self._app.router.add_get("/api/learnings", self._learnings_handler)
+        self._app.router.add_get("/api/notifications", self._notifications_handler)
+        self._app.router.add_post("/api/notifications/read", self._notifications_read_handler)
         self._app.router.add_post("/api/intelligence", self._intelligence_set_handler)
         self._app.router.add_get("/api/skills/search", self._skills_search_handler)
         self._app.router.add_post("/api/skills/install", self._skills_install_handler)
@@ -403,13 +405,23 @@ class WebVoiceChannel(BaseChannel):
 
         # Proactive notification — send with notification type for browser push
         if meta.get("_notification") or meta.get("_proactive") or meta.get("_briefing"):
-            await broadcast({
+            payload = {
                 "type": "notification",
                 "text": msg.content,
                 "priority": meta.get("_priority", "normal"),
                 "proactive": bool(meta.get("_proactive")),
                 "briefing": bool(meta.get("_briefing")),
-            })
+                "cron": bool(meta.get("_cron")),
+                "job_id": meta.get("_job_id", ""),
+            }
+            # Always persist notification so it's not lost if offline
+            from nanobot.hooks.builtin.notification_store import save_notification
+            save_notification(self._get_workspace(), msg.content, meta)
+
+            if live_clients:
+                await broadcast(payload)
+            else:
+                logger.info("Notification saved (no clients connected): {}", msg.content[:80])
             return
 
         # Structured tool result — send data for generative UI rendering
@@ -1496,6 +1508,18 @@ class WebVoiceChannel(BaseChannel):
             "toolLearnings": _parse(tool_file),
         })
 
+    async def _notifications_handler(self, request: web.Request) -> web.Response:
+        """GET /api/notifications — return all stored notifications."""
+        from nanobot.hooks.builtin.notification_store import get_all
+        notifications = get_all(self._get_workspace())
+        return web.json_response({"notifications": notifications})
+
+    async def _notifications_read_handler(self, request: web.Request) -> web.Response:
+        """POST /api/notifications/read — mark all as read."""
+        from nanobot.hooks.builtin.notification_store import mark_all_read
+        count = mark_all_read(self._get_workspace())
+        return web.json_response({"ok": True, "marked": count})
+
     async def _intelligence_get_handler(self, request: web.Request) -> web.Response:
         """GET /api/intelligence — return current intelligence toggle states."""
         settings = _load_intelligence_settings(self._get_workspace())
@@ -2024,6 +2048,24 @@ copy();
                             self._utterance_buffer.setdefault(session_id, [])
                             self._pending_count.setdefault(session_id, 0)
                             logger.info("Web Voice client identified: {} (was {})", session_id, old_id)
+
+                            # Deliver any pending notifications that were stored while offline
+                            try:
+                                from nanobot.hooks.builtin.notification_store import get_pending, mark_all_read
+                                pending = get_pending(self._get_workspace())
+                                if pending:
+                                    for notif in pending:
+                                        await ws.send_json({
+                                            "type": "notification",
+                                            "text": notif["content"],
+                                            "priority": notif.get("metadata", {}).get("_priority", "normal"),
+                                            "proactive": bool(notif.get("metadata", {}).get("_proactive")),
+                                            "cron": bool(notif.get("metadata", {}).get("_cron")),
+                                        })
+                                    mark_all_read(self._get_workspace())
+                                    logger.info("Delivered {} pending notifications to {}", len(pending), session_id)
+                            except Exception as e:
+                                logger.debug("Pending notification delivery error: {}", e)
                         continue
 
                     if action == "start":

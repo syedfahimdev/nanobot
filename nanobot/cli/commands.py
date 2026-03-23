@@ -638,16 +638,26 @@ def gateway(
         if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
             return response
 
-        if job.payload.deliver and job.payload.to and response:
+        if job.payload.deliver and response:
             should_notify = await evaluate_response(
                 response, job.payload.message, provider, agent.model,
             )
             if should_notify:
                 from nanobot.bus.events import OutboundMessage
+                # Deliver to the target channel (Discord, Telegram, etc.)
+                if job.payload.to:
+                    await bus.publish_outbound(OutboundMessage(
+                        channel=job.payload.channel or "cli",
+                        chat_id=job.payload.to,
+                        content=response,
+                    ))
+                # Also push to web_voice as a notification so it shows in Mawa chat
+                notify_content = f"**Scheduled Task: {job.name}**\n\n{response}"
                 await bus.publish_outbound(OutboundMessage(
-                    channel=job.payload.channel or "cli",
-                    chat_id=job.payload.to,
-                    content=response,
+                    channel="web_voice",
+                    chat_id="voice",
+                    content=notify_content,
+                    metadata={"_notification": True, "_cron": True, "_job_id": job.id},
                 ))
         return response
     cron.on_job = on_cron_job
