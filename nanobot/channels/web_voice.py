@@ -155,10 +155,11 @@ def _is_sentence_complete(text: str) -> bool:
     return False
 
 
-def _strip_markdown(text: str) -> str:
-    # Strip thinking/reasoning blocks that some models embed
-    text = re.sub(r"<think>[\s\S]*?</think>", "", text)
-    text = re.sub(r"<reasoning>[\s\S]*?</reasoning>", "", text)
+def _strip_markdown(text: str, keep_reasoning: bool = False) -> str:
+    # Strip thinking/reasoning blocks unless user wants them spoken
+    if not keep_reasoning:
+        text = re.sub(r"<think>[\s\S]*?</think>", "", text)
+        text = re.sub(r"<reasoning>[\s\S]*?</reasoning>", "", text)
     text = re.sub(r"```[\s\S]*?```", " ", text)
     text = re.sub(r"`[^`]+`", "", text)
     text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
@@ -535,7 +536,8 @@ class WebVoiceChannel(BaseChannel):
         # Streaming path handles TTS per-sentence via _tts_sentence metadata.
         # voice_final is the display-only message sent after streaming completes.
         if not _was_streamed and not meta.get("_voice_final"):
-            clean = _strip_markdown(msg.content)
+            _keep_reasoning = getattr(self, '_speak_reasoning', {}).get(session_id, False)
+            clean = _strip_markdown(msg.content, keep_reasoning=_keep_reasoning)
             if clean:
                 sentences = _split_sentences(clean)
                 for sentence in sentences:
@@ -2343,6 +2345,17 @@ copy();
                         if recv_task:
                             recv_task.cancel()
                             recv_task = None
+
+                        # Store voice preferences (per-session + workspace file for agent loop access)
+                        if not hasattr(self, '_speak_reasoning'):
+                            self._speak_reasoning = {}
+                        self._speak_reasoning[session_id] = bool(data.get("speak_reasoning", False))
+                        # Write to workspace so the agent loop can read it
+                        try:
+                            vp = self._get_workspace() / "voice_prefs.json"
+                            vp.write_text(json.dumps({"speak_reasoning": self._speak_reasoning.get(session_id, False)}))
+                        except Exception:
+                            pass
 
                         # Support client-specified encoding (for Opus codec)
                         client_encoding = data.get("encoding", "linear16")

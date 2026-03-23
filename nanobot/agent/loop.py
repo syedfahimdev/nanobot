@@ -1476,9 +1476,18 @@ class AgentLoop:
 
         if _is_voice_channel:
             # Streaming: fire TTS per sentence as tokens arrive
+            # Read speak_reasoning preference from workspace
+            _speak_reasoning = False
+            try:
+                _vp = self.workspace / "voice_prefs.json"
+                if _vp.exists():
+                    _speak_reasoning = json.loads(_vp.read_text()).get("speak_reasoning", False)
+            except Exception:
+                pass
+
             async def _on_sentence(sentence: str) -> None:
                 from nanobot.channels.web_voice import _strip_markdown
-                clean = _strip_markdown(sentence)
+                clean = _strip_markdown(sentence, keep_reasoning=_speak_reasoning)
                 if clean and len(clean) >= 3:
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel, chat_id=msg.chat_id,
