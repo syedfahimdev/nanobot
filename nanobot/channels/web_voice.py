@@ -434,6 +434,8 @@ class WebVoiceChannel(BaseChannel):
             await broadcast({"type": "response_chunk", "text": msg.content})
             for cid, _ in live_clients:
                 self._enqueue_tts(cid, msg.content)
+            # Mark that this session had streaming TTS so final response skips TTS
+            self._streamed_text[session_id] = True
             return
 
         # Proactive notification — send with notification type for browser push
