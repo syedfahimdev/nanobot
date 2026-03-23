@@ -304,6 +304,20 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/api/credentials", self._credentials_list_handler)
         self._app.router.add_post("/api/credentials", self._credentials_update_handler)
         self._app.router.add_get("/api/usage", self._usage_handler)
+        # Code features (all 15 — zero LLM)
+        self._app.router.add_get("/api/health/dashboard", self._health_dashboard_handler)
+        self._app.router.add_get("/api/suggestions/predictive", self._predictive_suggestions_handler)
+        self._app.router.add_post("/api/cleanup", self._cleanup_handler)
+        self._app.router.add_get("/api/sessions/search", self._session_search_handler)
+        self._app.router.add_get("/api/cron/dashboard", self._cron_dashboard_handler)
+        self._app.router.add_get("/api/anomalies", self._anomaly_handler)
+        self._app.router.add_get("/api/tools/favorites", self._tool_favorites_handler)
+        self._app.router.add_get("/api/schedule/templates", self._schedule_templates_handler)
+        self._app.router.add_get("/api/rules", self._rules_list_handler)
+        self._app.router.add_post("/api/rules", self._rules_save_handler)
+        self._app.router.add_get("/api/sessions/tags", self._session_tags_handler)
+        self._app.router.add_post("/api/sessions/tags", self._session_tags_set_handler)
+        self._app.router.add_get("/api/inbox/batch", self._inbox_batch_handler)
         self._app.router.add_get("/api/search", self._search_handler)
         self._app.router.add_get("/api/sessions", self._sessions_list_handler)
         self._app.router.add_get("/api/sessions/{key:.+}/export", self._session_export_handler)
@@ -1520,6 +1534,70 @@ class WebVoiceChannel(BaseChannel):
         count = mark_all_read(self._get_workspace())
         return web.json_response({"ok": True, "marked": count})
 
+    # ── Code Features API (all 15 — zero LLM tokens) ──────────────────
+
+    async def _health_dashboard_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.code_features import get_health_dashboard
+        return web.json_response(get_health_dashboard(self._get_workspace()))
+
+    async def _predictive_suggestions_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.code_features import get_predictive_suggestions
+        return web.json_response({"suggestions": get_predictive_suggestions(self._get_workspace())})
+
+    async def _cleanup_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.code_features import auto_cleanup
+        result = auto_cleanup(self._get_workspace())
+        return web.json_response(result)
+
+    async def _session_search_handler(self, request: web.Request) -> web.Response:
+        q = request.query.get("q", "").strip()
+        if not q:
+            return web.json_response({"results": []})
+        from nanobot.hooks.builtin.code_features import search_sessions
+        return web.json_response({"results": search_sessions(self._get_workspace(), q)})
+
+    async def _cron_dashboard_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.code_features import get_cron_dashboard
+        return web.json_response(get_cron_dashboard(self._get_workspace()))
+
+    async def _anomaly_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.code_features import detect_anomalies
+        return web.json_response({"anomalies": detect_anomalies(self._get_workspace())})
+
+    async def _tool_favorites_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.code_features import get_tool_favorites
+        return web.json_response({"favorites": get_tool_favorites(self._get_workspace())})
+
+    async def _schedule_templates_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.code_features import get_schedule_templates
+        return web.json_response({"templates": get_schedule_templates()})
+
+    async def _rules_list_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.code_features import load_rules
+        return web.json_response({"rules": load_rules(self._get_workspace())})
+
+    async def _rules_save_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.code_features import save_rules
+        body = await request.json()
+        save_rules(self._get_workspace(), body.get("rules", []))
+        return web.json_response({"ok": True})
+
+    async def _session_tags_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.code_features import get_session_tags
+        return web.json_response({"tags": get_session_tags(self._get_workspace())})
+
+    async def _session_tags_set_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.code_features import set_session_tags
+        body = await request.json()
+        set_session_tags(self._get_workspace(), body.get("session_key", ""), body.get("tags", []))
+        return web.json_response({"ok": True})
+
+    async def _inbox_batch_handler(self, request: web.Request) -> web.Response:
+        action = request.query.get("action", "list")
+        from nanobot.hooks.builtin.code_features import batch_process_inbox
+        result = await batch_process_inbox(self._get_workspace(), action)
+        return web.json_response(result)
+
     async def _intelligence_get_handler(self, request: web.Request) -> web.Response:
         """GET /api/intelligence — return current intelligence toggle states."""
         settings = _load_intelligence_settings(self._get_workspace())
@@ -1675,9 +1753,14 @@ class WebVoiceChannel(BaseChannel):
 
             # Always available
             suggestions.append({"text": "Check my goals", "icon": "target"})
-            suggestions.append({"text": "What do you remember about me?", "icon": "brain"})
 
-            return web.json_response({"suggestions": suggestions[:4]})
+            # [#2] Merge predictive suggestions from usage patterns
+            from nanobot.hooks.builtin.code_features import get_predictive_suggestions
+            for ps in get_predictive_suggestions(self._get_workspace()):
+                if not any(s["text"] == ps for s in suggestions):
+                    suggestions.append({"text": ps, "icon": "sparkles"})
+
+            return web.json_response({"suggestions": suggestions[:5]})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 

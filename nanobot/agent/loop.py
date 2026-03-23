@@ -1299,6 +1299,22 @@ class AgentLoop:
         # Reflection: check if this message is correcting the previous turn
         self._schedule_background(self.reflection.check_for_correction(key, msg.content))
 
+        # [#1] Hard budget enforcement — block if exceeded
+        from nanobot.hooks.builtin.code_features import enforce_budget
+        allowed, budget_reason = enforce_budget(self.workspace)
+        if not allowed:
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content=f"Budget exceeded: {budget_reason}",
+            )
+
+        # [#9] Auto-model downgrade when budget is high
+        from nanobot.hooks.builtin.code_features import get_downgrade_model
+        _original_model = self.model
+        downgrade = get_downgrade_model(self.model, self.workspace)
+        if downgrade:
+            self.model = downgrade
+
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
@@ -1406,6 +1422,9 @@ class AgentLoop:
             tools_used=[], iterations=0, duration_ms=_turn_elapsed,
             channel=msg.channel, chat_id=msg.chat_id,
         ))
+
+        # [#9] Restore original model after downgraded turn
+        self.model = _original_model
 
         # [#2] Update intent tracker with this turn's content
         intent_tracker.update(msg.content, final_content)
