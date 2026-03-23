@@ -51,7 +51,7 @@ _CORRECTION_PATTERNS: list[tuple[re.Pattern, float]] = [
     (re.compile(r"\bplease (just|actually|instead)\b", re.I), 0.5),
     (re.compile(r"\bno,\s", re.I), 0.5),
     # Implicit hints — sharing preferences
-    (re.compile(r"\bI (?:like|prefer|want) (?:it |you to )", re.I), 0.4),
+    (re.compile(r"\bI (?:like|prefer|want)\b", re.I), 0.4),
     (re.compile(r"\bfor (?:future|next|later)\b", re.I), 0.5),
     (re.compile(r"\bkeep (?:in mind|that)\b", re.I), 0.5),
 ]

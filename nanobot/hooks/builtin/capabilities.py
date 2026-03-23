@@ -164,6 +164,7 @@ def should_inject_capabilities(user_message: str) -> bool:
         r"\bwhat can you\b",
         r"\bwhat do you\b.*\b(do|know|have)\b",
         r"\bwhat are your\b.*\b(features?|capabilities?|tools?|skills?)\b",
+        r"\bwhat\b.*\bfeatures?\b.*\b(do|have|are)\b",
         r"\bcan you\b.*\b(do|help|handle)\b",
         r"\bhow do(?:es)?\b.*\bwork\b",
         r"\bturn (?:on|off)\b.*\bfeature\b",
@@ -172,7 +173,9 @@ def should_inject_capabilities(user_message: str) -> bool:
         r"\bhelp me\b.*\bunderstand\b",
         r"\bwhat('s| is)\b.*\b(available|possible)\b",
         r"\btell me about\b.*\b(yourself|your|mawa)\b",
-        r"\bhow does?\b.*\b(memory|learning|notification|goal|skill)\b",
+        r"\bhow does?\b.*\b(memory|learning|notification|goal|skill|feature)\b",
+        r"\bwhat\b.*\b(ability|abilities|power)\b",
+        r"\bshow me\b.*\b(features?|tools?|capabilities?)\b",
     ]
     msg_lower = user_message.lower()
     return any(re.search(p, msg_lower) for p in patterns)
