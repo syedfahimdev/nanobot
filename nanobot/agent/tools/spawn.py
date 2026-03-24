@@ -55,8 +55,59 @@ _SKILL_ATOMS: list[tuple[list[str], str]] = [
 ]
 
 
-def build_specialist_prompt(task: str) -> tuple[str, str]:
+def _find_relevant_skills(task: str, workspace_path: str = "") -> list[dict]:
+    """Find installed skills relevant to the task. Zero LLM cost."""
+    from pathlib import Path
+
+    workspace = Path(workspace_path) if workspace_path else Path("/root/.nanobot/workspace")
+    skills_dir = workspace / "skills"
+    if not skills_dir.exists():
+        return []
+
+    task_lower = task.lower()
+    relevant = []
+
+    for skill_dir in skills_dir.iterdir():
+        if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").exists():
+            continue
+
+        skill_name = skill_dir.name.replace("-", " ").replace("_", " ").lower()
+        skill_md = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+
+        # Check if skill name or description matches task keywords
+        # Extract description from frontmatter
+        desc = ""
+        for line in skill_md.split("\n")[:15]:
+            if line.startswith("description:"):
+                desc = line.split(":", 1)[1].strip().strip('"').strip("'").lower()
+                break
+
+        # Match by meaningful words (>2 chars, not stopwords)
+        stopwords = {"the", "and", "for", "with", "from", "this", "that", "your", "when", "what", "how", "use", "can"}
+        name_words = {w for w in skill_name.split() if len(w) > 2 and w not in stopwords}
+        task_words = {w for w in task_lower.split() if len(w) > 2 and w not in stopwords}
+        overlap = name_words & task_words
+
+        # Check description for keyword matches (substring to handle plurals)
+        desc_match = sum(1 for w in task_words if w in desc)
+
+        if len(overlap) >= 1 or desc_match >= 2:
+            relevant.append({
+                "name": skill_dir.name,
+                "path": str(skill_dir / "SKILL.md"),
+                "description": desc[:100],
+            })
+
+    return relevant[:3]  # Max 3 relevant skills
+
+
+def build_specialist_prompt(task: str, workspace: str = "") -> tuple[str, str]:
     """Dynamically build a specialist prompt from task analysis.
+
+    Includes:
+    - Composable skill atoms from task keywords
+    - Relevant installed skills (auto-detected)
+    - Marketplace hint if no matching skill installed
 
     Returns (prompt, label). Prompt is empty if task is too simple.
     Zero LLM cost — pure keyword matching and composition.
@@ -68,7 +119,10 @@ def build_specialist_prompt(task: str) -> tuple[str, str]:
         if any(kw in task_lower for kw in keywords):
             matched_skills.append(skill)
 
-    if not matched_skills:
+    # Check for relevant installed skills even if no atoms matched
+    relevant_skills = _find_relevant_skills(task, workspace)
+
+    if not matched_skills and not relevant_skills:
         return "", ""
 
     # Build a focused prompt from matched skills
@@ -84,6 +138,22 @@ def build_specialist_prompt(task: str) -> tuple[str, str]:
         if skill not in seen:
             seen.add(skill)
             prompt_parts.append(f"- {skill}")
+
+    # Attach relevant installed skills (already found above)
+    if relevant_skills:
+        prompt_parts.append("")
+        prompt_parts.append("## Available skills for this task:")
+        prompt_parts.append("Read the SKILL.md file BEFORE using any skill tools.")
+        for s in relevant_skills:
+            prompt_parts.append(f"- **{s['name']}**: `read_file(\"{s['path']}\")`")
+            if s["description"]:
+                prompt_parts.append(f"  {s['description']}")
+    else:
+        # No relevant skill installed — hint to search marketplace
+        prompt_parts.append("")
+        prompt_parts.append("## Skills:")
+        prompt_parts.append("If you need a specialized tool, search the marketplace: `skills_marketplace(action=\"search\", query=\"...\")`")
+        prompt_parts.append("Install with: `skills_marketplace(action=\"install\", skill_id=\"...\")`")
 
     prompt_parts.extend([
         "",
@@ -157,7 +227,8 @@ class SpawnTool(Tool):
 
     async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
         # Dynamically build specialist prompt from task
-        specialist_prompt, auto_label = build_specialist_prompt(task)
+        workspace = str(self._manager.workspace) if hasattr(self._manager, 'workspace') else ""
+        specialist_prompt, auto_label = build_specialist_prompt(task, workspace)
 
         enhanced_task = task
         if specialist_prompt:

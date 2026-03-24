@@ -1024,9 +1024,9 @@ class AgentLoop:
                 content=msg.content,
                 metadata={"_parallel": True},
             ))
-            # Build dynamic specialist prompt for the spawned agent
+            # Build dynamic specialist prompt with skill awareness
             from nanobot.agent.tools.spawn import build_specialist_prompt
-            specialist_prompt, specialist_label = build_specialist_prompt(msg.content)
+            specialist_prompt, specialist_label = build_specialist_prompt(msg.content, str(self.workspace))
             if specialist_prompt:
                 enhanced_task = f"{specialist_prompt}\n\n## Your Task\n{msg.content}"
                 label = f"{specialist_label}: {msg.content[:25]}"
