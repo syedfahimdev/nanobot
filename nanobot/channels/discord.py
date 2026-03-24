@@ -29,7 +29,7 @@ class DiscordConfig(Base):
     token: str = ""
     allow_from: list[str] = Field(default_factory=list)
     gateway_url: str = "wss://gateway.discord.gg/?v=10&encoding=json"
-    intents: int = 33281  # Includes GUILDS, GUILD_MESSAGES, MESSAGE_CONTENT
+    intents: int = 45697  # GUILDS, GUILD_MESSAGES, MESSAGE_CONTENT, DIRECT_MESSAGES, DIRECT_MESSAGE_REACTIONS
     group_policy: Literal["mention", "open"] = "mention"
 
 
@@ -303,6 +303,8 @@ class DiscordChannel(BaseChannel):
         guild_id = payload.get("guild_id")
         message_id = str(payload.get("id", ""))
 
+        logger.info("Discord message from {} in {}: {}", sender_id, channel_id, content[:60])
+
         if not sender_id or not channel_id:
             return
 
@@ -315,6 +317,7 @@ class DiscordChannel(BaseChannel):
                 self._seen_message_ids = set(list(self._seen_message_ids)[-250:])
 
         if not self.is_allowed(sender_id):
+            logger.warning("Discord: message from {} DENIED (allow_from={})", sender_id, getattr(self.config, 'allow_from', []))
             return
 
         # Check group channel policy (DMs always respond if is_allowed passes)
