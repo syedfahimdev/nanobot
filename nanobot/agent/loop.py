@@ -1566,10 +1566,18 @@ class AgentLoop:
                         metadata={"_tts_sentence": True},
                     ))
 
+            # Voice mode: cap iterations at 10 (vs 40 for text) to prevent long hangs
+            _saved_max = self.max_iterations
+            if _is_voice:
+                self.max_iterations = min(self.max_iterations, 10)
+
             final_content, _, all_msgs, turn_usage = await self._run_agent_loop_streaming(
                 initial_messages, on_sentence=_on_sentence,
                 on_progress=on_progress or _bus_progress,
             )
+
+            if _is_voice:
+                self.max_iterations = _saved_max
         else:
             final_content, _, all_msgs, turn_usage = await self._run_agent_loop(
                 initial_messages, on_progress=on_progress or _bus_progress,

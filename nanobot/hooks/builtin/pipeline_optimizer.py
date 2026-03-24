@@ -132,8 +132,11 @@ def filter_tools_by_intent(message: str, all_tool_names: list[str]) -> list[str]
                     matched_tools.add(tool)
 
     if not intent_found:
-        # No clear intent — send all tools (safety fallback)
-        return all_tool_names
+        # No clear intent — send core tools + search_tools for discovery
+        # Don't send all 30+ tools — the LLM can search_tools() on demand
+        matched_tools.add("search_tools")
+        matched_tools.add("spawn")
+        matched_tools.add("web_fetch")
 
     # Filter to only tools that exist in the registry
     filtered = [t for t in all_tool_names if t in matched_tools]
