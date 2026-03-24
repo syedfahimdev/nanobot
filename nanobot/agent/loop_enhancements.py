@@ -31,9 +31,10 @@ _settings_mtime: float = 0.0
 
 
 def load_intelligence_settings(workspace: Path) -> dict[str, bool]:
-    """Load intelligence toggles from workspace/intelligence.json with caching."""
+    """Load settings from unified mawa_settings.json with caching."""
     global _settings_cache, _settings_mtime
-    path = workspace / "intelligence.json"
+    from nanobot.hooks.builtin.feature_registry import load_settings
+    all_settings = load_settings(workspace)
     defaults = {
         "smartErrorRecovery": True,
         "intentTracking": True,
@@ -41,16 +42,7 @@ def load_intelligence_settings(workspace: Path) -> dict[str, bool]:
         "responseQualityGate": True,
         "mcpAutoReconnect": True,
     }
-    try:
-        if path.exists():
-            mtime = path.stat().st_mtime
-            if mtime != _settings_mtime:
-                _settings_cache = {**defaults, **json.loads(path.read_text())}
-                _settings_mtime = mtime
-            return _settings_cache
-    except Exception:
-        pass
-    return defaults
+    return {**defaults, **{k: all_settings.get(k, v) for k, v in defaults.items()}}
 
 
 # ---------------------------------------------------------------------------

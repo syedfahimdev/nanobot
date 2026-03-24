@@ -1,14 +1,11 @@
-"""Feature registry — single source of truth for all configurable features.
+"""Feature registry — single unified settings file for all configurable features.
 
-Exposes a manifest of every toggleable/configurable feature with:
-- Current value
-- Type (boolean, number, string, select)
-- Description
-- Category
-- API endpoint to change it
+All settings stored in ONE file: workspace/mawa_settings.json
+No more scattered intelligence.json, jarvis_settings.json, behavior_settings.json, etc.
 
-The frontend fetches this manifest and renders settings dynamically.
-No hardcoded feature lists in the frontend.
+The frontend fetches the manifest via GET /api/features
+and saves any value via POST /api/features {key, value}
+— no category routing needed, everything goes to the same file.
 """
 
 from __future__ import annotations
@@ -20,225 +17,201 @@ from typing import Any
 from loguru import logger
 
 
-def get_feature_manifest(workspace: Path) -> list[dict[str, Any]]:
-    """Build the complete feature manifest from all config sources."""
-    features = []
+# ── Unified settings file ───────────────────────────────────────────────────
 
-    # ── Intelligence toggles (from intelligence.json) ──
-    intel_path = workspace / "intelligence.json"
-    intel = {}
-    if intel_path.exists():
+_SETTINGS_FILE = "mawa_settings.json"
+_cache: dict[str, Any] = {}
+_cache_mtime: float = 0.0
+
+
+def _settings_path(workspace: Path) -> Path:
+    return workspace / _SETTINGS_FILE
+
+
+def load_settings(workspace: Path) -> dict[str, Any]:
+    """Load all settings from the unified file. Cached by mtime."""
+    global _cache, _cache_mtime
+    path = _settings_path(workspace)
+    try:
+        if path.exists():
+            mtime = path.stat().st_mtime
+            if mtime != _cache_mtime:
+                _cache = json.loads(path.read_text())
+                _cache_mtime = mtime
+            return _cache
+    except Exception:
+        pass
+    return {}
+
+
+def save_setting(workspace: Path, key: str, value: Any) -> None:
+    """Save a single setting to the unified file."""
+    global _cache, _cache_mtime
+    path = _settings_path(workspace)
+    data = {}
+    if path.exists():
         try:
-            intel = json.loads(intel_path.read_text())
+            data = json.loads(path.read_text())
         except Exception:
             pass
+    data[key] = value
+    path.write_text(json.dumps(data, indent=2))
+    _cache = data
+    _cache_mtime = path.stat().st_mtime
 
-    intel_features = [
-        ("smartErrorRecovery", "Smart Error Recovery",
-         "Classifies tool errors (timeout, auth, 404) with recovery hints",
-         "intelligence"),
-        ("intentTracking", "Intent Tracking",
-         "Tracks active topic across turns — resolves 'this', 'that', 'send it'",
-         "intelligence"),
-        ("dynamicContextBudget", "Dynamic Context Budget",
-         "Sizes tool results based on remaining context window",
-         "intelligence"),
-        ("responseQualityGate", "Response Quality Gate",
-         "Catches LLM deflections and retries with tools",
-         "intelligence"),
-        ("mcpAutoReconnect", "MCP Auto-Reconnect",
-         "Reconnects to MCP servers after 3 consecutive failures",
-         "intelligence"),
-    ]
-    for key, label, desc, cat in intel_features:
-        features.append({
-            "key": key, "label": label, "desc": desc, "category": cat,
-            "type": "boolean", "value": intel.get(key, True),
-            "endpoint": "/api/intelligence", "method": "POST",
-        })
 
-    # ── Quiet hours ──
+def save_settings_bulk(workspace: Path, updates: dict[str, Any]) -> None:
+    """Save multiple settings at once."""
+    global _cache, _cache_mtime
+    path = _settings_path(workspace)
+    data = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text())
+        except Exception:
+            pass
+    data.update(updates)
+    path.write_text(json.dumps(data, indent=2))
+    _cache = data
+    _cache_mtime = path.stat().st_mtime
+
+
+def get_setting(workspace: Path, key: str, default: Any = None) -> Any:
+    """Get a single setting value."""
+    return load_settings(workspace).get(key, default)
+
+
+# ── Migrate old scattered files into unified ────────────────────────────────
+
+def migrate_old_settings(workspace: Path) -> int:
+    """Merge old scattered settings files into the unified file. Run once."""
+    migrated = 0
+    data = {}
+
+    old_files = {
+        "intelligence.json": None,  # Direct key merge
+        "jarvis_settings.json": None,
+        "behavior_settings.json": None,
+        "maintenance_settings.json": None,
+        "voice_prefs.json": None,
+    }
+
+    # Quiet hours has different key names
     qh_path = workspace / "quiet_hours.json"
-    qh = {"enabled": True, "start": 22, "end": 7}
     if qh_path.exists():
         try:
-            qh = {**qh, **json.loads(qh_path.read_text())}
+            qh = json.loads(qh_path.read_text())
+            data["quietHoursEnabled"] = qh.get("enabled", True)
+            data["quietHoursStart"] = qh.get("start", 22)
+            data["quietHoursEnd"] = qh.get("end", 7)
+            migrated += 1
         except Exception:
             pass
 
-    features.append({
-        "key": "quietHoursEnabled", "label": "Quiet Hours",
-        "desc": "Defer non-urgent notifications during quiet hours. High priority always goes through.",
-        "category": "notifications", "type": "boolean", "value": qh.get("enabled", True),
-        "endpoint": "/api/quiet-hours", "method": "POST",
-    })
-    features.append({
-        "key": "quietHoursStart", "label": "Quiet Hours Start",
-        "desc": "Hour to start quiet mode (24h format)",
-        "category": "notifications", "type": "number", "value": qh.get("start", 22),
-        "min": 0, "max": 23,
-        "endpoint": "/api/quiet-hours", "method": "POST",
-    })
-    features.append({
-        "key": "quietHoursEnd", "label": "Quiet Hours End",
-        "desc": "Hour to end quiet mode (24h format)",
-        "category": "notifications", "type": "number", "value": qh.get("end", 7),
-        "min": 0, "max": 23,
-        "endpoint": "/api/quiet-hours", "method": "POST",
-    })
-
-    # ── Budget ──
-    from nanobot.hooks.builtin.cost_budget import load_budget
-    budget = load_budget(workspace)
-    features.append({
-        "key": "daily_limit", "label": "Daily Budget ($)",
-        "desc": "Maximum daily spending on LLM calls. Set to 0 to disable.",
-        "category": "budget", "type": "number", "value": budget.get("daily_limit", 5.0),
-        "min": 0, "max": 100, "step": 0.5,
-        "endpoint": "/api/budget", "method": "POST",
-    })
-    features.append({
-        "key": "weekly_limit", "label": "Weekly Budget ($)",
-        "desc": "Maximum weekly spending on LLM calls.",
-        "category": "budget", "type": "number", "value": budget.get("weekly_limit", 25.0),
-        "min": 0, "max": 500, "step": 1,
-        "endpoint": "/api/budget", "method": "POST",
-    })
-    features.append({
-        "key": "enforce", "label": "Hard Budget Enforcement",
-        "desc": "Block LLM calls when budget is exceeded (not just warn).",
-        "category": "budget", "type": "boolean", "value": budget.get("enforce", False),
-        "endpoint": "/api/budget", "method": "POST",
-    })
-    features.append({
-        "key": "auto_switch_model", "label": "Budget Fallback Model",
-        "desc": "Auto-switch to this cheaper model when budget is >80%. Leave empty to disable.",
-        "category": "budget", "type": "string", "value": budget.get("auto_switch_model", ""),
-        "placeholder": "e.g., claude-haiku-3-5",
-        "endpoint": "/api/budget", "method": "POST",
-    })
-
-    # ── Maintenance ──
-    features.extend([
-        {
-            "key": "historyAutoArchive", "label": "History Auto-Archive",
-            "desc": "Split HISTORY.md into monthly chunks when it exceeds 100KB. Runs on heartbeat.",
-            "category": "maintenance", "type": "boolean", "value": True,
-            "endpoint": "/api/maintenance/settings", "method": "POST",
-        },
-        {
-            "key": "sessionAutoCleanup", "label": "Session Auto-Cleanup",
-            "desc": "Delete inactive sessions older than 7 days (keeps 5 most recent).",
-            "category": "maintenance", "type": "boolean", "value": True,
-            "endpoint": "/api/maintenance/settings", "method": "POST",
-        },
-        {
-            "key": "contactAutoExtract", "label": "Contact Auto-Extract",
-            "desc": "Automatically extract contacts (names, emails) from memory on heartbeat.",
-            "category": "maintenance", "type": "boolean", "value": True,
-            "endpoint": "/api/maintenance/settings", "method": "POST",
-        },
-    ])
-
-    # ── Agent behavior ──
-    features.extend([
-        {
-            "key": "languageDetection", "label": "Multi-Language Detection",
-            "desc": "Detect Bangla, Hindi, Urdu, Spanish, French, Arabic and respond in user's language.",
-            "category": "behavior", "type": "boolean", "value": True,
-            "endpoint": "/api/behavior", "method": "POST",
-        },
-        {
-            "key": "destructiveConfirmation", "label": "Destructive Action Confirmation",
-            "desc": "Ask for confirmation before delete all, clear, reset, rm -rf.",
-            "category": "behavior", "type": "boolean", "value": True,
-            "endpoint": "/api/behavior", "method": "POST",
-        },
-        {
-            "key": "responseCaching", "label": "Response Caching",
-            "desc": "Cache identical questions for 5 minutes — skip LLM on repeat.",
-            "category": "behavior", "type": "boolean", "value": True,
-            "endpoint": "/api/behavior", "method": "POST",
-        },
-        {
-            "key": "frustrationDetection", "label": "Frustration Detection",
-            "desc": "Detect user frustration (caps, !!!, angry words) and respond empathetically.",
-            "category": "behavior", "type": "boolean", "value": True,
-            "endpoint": "/api/behavior", "method": "POST",
-        },
-        {
-            "key": "messageDedup", "label": "Message Dedup",
-            "desc": "Drop duplicate messages sent within 30 seconds (network glitch protection).",
-            "category": "behavior", "type": "boolean", "value": True,
-            "endpoint": "/api/behavior", "method": "POST",
-        },
-        {
-            "key": "greetingInterceptor", "label": "Smart Greetings",
-            "desc": "Answer 'hello' with a time-aware greeting + goals context (zero LLM tokens).",
-            "category": "behavior", "type": "boolean", "value": True,
-            "endpoint": "/api/behavior", "method": "POST",
-        },
-        {
-            "key": "mathInterceptor", "label": "Math Interceptor",
-            "desc": "Answer math questions (15% of $347) with pure code — zero LLM tokens.",
-            "category": "behavior", "type": "boolean", "value": True,
-            "endpoint": "/api/behavior", "method": "POST",
-        },
-    ])
-
-    # ── Jarvis proactive features ──
-    jarvis_path = workspace / "jarvis_settings.json"
-    jarvis = {}
-    if jarvis_path.exists():
+    # Budget has its own path
+    budget_path = workspace / "usage" / "budget.json"
+    if budget_path.exists():
         try:
-            jarvis = json.loads(jarvis_path.read_text())
+            budget = json.loads(budget_path.read_text())
+            for k, v in budget.items():
+                data[f"budget_{k}"] = v
+            migrated += 1
         except Exception:
             pass
 
-    jarvis_features = [
-        ("morningPrep", "Morning Prep", "Auto-generate briefing from goals, bills, relationships, habits before you wake up.", True),
-        ("crossSignalCorrelation", "Cross-Signal Correlation", "Connect dots: travel+weather, bills+dates, goals+deadlines → proactive alerts.", True),
-        ("meetingIntelligence", "Meeting Intelligence", "Prep before meetings — pull relevant emails, notes about attendees.", True),
-        ("relationshipTracker", "Relationship Tracker", "Track contact frequency. Alert when you haven't talked to someone in 2+ weeks.", True),
-        ("financialPulse", "Financial Pulse", "Track AI spending trends, bill countdown, unusual charges.", True),
-        ("projectTracker", "Project Tracker", "Multi-day tasks with progress tracking across sessions.", True),
-        ("dailyDigest", "Daily Digest", "End-of-day summary: usage, goals completed, new learnings.", True),
-        ("priorityInbox", "Priority Inbox", "Score messages by urgency (keywords, caps, sender).", True),
-        ("delegationQueue", "Delegation Queue", "Async tasks Mawa checks on periodically — 'handle this over the week'.", True),
-        ("routineDetection", "Routine Detection", "Detect daily patterns and offer to automate them.", True),
-        ("decisionMemory", "Decision Memory", "Remember WHY you made decisions for future reference.", True),
-        ("peoplePrepBeforeCalls", "People Prep", "Before a call, surface your last interactions with the person.", True),
-    ]
-    for key, label, desc, default in jarvis_features:
-        features.append({
-            "key": key, "label": label, "desc": desc,
-            "category": "jarvis", "type": "boolean",
-            "value": jarvis.get(key, default),
-            "endpoint": "/api/jarvis/settings", "method": "POST",
-        })
+    # Direct merge files
+    for fname in old_files:
+        path = workspace / fname
+        if path.exists():
+            try:
+                old = json.loads(path.read_text())
+                data.update(old)
+                migrated += 1
+            except Exception:
+                pass
 
-    # Jarvis configurable numbers
-    features.append({
-        "key": "relationshipReminderDays", "label": "Relationship Reminder (days)",
-        "desc": "Alert when you haven't contacted someone for this many days.",
-        "category": "jarvis", "type": "number", "value": jarvis.get("relationshipReminderDays", 14),
-        "min": 3, "max": 90,
-        "endpoint": "/api/jarvis/settings", "method": "POST",
-    })
-    features.append({
-        "key": "delegationCheckHours", "label": "Delegation Check Interval (hours)",
-        "desc": "How often to check on delegated tasks.",
-        "category": "jarvis", "type": "number", "value": jarvis.get("delegationCheckHours", 24),
-        "min": 1, "max": 168,
-        "endpoint": "/api/jarvis/settings", "method": "POST",
-    })
-    features.append({
-        "key": "correlationLookaheadDays", "label": "Correlation Lookahead (days)",
-        "desc": "How far ahead to scan for correlated events (bills, travel, deadlines).",
-        "category": "jarvis", "type": "number", "value": jarvis.get("correlationLookaheadDays", 3),
-        "min": 1, "max": 14,
-        "endpoint": "/api/jarvis/settings", "method": "POST",
-    })
+    if data:
+        # Load existing unified settings first
+        path = _settings_path(workspace)
+        existing = {}
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text())
+            except Exception:
+                pass
+        # Old values don't overwrite existing unified values
+        merged = {**data, **existing}
+        path.write_text(json.dumps(merged, indent=2))
+        logger.info("Migrated {} old settings files into {}", migrated, _SETTINGS_FILE)
+
+    return migrated
+
+
+# ── Feature manifest ────────────────────────────────────────────────────────
+
+# All features defined in ONE place with their defaults
+_FEATURE_DEFS: list[dict[str, Any]] = [
+    # Intelligence
+    {"key": "smartErrorRecovery", "label": "Smart Error Recovery", "desc": "Classifies tool errors (timeout, auth, 404) with recovery hints.", "category": "intelligence", "type": "boolean", "default": True},
+    {"key": "intentTracking", "label": "Intent Tracking", "desc": "Tracks active topic across turns — resolves 'this', 'that', 'send it'.", "category": "intelligence", "type": "boolean", "default": True},
+    {"key": "dynamicContextBudget", "label": "Dynamic Context Budget", "desc": "Sizes tool results based on remaining context window.", "category": "intelligence", "type": "boolean", "default": True},
+    {"key": "responseQualityGate", "label": "Response Quality Gate", "desc": "Catches LLM deflections and retries with tools.", "category": "intelligence", "type": "boolean", "default": True},
+    {"key": "mcpAutoReconnect", "label": "MCP Auto-Reconnect", "desc": "Reconnects to MCP servers after 3 consecutive failures.", "category": "intelligence", "type": "boolean", "default": True},
+
+    # Behavior
+    {"key": "languageDetection", "label": "Multi-Language Detection", "desc": "Detect Bangla, Hindi, Urdu, Spanish, French, Arabic and respond in user's language.", "category": "behavior", "type": "boolean", "default": True},
+    {"key": "destructiveConfirmation", "label": "Destructive Action Confirmation", "desc": "Ask for confirmation before delete all, clear, reset, rm -rf.", "category": "behavior", "type": "boolean", "default": True},
+    {"key": "responseCaching", "label": "Response Caching", "desc": "Cache identical questions for 5 minutes — skip LLM on repeat.", "category": "behavior", "type": "boolean", "default": True},
+    {"key": "frustrationDetection", "label": "Frustration Detection", "desc": "Detect user frustration (caps, !!!, angry words) and respond empathetically.", "category": "behavior", "type": "boolean", "default": True},
+    {"key": "messageDedup", "label": "Message Dedup", "desc": "Drop duplicate messages sent within 30 seconds.", "category": "behavior", "type": "boolean", "default": True},
+    {"key": "greetingInterceptor", "label": "Smart Greetings", "desc": "Answer 'hello' with a time-aware greeting + goals context (zero tokens).", "category": "behavior", "type": "boolean", "default": True},
+    {"key": "mathInterceptor", "label": "Math Interceptor", "desc": "Answer math questions (15% of $347) with pure code — zero tokens.", "category": "behavior", "type": "boolean", "default": True},
+
+    # Jarvis Intelligence
+    {"key": "morningPrep", "label": "Morning Prep", "desc": "Auto-generate briefing from goals, bills, relationships, habits.", "category": "jarvis", "type": "boolean", "default": True},
+    {"key": "crossSignalCorrelation", "label": "Cross-Signal Correlation", "desc": "Connect dots: travel+weather, bills+dates, goals+deadlines → alerts.", "category": "jarvis", "type": "boolean", "default": True},
+    {"key": "meetingIntelligence", "label": "Meeting Intelligence", "desc": "Prep before meetings — pull relevant emails, attendee notes.", "category": "jarvis", "type": "boolean", "default": True},
+    {"key": "relationshipTracker", "label": "Relationship Tracker", "desc": "Track contact frequency. Alert when you haven't talked to someone.", "category": "jarvis", "type": "boolean", "default": True},
+    {"key": "financialPulse", "label": "Financial Pulse", "desc": "Track AI spending trends, bill countdown, unusual charges.", "category": "jarvis", "type": "boolean", "default": True},
+    {"key": "projectTracker", "label": "Project Tracker", "desc": "Multi-day tasks with progress tracking across sessions.", "category": "jarvis", "type": "boolean", "default": True},
+    {"key": "dailyDigest", "label": "Daily Digest", "desc": "End-of-day summary: usage, goals, learnings.", "category": "jarvis", "type": "boolean", "default": True},
+    {"key": "priorityInbox", "label": "Priority Inbox", "desc": "Score messages by urgency (keywords, caps, sender).", "category": "jarvis", "type": "boolean", "default": True},
+    {"key": "delegationQueue", "label": "Delegation Queue", "desc": "Async tasks Mawa checks on periodically.", "category": "jarvis", "type": "boolean", "default": True},
+    {"key": "routineDetection", "label": "Routine Detection", "desc": "Detect daily patterns and offer to automate them.", "category": "jarvis", "type": "boolean", "default": True},
+    {"key": "decisionMemory", "label": "Decision Memory", "desc": "Remember WHY you made decisions for future reference.", "category": "jarvis", "type": "boolean", "default": True},
+    {"key": "peoplePrepBeforeCalls", "label": "People Prep", "desc": "Before a call, surface your last interactions with the person.", "category": "jarvis", "type": "boolean", "default": True},
+    {"key": "relationshipReminderDays", "label": "Relationship Reminder (days)", "desc": "Alert when you haven't contacted someone for this many days.", "category": "jarvis", "type": "number", "default": 14, "min": 3, "max": 90},
+    {"key": "delegationCheckHours", "label": "Delegation Check (hours)", "desc": "How often to check on delegated tasks.", "category": "jarvis", "type": "number", "default": 24, "min": 1, "max": 168},
+    {"key": "correlationLookaheadDays", "label": "Correlation Lookahead (days)", "desc": "How far ahead to scan for correlated events.", "category": "jarvis", "type": "number", "default": 3, "min": 1, "max": 14},
+
+    # Notifications
+    {"key": "quietHoursEnabled", "label": "Quiet Hours", "desc": "Defer non-urgent notifications during quiet hours.", "category": "notifications", "type": "boolean", "default": True},
+    {"key": "quietHoursStart", "label": "Quiet Start (hour)", "desc": "Hour to start quiet mode (24h).", "category": "notifications", "type": "number", "default": 22, "min": 0, "max": 23},
+    {"key": "quietHoursEnd", "label": "Quiet End (hour)", "desc": "Hour to end quiet mode (24h).", "category": "notifications", "type": "number", "default": 7, "min": 0, "max": 23},
+
+    # Budget
+    {"key": "budget_daily_limit", "label": "Daily Budget ($)", "desc": "Maximum daily spending on LLM calls.", "category": "budget", "type": "number", "default": 5.0, "min": 0, "max": 100, "step": 0.5},
+    {"key": "budget_weekly_limit", "label": "Weekly Budget ($)", "desc": "Maximum weekly spending.", "category": "budget", "type": "number", "default": 25.0, "min": 0, "max": 500, "step": 1},
+    {"key": "budget_enforce", "label": "Hard Budget Enforcement", "desc": "Block LLM calls when budget exceeded (not just warn).", "category": "budget", "type": "boolean", "default": False},
+    {"key": "budget_auto_switch_model", "label": "Budget Fallback Model", "desc": "Auto-switch to this cheaper model when budget >80%.", "category": "budget", "type": "string", "default": "", "placeholder": "e.g. claude-haiku-3-5"},
+
+    # Maintenance
+    {"key": "historyAutoArchive", "label": "History Auto-Archive", "desc": "Split HISTORY.md into monthly chunks when it exceeds 100KB.", "category": "maintenance", "type": "boolean", "default": True},
+    {"key": "sessionAutoCleanup", "label": "Session Auto-Cleanup", "desc": "Delete inactive sessions older than 7 days.", "category": "maintenance", "type": "boolean", "default": True},
+    {"key": "contactAutoExtract", "label": "Contact Auto-Extract", "desc": "Extract contacts from memory on heartbeat.", "category": "maintenance", "type": "boolean", "default": True},
+]
+
+
+def get_feature_manifest(workspace: Path) -> list[dict[str, Any]]:
+    """Build the complete feature manifest from unified settings."""
+    settings = load_settings(workspace)
+    features = []
+
+    for fdef in _FEATURE_DEFS:
+        feature = dict(fdef)
+        feature["value"] = settings.get(fdef["key"], fdef["default"])
+        feature.pop("default", None)
+        features.append(feature)
 
     return features
 

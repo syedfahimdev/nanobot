@@ -1820,58 +1820,32 @@ class WebVoiceChannel(BaseChannel):
         })
 
     async def _features_save_handler(self, request: web.Request) -> web.Response:
-        """POST /api/features — save a feature value. Body: {key, value}."""
+        """POST /api/features — save a feature value to unified mawa_settings.json.
+
+        Body: {key, value} — no category routing needed.
+        """
         body = await request.json()
         key = body.get("key", "")
         value = body.get("value")
-        category = body.get("category", "")
 
-        ws = self._get_workspace()
-
-        # Route to the right config file based on category
-        if category == "intelligence":
-            path = ws / "intelligence.json"
-            data = json.loads(path.read_text()) if path.exists() else {}
-            data[key] = value
-            path.write_text(json.dumps(data, indent=2))
-        elif category == "notifications":
-            path = ws / "quiet_hours.json"
-            data = json.loads(path.read_text()) if path.exists() else {}
-            field_map = {"quietHoursEnabled": "enabled", "quietHoursStart": "start", "quietHoursEnd": "end"}
-            data[field_map.get(key, key)] = value
-            path.write_text(json.dumps(data, indent=2))
-        elif category == "budget":
-            from nanobot.hooks.builtin.cost_budget import load_budget, save_budget
-            budget = load_budget(ws)
-            budget[key] = value
-            save_budget(ws, budget)
-        elif category == "jarvis":
-            path = ws / "jarvis_settings.json"
-            data = json.loads(path.read_text()) if path.exists() else {}
-            data[key] = value
-            path.write_text(json.dumps(data, indent=2))
-        elif category in ("behavior", "maintenance"):
-            path = ws / f"{category}_settings.json"
-            data = json.loads(path.read_text()) if path.exists() else {}
-            data[key] = value
-            path.write_text(json.dumps(data, indent=2))
+        from nanobot.hooks.builtin.feature_registry import save_setting
+        save_setting(self._get_workspace(), key, value)
 
         return web.json_response({"ok": True, "key": key, "value": value})
 
     async def _budget_save_handler(self, request: web.Request) -> web.Response:
+        """Legacy — redirects to unified settings."""
         body = await request.json()
-        from nanobot.hooks.builtin.cost_budget import load_budget, save_budget
-        budget = load_budget(self._get_workspace())
-        budget.update(body)
-        save_budget(self._get_workspace(), budget)
+        from nanobot.hooks.builtin.feature_registry import save_settings_bulk
+        prefixed = {f"budget_{k}": v for k, v in body.items()}
+        save_settings_bulk(self._get_workspace(), prefixed)
         return web.json_response({"ok": True})
 
     async def _behavior_save_handler(self, request: web.Request) -> web.Response:
+        """Legacy — redirects to unified settings."""
         body = await request.json()
-        path = self._get_workspace() / "behavior_settings.json"
-        data = json.loads(path.read_text()) if path.exists() else {}
-        data.update(body)
-        path.write_text(json.dumps(data, indent=2))
+        from nanobot.hooks.builtin.feature_registry import save_settings_bulk
+        save_settings_bulk(self._get_workspace(), body)
         return web.json_response({"ok": True})
 
     async def _maintenance_settings_handler(self, request: web.Request) -> web.Response:
