@@ -174,7 +174,11 @@ def get_response_hint(message: str, channel: str) -> str:
 
     # Channel-based length
     if channel in ("discord_voice", "web_voice"):
-        hints.append("Keep response SHORT (1-3 sentences) — this is voice mode, the user is listening.")
+        hints.append(
+            "Keep response SHORT (1-3 sentences) — this is voice mode, the user is listening. "
+            "Do NOT chain multiple tool calls — use at most 1-2 simple ones. "
+            "Prefer answering from memory over calling tools. Never loop on the same tool."
+        )
     elif channel == "telegram":
         hints.append("Keep response concise — this is a chat message.")
 
