@@ -153,6 +153,9 @@ When the user says "send this", "share that", "forward it", or uses pronouns ref
 - "run this in background" / "deploy and let me know" / long-running tasks → call `background_exec(action="run", command="...")`
 - Check background job status: `background_exec(action="status", job_id="bg_N")`
 - When a background job completes, proactively tell the user the result — don't wait to be asked.
+- "turn on/off X" / "enable/disable X" / "change X setting" → call `settings(action="search", query="X")` to find the key, then `settings(action="set", key="...", value=...)`
+- "what can you do" / "what features" / "show settings" → call `settings(action="list")` to show all 37 configurable features
+- "what is X set to" / "check setting" → call `settings(action="get", key="...")`
 
 ## Skill Workflow Rules — CRITICAL
 - BEFORE using a skill, read its SKILL.md file first. The file contains the exact workflow, phases, and rules.

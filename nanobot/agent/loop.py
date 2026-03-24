@@ -231,6 +231,9 @@ class AgentLoop:
         # Credentials — securely store and use passwords
         from nanobot.agent.tools.credentials import CredentialsTool
         self.tools.register(CredentialsTool())
+        # Settings tool — lets Mawa read/change her own configuration
+        from nanobot.agent.tools.settings_tool import SettingsTool
+        self.tools.register(SettingsTool(self.workspace))
         # Native Playwright browser
         try:
             from nanobot.agent.tools.browser import BrowserTool
