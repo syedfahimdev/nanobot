@@ -222,6 +222,8 @@ _FEATURE_DEFS: list[dict[str, Any]] = [
     {"key": "voiceTtsProvider", "label": "Voice TTS Provider", "desc": "TTS engine. deepgram (fast EN), fish-speech (80+ langs), elevenlabs (premium quality, 29 langs).", "category": "media", "type": "string", "default": "deepgram", "placeholder": "deepgram, fish-speech, elevenlabs"},
     {"key": "voiceSttLanguage", "label": "STT Language (listen)", "desc": "What language you speak. multi=auto-detect, en=English, bn=Bengali, hi=Hindi. Can switch during voice call.", "category": "media", "type": "string", "default": "multi", "placeholder": "multi, en, bn, hi, zh, ur, ar, es, fr"},
     {"key": "voiceTtsLanguage", "label": "TTS Language (respond)", "desc": "What language Mawa speaks back. en=English, bn=Bengali, hi=Hindi. Independent from STT language.", "category": "media", "type": "string", "default": "en", "placeholder": "en, bn, hi, zh, ur, ar, es, fr"},
+    {"key": "elevenlabsVoiceId", "label": "ElevenLabs Voice", "desc": "Voice ID for ElevenLabs TTS. Use built-in or custom cloned voice.", "category": "media", "type": "string", "default": "21m00Tcm4TlvDq8ikWAM", "placeholder": "voice ID"},
+    {"key": "elevenlabsModel", "label": "ElevenLabs Model", "desc": "Flash (~75ms, fast) or Multilingual v2 (29 langs, best quality).", "category": "media", "type": "string", "default": "eleven_flash_v2_5", "placeholder": "eleven_flash_v2_5, eleven_multilingual_v2, eleven_turbo_v2_5"},
 
     # Phone calls
     {"key": "phoneCallEnabled", "label": "Phone Calls", "desc": "Allow Mawa to make outbound phone calls via Twilio.", "category": "media", "type": "boolean", "default": True},

@@ -297,11 +297,13 @@ async def generate_tts(
             return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
         elif provider_name == "elevenlabs":
             el_key = _get_elevenlabs_key()
-            voice_id = voice_id or "21m00Tcm4TlvDq8ikWAM"  # Rachel default
+            el_voice = voice_id or get_setting(workspace, "elevenlabsVoiceId", "21m00Tcm4TlvDq8ikWAM")
+            el_model = get_setting(workspace, "elevenlabsModel", "eleven_flash_v2_5")
+            use_flash = "flash" in el_model
             if not el_key:
                 logger.warning("ElevenLabs: no API key, falling back to Deepgram")
                 return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
-            result = await _tts_elevenlabs(clean, el_key, voice_id)
+            result = await _tts_elevenlabs(clean, el_key, el_voice, flash=use_flash)
             if result:
                 return result
             logger.warning("ElevenLabs TTS failed, falling back to Deepgram")
@@ -440,14 +442,9 @@ def _get_elevenlabs_key() -> str | None:
     return None
 
 
-async def _tts_elevenlabs(text: str, api_key: str, voice_id: str = "21m00Tcm4TlvDq8ikWAM", flash: bool = True) -> bytes | None:
-    """ElevenLabs TTS — Flash (~75ms) or Multilingual v2 (~300ms).
-
-    Flash (eleven_flash_v2_5): ultra-low latency, great for voice chat
-    Multilingual (eleven_multilingual_v2): higher quality, 29 languages
-    """
-    # Flash for voice chat speed, multilingual for quality/languages
-    model = "eleven_flash_v2_5" if flash else "eleven_multilingual_v2"
+async def _tts_elevenlabs(text: str, api_key: str, voice_id: str = "21m00Tcm4TlvDq8ikWAM", flash: bool = True, model_id: str = "") -> bytes | None:
+    """ElevenLabs TTS — Flash, Turbo, or Multilingual v2."""
+    model = model_id or ("eleven_flash_v2_5" if flash else "eleven_multilingual_v2")
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
