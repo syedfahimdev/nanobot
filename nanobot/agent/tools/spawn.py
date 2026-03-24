@@ -9,87 +9,104 @@ if TYPE_CHECKING:
     from nanobot.agent.subagent import SubagentManager
 
 
-# Specialist profiles — each has a focused system prompt addition
-SPECIALIST_PROFILES = {
-    "researcher": {
-        "label": "Deep Researcher",
-        "prompt": (
-            "You are a thorough researcher. Your job is to find comprehensive, accurate information.\n"
-            "- Search multiple sources, not just one\n"
-            "- Compare and cross-reference findings\n"
-            "- Note conflicting information\n"
-            "- Cite sources (URLs) for key facts\n"
-            "- Organize findings with headings and bullet points\n"
-            "- Include prices, dates, ratings where relevant"
-        ),
-    },
-    "analyst": {
-        "label": "Data Analyst",
-        "prompt": (
-            "You are a data analyst. Your job is to analyze information and provide insights.\n"
-            "- Extract key metrics and numbers\n"
-            "- Compare options with pros/cons tables\n"
-            "- Identify trends and patterns\n"
-            "- Provide clear recommendations with reasoning\n"
-            "- Use tables and structured formats"
-        ),
-    },
-    "writer": {
-        "label": "Content Writer",
-        "prompt": (
-            "You are a skilled writer. Your job is to create well-written content.\n"
-            "- Match the requested tone and style\n"
-            "- Be concise but complete\n"
-            "- Use proper formatting (headings, paragraphs, lists)\n"
-            "- Proofread for grammar and clarity\n"
-            "- Adapt to the audience (professional, casual, technical)"
-        ),
-    },
-    "coder": {
-        "label": "Code Specialist",
-        "prompt": (
-            "You are a coding specialist. Your job is to write, debug, or analyze code.\n"
-            "- Write clean, well-commented code\n"
-            "- Follow the project's existing patterns\n"
-            "- Test your work with exec when possible\n"
-            "- Handle errors gracefully\n"
-            "- Explain key decisions"
-        ),
-    },
-    "planner": {
-        "label": "Project Planner",
-        "prompt": (
-            "You are a project planner. Your job is to break down complex tasks.\n"
-            "- Create step-by-step plans with clear milestones\n"
-            "- Identify dependencies between steps\n"
-            "- Estimate effort for each step\n"
-            "- Flag risks and blockers\n"
-            "- Prioritize by impact"
-        ),
-    },
-}
+# ── Dynamic specialist prompt builder ────────────────────────────────────────
+# Generates a focused specialist prompt on-the-fly based on task analysis.
+# No hardcoded profiles — builds from task characteristics.
 
-# Auto-detect specialist from task keywords
-_SPECIALIST_KEYWORDS = {
-    "researcher": ["research", "find", "look up", "compare options", "best", "review", "investigate"],
-    "analyst": ["analyze", "compare", "pros and cons", "which is better", "evaluate", "metrics"],
-    "writer": ["write", "draft", "compose", "email", "letter", "report", "document", "blog"],
-    "coder": ["code", "script", "debug", "fix the bug", "implement", "refactor", "program"],
-    "planner": ["plan", "break down", "steps to", "roadmap", "timeline", "organize", "schedule"],
-}
+import re
+
+# Skill atoms — composable behaviors detected from task keywords
+_SKILL_ATOMS: list[tuple[list[str], str]] = [
+    # Research skills
+    (["research", "find", "look up", "search for", "investigate"], "Search multiple sources, not just one. Cross-reference findings. Cite URLs."),
+    (["best", "top", "recommended", "review"], "Include ratings, reviews, and rankings where available. Compare at least 3 options."),
+    (["price", "cost", "cheap", "expensive", "budget", "deal"], "Include prices, costs, and value comparisons. Note any deals or discounts."),
+
+    # Analysis skills
+    (["compare", "vs", "versus", "difference", "pros and cons"], "Create a comparison table with pros/cons for each option. Give a clear recommendation."),
+    (["analyze", "evaluate", "assess", "metrics"], "Extract key metrics and numbers. Identify trends and patterns. Provide data-driven insights."),
+
+    # Writing skills
+    (["write", "draft", "compose"], "Write in a clear, professional style. Proofread for grammar."),
+    (["email", "letter", "message to"], "Use appropriate greeting and sign-off. Match the formality to the recipient."),
+    (["report", "document", "summary"], "Use headings, sections, and bullet points. Include an executive summary."),
+    (["blog", "article", "post"], "Write engagingly with a clear hook. Use subheadings for scanability."),
+
+    # Coding skills
+    (["code", "script", "program", "implement"], "Write clean, well-commented code. Follow existing project patterns."),
+    (["debug", "fix", "error", "bug"], "Read the error carefully. Trace the root cause. Test the fix."),
+    (["refactor", "improve", "optimize"], "Keep functionality identical. Improve readability and performance. Explain what changed."),
+
+    # Planning skills
+    (["plan", "roadmap", "timeline"], "Create numbered steps with clear milestones. Estimate effort per step."),
+    (["break down", "steps to", "how to"], "Break into small actionable steps. Identify dependencies between steps."),
+    (["organize", "schedule", "coordinate"], "Prioritize by impact and urgency. Flag risks and blockers."),
+
+    # Thoroughness skills
+    (["comprehensive", "thorough", "detailed", "everything"], "Be exhaustive — cover every angle. Don't skip edge cases. Length is fine."),
+    (["quick", "brief", "fast", "just"], "Be concise — get to the point fast. Skip unnecessary detail."),
+
+    # Domain skills
+    (["legal", "law", "court", "ticket"], "Be precise with legal terminology. Note jurisdiction differences. Suggest professional help for complex matters."),
+    (["medical", "health", "symptom"], "Provide general info only. Always recommend consulting a doctor for medical decisions."),
+    (["financial", "invest", "stock", "crypto"], "Include risk disclaimers. Use current data. Note that past performance doesn't predict future."),
+    (["travel", "flight", "hotel", "trip"], "Include booking links. Note cancellation policies. Check seasonal pricing."),
+    (["food", "restaurant", "recipe", "cook"], "Include ratings and price ranges. Note dietary options. Include addresses for restaurants."),
+]
 
 
-def detect_specialist(task: str) -> str | None:
-    """Auto-detect the best specialist for a task. Returns profile name or None."""
+def build_specialist_prompt(task: str) -> tuple[str, str]:
+    """Dynamically build a specialist prompt from task analysis.
+
+    Returns (prompt, label). Prompt is empty if task is too simple.
+    Zero LLM cost — pure keyword matching and composition.
+    """
     task_lower = task.lower()
-    best = None
-    best_score = 0
-    for profile, keywords in _SPECIALIST_KEYWORDS.items():
-        score = sum(1 for kw in keywords if kw in task_lower)
-        if score > best_score:
-            best_score = score
-            best = profile
-    return best if best_score >= 2 else None
+    matched_skills = []
+
+    for keywords, skill in _SKILL_ATOMS:
+        if any(kw in task_lower for kw in keywords):
+            matched_skills.append(skill)
+
+    if not matched_skills:
+        return "", ""
+
+    # Build a focused prompt from matched skills
+    prompt_parts = [
+        "You are a specialist subagent. Focus ONLY on the assigned task.",
+        "Do a better job than a generic assistant would — go deeper, be more thorough.",
+        "",
+        "## Your specialized approach for this task:",
+    ]
+    # Deduplicate while preserving order
+    seen = set()
+    for skill in matched_skills:
+        if skill not in seen:
+            seen.add(skill)
+            prompt_parts.append(f"- {skill}")
+
+    prompt_parts.extend([
+        "",
+        "## Output quality:",
+        "- Structure your response with clear headings",
+        "- Include specific details, not vague generalizations",
+        "- If you searched for info, cite your sources",
+        "- End with a clear conclusion or recommendation",
+    ])
+
+    # Generate a short label
+    label_keywords = []
+    label_map = {
+        "research": "Research", "compare": "Analysis", "write": "Writing",
+        "code": "Code", "debug": "Debug", "plan": "Planning",
+        "analyze": "Analysis", "find": "Search", "draft": "Draft",
+    }
+    for kw, lbl in label_map.items():
+        if kw in task_lower and lbl not in label_keywords:
+            label_keywords.append(lbl)
+    label = " + ".join(label_keywords[:2]) if label_keywords else "Specialist"
+
+    return "\n".join(prompt_parts), label
 
 
 class SpawnTool(Tool):
@@ -113,10 +130,10 @@ class SpawnTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Spawn a specialist subagent for background task execution.\n"
-            "Specialists: researcher (deep search), analyst (compare/evaluate), "
-            "writer (draft content), coder (write/debug code), planner (break down tasks).\n"
-            "Auto-detects the best specialist from the task, or specify one.\n"
+            "Spawn a specialist subagent for background task execution. "
+            "Automatically generates a focused specialist prompt based on the task — "
+            "no need to specify a type. The subagent gets specialized instructions "
+            "for research, analysis, writing, coding, planning, or domain-specific work. "
             "Use for 3+ tool call tasks. For quick tasks, handle directly."
         )
 
@@ -127,43 +144,35 @@ class SpawnTool(Tool):
             "properties": {
                 "task": {
                     "type": "string",
-                    "description": "The task for the subagent to complete",
+                    "description": "Detailed task description. Be specific about what you want — "
+                    "the specialist prompt is generated from the task content.",
                 },
                 "label": {
                     "type": "string",
-                    "description": "Short label for the task (for display)",
-                },
-                "specialist": {
-                    "type": "string",
-                    "enum": ["auto", "researcher", "analyst", "writer", "coder", "planner"],
-                    "description": "Specialist type. 'auto' detects from task. Default: auto.",
+                    "description": "Short label for display (auto-generated if omitted)",
                 },
             },
             "required": ["task"],
         }
 
-    async def execute(self, task: str, label: str | None = None, specialist: str = "auto", **kwargs: Any) -> str:
-        # Auto-detect or use specified specialist
-        if specialist == "auto" or not specialist:
-            specialist = detect_specialist(task)
+    async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
+        # Dynamically build specialist prompt from task
+        specialist_prompt, auto_label = build_specialist_prompt(task)
 
-        # Prepend specialist prompt to task
         enhanced_task = task
-        if specialist and specialist in SPECIALIST_PROFILES:
-            profile = SPECIALIST_PROFILES[specialist]
-            enhanced_task = f"[Specialist: {profile['label']}]\n{profile['prompt']}\n\n## Your Task\n{task}"
-            label = label or f"{profile['label']}: {task[:30]}"
+        if specialist_prompt:
+            enhanced_task = f"{specialist_prompt}\n\n## Your Task\n{task}"
+            label = label or f"{auto_label}: {task[:30]}"
 
         result = await self._manager.spawn(
             task=enhanced_task,
-            label=label,
+            label=label or task[:30],
             origin_channel=self._origin_channel,
             origin_chat_id=self._origin_chat_id,
             session_key=self._session_key,
         )
 
-        specialist_note = f" (specialist: {specialist})" if specialist else ""
-        return f"{result}{specialist_note}"
+        return result
 
 
 class UpdateSubagentTool(Tool):
