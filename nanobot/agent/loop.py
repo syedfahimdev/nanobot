@@ -1024,10 +1024,20 @@ class AgentLoop:
                 content=msg.content,
                 metadata={"_parallel": True},
             ))
-            # Spawn as a subagent — runs in parallel with its own context
+            # Build dynamic specialist prompt for the spawned agent
+            from nanobot.agent.tools.spawn import build_specialist_prompt
+            specialist_prompt, specialist_label = build_specialist_prompt(msg.content)
+            if specialist_prompt:
+                enhanced_task = f"{specialist_prompt}\n\n## Your Task\n{msg.content}"
+                label = f"{specialist_label}: {msg.content[:25]}"
+            else:
+                enhanced_task = msg.content
+                label = msg.content[:30]
+
+            # Spawn as a specialist subagent
             await self.subagents.spawn(
-                task=msg.content,
-                label=msg.content[:30],
+                task=enhanced_task,
+                label=label,
                 origin_channel=msg.channel,
                 origin_chat_id=msg.chat_id,
                 session_key=msg.session_key,
