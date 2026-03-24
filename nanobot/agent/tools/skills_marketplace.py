@@ -110,18 +110,40 @@ class SkillsMarketplaceTool(Tool):
             return "Error: skill_id required (format: owner/repo@skill-name)."
 
         try:
-            result = subprocess.run(
-                ["npx", "skills", "add", skill_id],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode == 0:
-                logger.info("Skills marketplace: installed {}", skill_id)
-                return f"Skill '{skill_id}' installed successfully from skills.sh."
-            else:
-                error = result.stderr[:200] or result.stdout[:200]
-                return f"Install failed: {error}"
-        except subprocess.TimeoutExpired:
-            return "Install timed out."
+            # Download skill directly from GitHub to workspace/skills/
+            # Format: owner/repo@skill-name → https://raw.githubusercontent.com/owner/repo/main/skills/skill-name/SKILL.md
+            parts = skill_id.split("@")
+            if len(parts) != 2:
+                return f"Error: Invalid skill_id format. Expected: owner/repo@skill-name, got: {skill_id}"
+
+            owner_repo = parts[0]  # e.g., "steipete/clawdis"
+            skill_name = parts[1]  # e.g., "weather"
+
+            # Fetch SKILL.md from GitHub
+            import httpx
+            base_url = f"https://raw.githubusercontent.com/{owner_repo}/main/skills/{skill_name}/SKILL.md"
+            resp = httpx.get(base_url, timeout=15, follow_redirects=True)
+
+            if resp.status_code != 200:
+                # Try alternate paths
+                for path in [f"skills/{skill_name}/SKILL.md", f"{skill_name}/SKILL.md", f".skills/{skill_name}/SKILL.md"]:
+                    alt_url = f"https://raw.githubusercontent.com/{owner_repo}/main/{path}"
+                    resp = httpx.get(alt_url, timeout=10, follow_redirects=True)
+                    if resp.status_code == 200:
+                        break
+
+            if resp.status_code != 200:
+                return f"Error: Could not fetch skill from GitHub ({resp.status_code}). URL tried: {base_url}"
+
+            # Save to workspace/skills/
+            from nanobot.config.paths import get_workspace_path
+            skill_dir = get_workspace_path() / "skills" / skill_name
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            (skill_dir / "SKILL.md").write_text(resp.text, encoding="utf-8")
+
+            logger.info("Skills marketplace: installed {} to {}", skill_id, skill_dir)
+            return f"Skill '{skill_name}' installed to {skill_dir}. Read SKILL.md before using."
+
         except Exception as e:
             return f"Error installing: {e}"
 

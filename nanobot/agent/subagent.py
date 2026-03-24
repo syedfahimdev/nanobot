@@ -119,6 +119,12 @@ class SubagentManager:
             tools.register(WebFetchTool(proxy=self.web_proxy))
             from nanobot.agent.tools.memory_save import MemorySaveTool
             tools.register(MemorySaveTool(workspace=self.workspace))
+            # Skills marketplace — subagent can search and install skills on demand
+            from nanobot.agent.tools.skills_marketplace import SkillsMarketplaceTool
+            tools.register(SkillsMarketplaceTool())
+            # Goals — subagent can check/update goals
+            from nanobot.agent.tools.goals import GoalsTool
+            tools.register(GoalsTool(workspace=self.workspace))
 
             system_prompt = self._build_subagent_prompt(session_key=session_key)
             messages: list[dict[str, Any]] = [
