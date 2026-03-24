@@ -234,6 +234,12 @@ class AgentLoop:
         # Settings tool — lets Mawa read/change her own configuration
         from nanobot.agent.tools.settings_tool import SettingsTool
         self.tools.register(SettingsTool(self.workspace))
+        # Image generation
+        from nanobot.agent.tools.image_gen import ImageGenTool
+        self.tools.register(ImageGenTool(self.workspace))
+        # Phone calls via Twilio
+        from nanobot.agent.tools.phone_call import PhoneCallTool
+        self.tools.register(PhoneCallTool())
         # Native Playwright browser
         try:
             from nanobot.agent.tools.browser import BrowserTool

@@ -199,6 +199,15 @@ _FEATURE_DEFS: list[dict[str, Any]] = [
     {"key": "historyAutoArchive", "label": "History Auto-Archive", "desc": "Split HISTORY.md into monthly chunks when it exceeds 100KB.", "category": "maintenance", "type": "boolean", "default": True},
     {"key": "sessionAutoCleanup", "label": "Session Auto-Cleanup", "desc": "Delete inactive sessions older than 7 days.", "category": "maintenance", "type": "boolean", "default": True},
     {"key": "contactAutoExtract", "label": "Contact Auto-Extract", "desc": "Extract contacts from memory on heartbeat.", "category": "maintenance", "type": "boolean", "default": True},
+
+    # Media generation
+    {"key": "imageGenProvider", "label": "Image Provider", "desc": "Provider for image generation. Options: together (free), fal, replicate, openai, stability.", "category": "media", "type": "string", "default": "together", "placeholder": "together, fal, replicate, openai, stability"},
+    {"key": "imageGenModel", "label": "Image Model", "desc": "Model to use. Leave empty for provider default.", "category": "media", "type": "string", "default": "", "placeholder": "provider default"},
+    {"key": "imageGenEnabled", "label": "Image Generation", "desc": "Allow Mawa to generate images when asked or when a visual would help.", "category": "media", "type": "boolean", "default": True},
+
+    # Phone calls
+    {"key": "phoneCallEnabled", "label": "Phone Calls", "desc": "Allow Mawa to make outbound phone calls via Twilio.", "category": "media", "type": "boolean", "default": True},
+    {"key": "phoneCallDefaultVoice", "label": "Call Voice", "desc": "TTS voice for phone calls. Options: alice, man, woman, Polly.Joanna, Polly.Matthew.", "category": "media", "type": "string", "default": "alice", "placeholder": "alice"},
 ]
 
 
@@ -222,6 +231,7 @@ def get_feature_categories() -> list[dict[str, str]]:
         {"id": "intelligence", "label": "Intelligence", "icon": "brain"},
         {"id": "behavior", "label": "Agent Behavior", "icon": "sparkles"},
         {"id": "jarvis", "label": "Jarvis Intelligence", "icon": "zap"},
+        {"id": "media", "label": "Media & Calls", "icon": "image"},
         {"id": "notifications", "label": "Notifications", "icon": "bell"},
         {"id": "budget", "label": "Cost & Budget", "icon": "dollar-sign"},
         {"id": "maintenance", "label": "Maintenance", "icon": "wrench"},
