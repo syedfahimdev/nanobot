@@ -206,9 +206,12 @@ _FEATURE_DEFS: list[dict[str, Any]] = [
     {"key": "imageGenEnabled", "label": "Image Generation", "desc": "Allow Mawa to generate images when asked or when a visual would help.", "category": "media", "type": "boolean", "default": True},
 
     # Voice providers
-    {"key": "voiceSttProvider", "label": "Voice STT Provider", "desc": "Speech-to-text provider. deepgram = cloud, mimo-audio = serverless GPU (Modal).", "category": "media", "type": "string", "default": "deepgram", "placeholder": "deepgram or mimo-audio"},
-    {"key": "voiceTtsProvider", "label": "Voice TTS Provider", "desc": "Text-to-speech provider. deepgram = cloud, mimo-audio = serverless GPU (Modal).", "category": "media", "type": "string", "default": "deepgram", "placeholder": "deepgram or mimo-audio"},
-    {"key": "mimoAudioEndpoint", "label": "MiMo-Audio Endpoint", "desc": "Modal endpoint URL for MiMo-Audio serverless GPU.", "category": "media", "type": "string", "default": "https://syedfahimdev--mawa-mimo-audio-api.modal.run", "placeholder": "https://...modal.run"},
+    {"key": "voiceSttProvider", "label": "Voice STT Provider", "desc": "Speech-to-text. deepgram (fast cloud), mimo-audio (GPU, emotion detection).", "category": "media", "type": "string", "default": "deepgram", "placeholder": "deepgram, mimo-audio"},
+    {"key": "voiceTtsProvider", "label": "Voice TTS Provider", "desc": "Text-to-speech. deepgram (fast), mimo-audio (emotional, EN/ZH), fish-speech (multilingual+emotional), mms-tts (1100 langs, free HF).", "category": "media", "type": "string", "default": "deepgram", "placeholder": "deepgram, mimo-audio, fish-speech, mms-tts"},
+    {"key": "voiceTtsLanguage", "label": "Voice TTS Language", "desc": "Language code for multilingual TTS. en, bn (Bengali), hi (Hindi), zh (Chinese), ur (Urdu), ar (Arabic).", "category": "media", "type": "string", "default": "en", "placeholder": "en, bn, hi, zh, ur"},
+    {"key": "mimoAudioEndpoint", "label": "MiMo-Audio Endpoint", "desc": "Modal URL for MiMo-Audio.", "category": "media", "type": "string", "default": "https://syedfahimdev--mawa-mimo-audio-api.modal.run", "placeholder": "https://...modal.run"},
+    {"key": "coquiXttsEndpoint", "label": "Coqui XTTS Endpoint", "desc": "Modal URL for Coqui XTTS v2 (17 langs, voice clone).", "category": "media", "type": "string", "default": "https://syedfahimdev--mawa-multilingual-tts-api.modal.run", "placeholder": "https://...modal.run"},
+    {"key": "mmsTtsModel", "label": "MMS-TTS Model", "desc": "HuggingFace model for Meta MMS-TTS. facebook/mms-tts-eng (English), facebook/mms-tts-ben (Bengali), facebook/mms-tts-hin (Hindi).", "category": "media", "type": "string", "default": "facebook/mms-tts-eng", "placeholder": "facebook/mms-tts-ben"},
 
     # Phone calls
     {"key": "phoneCallEnabled", "label": "Phone Calls", "desc": "Allow Mawa to make outbound phone calls via Twilio.", "category": "media", "type": "boolean", "default": True},
