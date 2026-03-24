@@ -65,14 +65,14 @@ class ContextBuilder:
         if channel in ("web_voice",):
             parts.append(GENERATIVE_UI_INSTRUCTION)
 
+        # Skills list: only inject short summary (names only) to save tokens.
+        # Full skill details loaded on demand via read_file when needed.
         skills_summary = self.skills.build_skills_summary()
         if skills_summary:
-            parts.append(f"""# Skills
-
-The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
-Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
-
-{skills_summary}""")
+            # Count skills and just list names — saves ~1000 tokens vs full descriptions
+            skill_lines = [l for l in skills_summary.split("\n") if l.strip().startswith("- ")]
+            skill_names_only = "\n".join(l.split(":")[0].strip() if ":" in l else l.strip() for l in skill_lines[:10])
+            parts.append(f"# Skills ({len(skill_lines)} available)\n{skill_names_only}\nUse read_file to read a skill's SKILL.md before using it.")
 
         return "\n\n---\n\n".join(parts)
 
@@ -203,14 +203,19 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
                 parts.append(f"## {filename}\n\n{truncated}")
         return "\n\n".join(parts)
 
+    _MAX_BOOTSTRAP_CHARS = 800  # Cap each bootstrap file to ~200 tokens
+
     def _load_bootstrap_files(self) -> str:
-        """Load all bootstrap files from workspace."""
+        """Load bootstrap files from workspace, trimmed to save tokens."""
         parts = []
 
         for filename in self.BOOTSTRAP_FILES:
             file_path = self.workspace / filename
             if file_path.exists():
                 content = file_path.read_text(encoding="utf-8")
+                # Trim large files — most of the content is available via read_file on demand
+                if len(content) > self._MAX_BOOTSTRAP_CHARS:
+                    content = content[:self._MAX_BOOTSTRAP_CHARS] + "\n... (use read_file for full content)"
                 parts.append(f"## {filename}\n\n{content}")
 
         return "\n\n".join(parts) if parts else ""

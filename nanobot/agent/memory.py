@@ -180,16 +180,21 @@ class MemoryStore:
         with open(self.history_file, "a", encoding="utf-8") as f:
             f.write(entry.rstrip() + "\n\n")
 
+    _MAX_SHORT_TERM_CHARS = 1500  # ~375 tokens — trim to save context
+
     def get_memory_context(self) -> str:
         """Build minimal context for the system prompt.
 
-        Injects SHORT_TERM (today's context) + top observations only.
+        Injects SHORT_TERM (today's context, trimmed) + top observations only.
         LONG_TERM is searched on demand via memory_search tool.
         """
         parts = []
 
         short_term = self.read_short_term().strip()
         if short_term:
+            # Trim to keep tokens low — take last N chars (most recent context)
+            if len(short_term) > self._MAX_SHORT_TERM_CHARS:
+                short_term = "...\n" + short_term[-self._MAX_SHORT_TERM_CHARS:]
             parts.append(f"## Today\n{short_term}")
 
         observations = self.read_observations().strip()
@@ -208,14 +213,13 @@ class MemoryStore:
                 top_rules = "\n".join(rules[-10:])
                 parts.append(f"## User Preferences (MUST follow)\n{top_rules}")
 
-        # Inject tool reliability warnings (lower priority, just awareness)
+        # Inject tool reliability warnings (lower priority — just top 3 to save tokens)
         tool_learnings_file = self.memory_dir / "TOOL_LEARNINGS.md"
         if tool_learnings_file.exists():
             content = tool_learnings_file.read_text(encoding="utf-8")
             rules = [l for l in content.split("\n") if l.strip().startswith("- ")]
             if rules:
-                # Only inject top 5 tool warnings to save tokens
-                top_rules = "\n".join(rules[-5:])
+                top_rules = "\n".join(rules[-3:])
                 parts.append(f"## Tool Warnings\n{top_rules}")
 
         # Inject tool reliability warnings from tool_scores.json
