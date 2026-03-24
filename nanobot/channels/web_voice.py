@@ -250,6 +250,8 @@ class WebVoiceChannel(BaseChannel):
         self._activity_ts: dict[str, float] = {}  # last activity timestamp
         # Detected language from multi-language STT (auto-switches TTS)
         self._detected_language: str | None = None
+        # Track which sessions have active voice calls (only TTS for these)
+        self._voice_active: set[str] = set()
 
     @staticmethod
     def _get_workspace():
@@ -461,8 +463,10 @@ class WebVoiceChannel(BaseChannel):
         # Streaming TTS sentence — enqueue for TTS + send text chunk for live display
         if meta.get("_tts_sentence"):
             await broadcast({"type": "response_chunk", "text": msg.content})
+            # Only generate TTS audio when voice mode is active
             for cid, _ in live_clients:
-                self._enqueue_tts(cid, msg.content)
+                if cid in self._voice_active:
+                    self._enqueue_tts(cid, msg.content)
             # Mark that this session had streaming TTS so final response skips TTS
             self._streamed_text[session_id] = True
             return
@@ -572,10 +576,9 @@ class WebVoiceChannel(BaseChannel):
             if remaining > 0:
                 await broadcast({"type": "queue_status", "pending": remaining})
 
-        # TTS: only for responses that were NOT already streamed and NOT flagged as voice_final.
-        # Streaming path handles TTS per-sentence via _tts_sentence metadata.
-        # voice_final is the display-only message sent after streaming completes.
-        if not _was_streamed and not meta.get("_voice_final"):
+        # TTS: ONLY when voice mode is active for this session.
+        # Skip entirely in text-only chat mode — no GPU calls, no TTS generation.
+        if session_id in self._voice_active and not _was_streamed and not meta.get("_voice_final"):
             _keep_reasoning = getattr(self, '_speak_reasoning', {}).get(session_id, False)
             clean = _strip_markdown(msg.content, keep_reasoning=_keep_reasoning)
             if clean:
@@ -2604,6 +2607,7 @@ copy();
                         continue
 
                     if action == "start":
+                        self._voice_active.add(session_id)
                         # Close any existing Deepgram connection first
                         if dg_ws:
                             logger.info("Web Voice: closing existing STT for {}", session_id)
@@ -2757,6 +2761,7 @@ copy();
                             dg_ws = None
 
                     elif action == "stop":
+                        self._voice_active.discard(session_id)
                         if dg_ws:
                             try:
                                 await dg_ws.send(json.dumps({"type": "CloseStream"}))
@@ -2861,6 +2866,7 @@ copy();
             except Exception as e:
                 logger.debug("Auto-consolidation on disconnect failed: {}", e)
 
+            self._voice_active.discard(session_id)
             logger.info("Web Voice client disconnected: {}", session_id)
 
         return ws
