@@ -186,6 +186,60 @@ def get_feature_manifest(workspace: Path) -> list[dict[str, Any]]:
         },
     ])
 
+    # ── Jarvis proactive features ──
+    jarvis_path = workspace / "jarvis_settings.json"
+    jarvis = {}
+    if jarvis_path.exists():
+        try:
+            jarvis = json.loads(jarvis_path.read_text())
+        except Exception:
+            pass
+
+    jarvis_features = [
+        ("morningPrep", "Morning Prep", "Auto-generate briefing from goals, bills, relationships, habits before you wake up.", True),
+        ("crossSignalCorrelation", "Cross-Signal Correlation", "Connect dots: travel+weather, bills+dates, goals+deadlines → proactive alerts.", True),
+        ("meetingIntelligence", "Meeting Intelligence", "Prep before meetings — pull relevant emails, notes about attendees.", True),
+        ("relationshipTracker", "Relationship Tracker", "Track contact frequency. Alert when you haven't talked to someone in 2+ weeks.", True),
+        ("financialPulse", "Financial Pulse", "Track AI spending trends, bill countdown, unusual charges.", True),
+        ("projectTracker", "Project Tracker", "Multi-day tasks with progress tracking across sessions.", True),
+        ("dailyDigest", "Daily Digest", "End-of-day summary: usage, goals completed, new learnings.", True),
+        ("priorityInbox", "Priority Inbox", "Score messages by urgency (keywords, caps, sender).", True),
+        ("delegationQueue", "Delegation Queue", "Async tasks Mawa checks on periodically — 'handle this over the week'.", True),
+        ("routineDetection", "Routine Detection", "Detect daily patterns and offer to automate them.", True),
+        ("decisionMemory", "Decision Memory", "Remember WHY you made decisions for future reference.", True),
+        ("peoplePrepBeforeCalls", "People Prep", "Before a call, surface your last interactions with the person.", True),
+    ]
+    for key, label, desc, default in jarvis_features:
+        features.append({
+            "key": key, "label": label, "desc": desc,
+            "category": "jarvis", "type": "boolean",
+            "value": jarvis.get(key, default),
+            "endpoint": "/api/jarvis/settings", "method": "POST",
+        })
+
+    # Jarvis configurable numbers
+    features.append({
+        "key": "relationshipReminderDays", "label": "Relationship Reminder (days)",
+        "desc": "Alert when you haven't contacted someone for this many days.",
+        "category": "jarvis", "type": "number", "value": jarvis.get("relationshipReminderDays", 14),
+        "min": 3, "max": 90,
+        "endpoint": "/api/jarvis/settings", "method": "POST",
+    })
+    features.append({
+        "key": "delegationCheckHours", "label": "Delegation Check Interval (hours)",
+        "desc": "How often to check on delegated tasks.",
+        "category": "jarvis", "type": "number", "value": jarvis.get("delegationCheckHours", 24),
+        "min": 1, "max": 168,
+        "endpoint": "/api/jarvis/settings", "method": "POST",
+    })
+    features.append({
+        "key": "correlationLookaheadDays", "label": "Correlation Lookahead (days)",
+        "desc": "How far ahead to scan for correlated events (bills, travel, deadlines).",
+        "category": "jarvis", "type": "number", "value": jarvis.get("correlationLookaheadDays", 3),
+        "min": 1, "max": 14,
+        "endpoint": "/api/jarvis/settings", "method": "POST",
+    })
+
     return features
 
 
@@ -194,6 +248,7 @@ def get_feature_categories() -> list[dict[str, str]]:
     return [
         {"id": "intelligence", "label": "Intelligence", "icon": "brain"},
         {"id": "behavior", "label": "Agent Behavior", "icon": "sparkles"},
+        {"id": "jarvis", "label": "Jarvis Intelligence", "icon": "zap"},
         {"id": "notifications", "label": "Notifications", "icon": "bell"},
         {"id": "budget", "label": "Cost & Budget", "icon": "dollar-sign"},
         {"id": "maintenance", "label": "Maintenance", "icon": "wrench"},

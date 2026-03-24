@@ -337,6 +337,8 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/api/undo", self._undo_handler)
         self._app.router.add_post("/api/maintenance", self._maintenance_handler)
         # Jarvis intelligence
+        self._app.router.add_get("/api/jarvis/settings", self._jarvis_settings_get_handler)
+        self._app.router.add_post("/api/jarvis/settings", self._jarvis_settings_save_handler)
         self._app.router.add_get("/api/jarvis/morning-prep", self._jarvis_morning_prep_handler)
         self._app.router.add_get("/api/jarvis/digest", self._jarvis_digest_handler)
         self._app.router.add_get("/api/jarvis/dashboard", self._jarvis_dashboard_handler)
@@ -1728,6 +1730,20 @@ class WebVoiceChannel(BaseChannel):
 
     # ── Jarvis Intelligence API ──
 
+    async def _jarvis_settings_get_handler(self, request: web.Request) -> web.Response:
+        path = self._get_workspace() / "jarvis_settings.json"
+        if path.exists():
+            return web.json_response(json.loads(path.read_text()))
+        return web.json_response({})
+
+    async def _jarvis_settings_save_handler(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        path = self._get_workspace() / "jarvis_settings.json"
+        data = json.loads(path.read_text()) if path.exists() else {}
+        data.update(body)
+        path.write_text(json.dumps(data, indent=2))
+        return web.json_response({"ok": True})
+
     async def _jarvis_morning_prep_handler(self, request: web.Request) -> web.Response:
         from nanobot.hooks.builtin.jarvis import build_morning_prep, format_morning_prep
         prep = build_morning_prep(self._get_workspace())
@@ -1829,6 +1845,11 @@ class WebVoiceChannel(BaseChannel):
             budget = load_budget(ws)
             budget[key] = value
             save_budget(ws, budget)
+        elif category == "jarvis":
+            path = ws / "jarvis_settings.json"
+            data = json.loads(path.read_text()) if path.exists() else {}
+            data[key] = value
+            path.write_text(json.dumps(data, indent=2))
         elif category in ("behavior", "maintenance"):
             path = ws / f"{category}_settings.json"
             data = json.loads(path.read_text()) if path.exists() else {}
