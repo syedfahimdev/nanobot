@@ -336,6 +336,20 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/api/export/conversation", self._export_conversation_handler)
         self._app.router.add_get("/api/undo", self._undo_handler)
         self._app.router.add_post("/api/maintenance", self._maintenance_handler)
+        # Jarvis intelligence
+        self._app.router.add_get("/api/jarvis/morning-prep", self._jarvis_morning_prep_handler)
+        self._app.router.add_get("/api/jarvis/digest", self._jarvis_digest_handler)
+        self._app.router.add_get("/api/jarvis/dashboard", self._jarvis_dashboard_handler)
+        self._app.router.add_get("/api/jarvis/correlations", self._jarvis_correlations_handler)
+        self._app.router.add_get("/api/jarvis/relationships", self._jarvis_relationships_handler)
+        self._app.router.add_get("/api/jarvis/financial", self._jarvis_financial_handler)
+        self._app.router.add_get("/api/jarvis/routines", self._jarvis_routines_handler)
+        self._app.router.add_get("/api/projects", self._projects_handler)
+        self._app.router.add_post("/api/projects", self._projects_save_handler)
+        self._app.router.add_get("/api/delegations", self._delegations_handler)
+        self._app.router.add_post("/api/delegations", self._delegations_save_handler)
+        self._app.router.add_get("/api/decisions", self._decisions_handler)
+        self._app.router.add_get("/api/people-prep", self._people_prep_handler)
         self._app.router.add_get("/api/features", self._features_manifest_handler)
         self._app.router.add_post("/api/features", self._features_save_handler)
         self._app.router.add_post("/api/budget", self._budget_save_handler)
@@ -1711,6 +1725,74 @@ class WebVoiceChannel(BaseChannel):
         from nanobot.hooks.builtin.maintenance import run_maintenance
         results = run_maintenance(self._get_workspace())
         return web.json_response(results)
+
+    # ── Jarvis Intelligence API ──
+
+    async def _jarvis_morning_prep_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.jarvis import build_morning_prep, format_morning_prep
+        prep = build_morning_prep(self._get_workspace())
+        return web.json_response({"prep": prep, "formatted": format_morning_prep(prep)})
+
+    async def _jarvis_digest_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.jarvis import build_daily_digest, format_digest
+        digest = build_daily_digest(self._get_workspace())
+        return web.json_response({"digest": digest, "formatted": format_digest(digest)})
+
+    async def _jarvis_dashboard_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.jarvis import get_life_dashboard
+        return web.json_response(get_life_dashboard(self._get_workspace()))
+
+    async def _jarvis_correlations_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.jarvis import detect_correlations
+        return web.json_response({"correlations": detect_correlations(self._get_workspace())})
+
+    async def _jarvis_relationships_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.jarvis import get_relationship_reminders
+        return web.json_response({"reminders": get_relationship_reminders(self._get_workspace())})
+
+    async def _jarvis_financial_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.jarvis import get_financial_pulse
+        return web.json_response(get_financial_pulse(self._get_workspace()))
+
+    async def _jarvis_routines_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.jarvis import detect_routines
+        return web.json_response({"routines": detect_routines(self._get_workspace())})
+
+    async def _projects_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.jarvis import get_projects
+        return web.json_response({"projects": get_projects(self._get_workspace())})
+
+    async def _projects_save_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.jarvis import save_project
+        body = await request.json()
+        save_project(self._get_workspace(), body)
+        return web.json_response({"ok": True})
+
+    async def _delegations_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.jarvis import get_delegations
+        return web.json_response({"delegations": get_delegations(self._get_workspace())})
+
+    async def _delegations_save_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.jarvis import add_delegation
+        body = await request.json()
+        add_delegation(self._get_workspace(), body.get("task", ""), body.get("deadline", ""), body.get("check_interval_hours", 24))
+        return web.json_response({"ok": True})
+
+    async def _decisions_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.jarvis import find_related_decisions
+        q = request.query.get("q", "")
+        if q:
+            return web.json_response({"decisions": find_related_decisions(self._get_workspace(), q)})
+        path = self._get_workspace() / "decisions.json"
+        decisions = json.loads(path.read_text()) if path.exists() else []
+        return web.json_response({"decisions": decisions[-20:]})
+
+    async def _people_prep_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.jarvis import get_people_prep
+        name = request.query.get("name", "")
+        if not name:
+            return web.json_response({"error": "name required"}, status=400)
+        return web.json_response(get_people_prep(self._get_workspace(), name))
 
     async def _features_manifest_handler(self, request: web.Request) -> web.Response:
         """GET /api/features — full manifest of all configurable features."""

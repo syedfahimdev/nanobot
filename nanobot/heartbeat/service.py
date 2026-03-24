@@ -193,6 +193,20 @@ class HeartbeatService:
         except Exception as e:
             logger.debug("Heartbeat maintenance error: {}", e)
 
+        # Jarvis proactive intelligence — check for actionable items
+        try:
+            from nanobot.hooks.builtin.jarvis import check_proactive_jarvis
+            from nanobot.hooks.builtin.maintenance import should_send_notification
+            jarvis_notifs = check_proactive_jarvis(self.workspace)
+            for notif in jarvis_notifs:
+                priority = notif.get("priority", "normal")
+                if should_send_notification(self.workspace, priority):
+                    if self.on_notify:
+                        await self.on_notify(notif["content"])
+                    logger.info("Jarvis: {}", notif["content"][:60])
+        except Exception as e:
+            logger.debug("Jarvis proactive error: {}", e)
+
         from nanobot.utils.evaluator import evaluate_response
 
         content = self._read_heartbeat_file()
