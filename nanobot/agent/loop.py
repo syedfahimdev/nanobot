@@ -398,7 +398,7 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
 
-            tool_defs = self.tools.get_definitions()
+            tool_defs = [d for d in self.tools.get_definitions() if d["function"]["name"] in getattr(self, '_filtered_tools', self.tools.tool_names)]
 
             # Use fast routing model for first iteration if configured
             current_model = self.routing_model if (iteration == 1 and self.routing_model) else self.model
@@ -580,7 +580,7 @@ class AgentLoop:
 
         while iteration < self.max_iterations:
             iteration += 1
-            tool_defs = self.tools.get_definitions()
+            tool_defs = [d for d in self.tools.get_definitions() if d["function"]["name"] in getattr(self, '_filtered_tools', self.tools.tool_names)]
             current_model = self.routing_model if (iteration == 1 and self.routing_model) else self.model
 
             # Stream tokens from the LLM
@@ -1451,6 +1451,32 @@ class AgentLoop:
         if retry_ctx:
             enriched_content = f"{enriched_content}\n\n{retry_ctx}"
 
+        # Pipeline optimizations — response control, format hints, parallel detection
+        from nanobot.hooks.builtin.pipeline_optimizer import (
+            get_response_hint, get_format_hint, detect_parallel_fetches,
+            build_parallel_hint, detect_follow_up_chain,
+        )
+        # [Opt 2] Response length control
+        resp_hint = get_response_hint(msg.content, msg.channel)
+        if resp_hint:
+            enriched_content = f"{enriched_content}\n\n{resp_hint}"
+
+        # [Opt 6] Output format hint
+        fmt_hint = get_format_hint(msg.content)
+        if fmt_hint:
+            enriched_content = f"{enriched_content}\n\n{fmt_hint}"
+
+        # [Opt 5] Parallel prefetch hint
+        parallel = detect_parallel_fetches(msg.content)
+        if parallel:
+            enriched_content = f"{enriched_content}\n\n{build_parallel_hint(parallel)}"
+
+        # [Opt 4] Follow-up chaining
+        chain = detect_follow_up_chain(msg.content)
+        if chain:
+            steps = "\n".join(f"{i+1}. {s}" for i, s in enumerate(chain))
+            enriched_content = f"{enriched_content}\n\n[Multi-step request detected. Execute in order:]\n{steps}"
+
         # Inject running subagent context so the main agent can route updates
         running = self.subagents.get_running_tasks()
         if running:
@@ -1465,6 +1491,14 @@ class AgentLoop:
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
         )
+
+        # [Opt 3] History compression — compress old turns to save tokens
+        from nanobot.hooks.builtin.pipeline_optimizer import compress_history
+        history = compress_history(history)
+
+        # [Opt 1] Intent-based tool filtering — only send relevant tool defs
+        from nanobot.hooks.builtin.pipeline_optimizer import filter_tools_by_intent
+        self._filtered_tools = filter_tools_by_intent(msg.content, self.tools.tool_names)
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             meta = dict(msg.metadata or {})
