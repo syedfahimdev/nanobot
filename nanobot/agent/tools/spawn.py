@@ -150,10 +150,23 @@ def build_specialist_prompt(task: str, workspace: str = "") -> tuple[str, str]:
                 prompt_parts.append(f"  {s['description']}")
     else:
         # No relevant skill installed — hint to search marketplace
+        # Check if auto-install is enabled
+        auto_install = False
+        try:
+            from nanobot.hooks.builtin.feature_registry import get_setting
+            from pathlib import Path
+            ws = Path(workspace) if workspace else Path("/root/.nanobot/workspace")
+            auto_install = get_setting(ws, "subagentAutoInstallSkills", False)
+        except Exception:
+            pass
+
         prompt_parts.append("")
         prompt_parts.append("## Skills:")
         prompt_parts.append("If you need a specialized tool, search the marketplace: `skills_marketplace(action=\"search\", query=\"...\")`")
-        prompt_parts.append("Install with: `skills_marketplace(action=\"install\", skill_id=\"...\")`")
+        if auto_install:
+            prompt_parts.append("You MAY install skills automatically without asking: `skills_marketplace(action=\"install\", skill_id=\"...\")`")
+        else:
+            prompt_parts.append("Do NOT install skills without user approval. Report what you found and recommend which to install.")
 
     prompt_parts.extend([
         "",

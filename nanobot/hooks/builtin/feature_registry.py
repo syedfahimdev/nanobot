@@ -200,6 +200,10 @@ _FEATURE_DEFS: list[dict[str, Any]] = [
     {"key": "sessionAutoCleanup", "label": "Session Auto-Cleanup", "desc": "Delete inactive sessions older than 7 days.", "category": "maintenance", "type": "boolean", "default": True},
     {"key": "contactAutoExtract", "label": "Contact Auto-Extract", "desc": "Extract contacts from memory on heartbeat.", "category": "maintenance", "type": "boolean", "default": True},
 
+    # Subagent behavior
+    {"key": "subagentAutoInstallSkills", "label": "Subagent Auto-Install Skills", "desc": "OFF = subagents ask before installing skills from marketplace. ON = install automatically without asking.", "category": "behavior", "type": "boolean", "default": False},
+    {"key": "subagentMarketplaceSource", "label": "Skill Marketplace Source", "desc": "Where subagents search for skills. both = skills.sh + clawhub.", "category": "behavior", "type": "string", "default": "both", "placeholder": "skills.sh, clawhub, both"},
+
     # Media generation
     {"key": "imageGenProvider", "label": "Image Provider", "desc": "Provider for image generation. Free: pollinations (no key), together, huggingface. Paid: fal, replicate, openai, stability.", "category": "media", "type": "string", "default": "pollinations", "placeholder": "pollinations, huggingface, together, fal, replicate, openai, stability"},
     {"key": "imageGenModel", "label": "Image Model", "desc": "Model to use. Leave empty for provider default.", "category": "media", "type": "string", "default": "", "placeholder": "provider default"},
