@@ -205,8 +205,14 @@ _FEATURE_DEFS: list[dict[str, Any]] = [
     {"key": "imageGenModel", "label": "Image Model", "desc": "Model to use. Leave empty for provider default.", "category": "media", "type": "string", "default": "", "placeholder": "provider default"},
     {"key": "imageGenEnabled", "label": "Image Generation", "desc": "Allow Mawa to generate images when asked or when a visual would help.", "category": "media", "type": "boolean", "default": True},
 
+    # Voice providers
+    {"key": "voiceSttProvider", "label": "Voice STT Provider", "desc": "Speech-to-text provider. deepgram = cloud, mimo-audio = serverless GPU (Modal).", "category": "media", "type": "string", "default": "deepgram", "placeholder": "deepgram or mimo-audio"},
+    {"key": "voiceTtsProvider", "label": "Voice TTS Provider", "desc": "Text-to-speech provider. deepgram = cloud, mimo-audio = serverless GPU (Modal).", "category": "media", "type": "string", "default": "deepgram", "placeholder": "deepgram or mimo-audio"},
+    {"key": "mimoAudioEndpoint", "label": "MiMo-Audio Endpoint", "desc": "Modal endpoint URL for MiMo-Audio serverless GPU.", "category": "media", "type": "string", "default": "https://syedfahimdev--mawa-mimo-audio-api.modal.run", "placeholder": "https://...modal.run"},
+
     # Phone calls
     {"key": "phoneCallEnabled", "label": "Phone Calls", "desc": "Allow Mawa to make outbound phone calls via Twilio.", "category": "media", "type": "boolean", "default": True},
+    {"key": "phoneCallVoiceProvider", "label": "Call Voice Provider", "desc": "Voice provider for phone calls. deepgram = Twilio TTS, mimo-audio = MiMo-Audio on Modal.", "category": "media", "type": "string", "default": "deepgram", "placeholder": "deepgram or mimo-audio"},
     {"key": "phoneCallMode", "label": "Call Mode", "desc": "tts = one-way message. conversation = two-way AI call (requires Deepgram).", "category": "media", "type": "string", "default": "tts", "placeholder": "tts or conversation"},
     {"key": "phoneCallDefaultVoice", "label": "Call Voice", "desc": "TTS voice. Options: alice, man, woman, Polly.Joanna, Polly.Matthew.", "category": "media", "type": "string", "default": "alice", "placeholder": "alice"},
 ]
