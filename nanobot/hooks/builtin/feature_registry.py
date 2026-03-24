@@ -207,7 +207,8 @@ _FEATURE_DEFS: list[dict[str, Any]] = [
 
     # Phone calls
     {"key": "phoneCallEnabled", "label": "Phone Calls", "desc": "Allow Mawa to make outbound phone calls via Twilio.", "category": "media", "type": "boolean", "default": True},
-    {"key": "phoneCallDefaultVoice", "label": "Call Voice", "desc": "TTS voice for phone calls. Options: alice, man, woman, Polly.Joanna, Polly.Matthew.", "category": "media", "type": "string", "default": "alice", "placeholder": "alice"},
+    {"key": "phoneCallMode", "label": "Call Mode", "desc": "tts = one-way message. conversation = two-way AI call (requires Deepgram).", "category": "media", "type": "string", "default": "tts", "placeholder": "tts or conversation"},
+    {"key": "phoneCallDefaultVoice", "label": "Call Voice", "desc": "TTS voice. Options: alice, man, woman, Polly.Joanna, Polly.Matthew.", "category": "media", "type": "string", "default": "alice", "placeholder": "alice"},
 ]
 
 

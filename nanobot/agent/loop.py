@@ -239,7 +239,7 @@ class AgentLoop:
         self.tools.register(ImageGenTool(self.workspace))
         # Phone calls via Twilio
         from nanobot.agent.tools.phone_call import PhoneCallTool
-        self.tools.register(PhoneCallTool())
+        self.tools.register(PhoneCallTool(self.workspace))
         # Native Playwright browser
         try:
             from nanobot.agent.tools.browser import BrowserTool
