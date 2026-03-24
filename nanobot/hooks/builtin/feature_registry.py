@@ -166,6 +166,7 @@ _FEATURE_DEFS: list[dict[str, Any]] = [
     {"key": "messageDedup", "label": "Message Dedup", "desc": "Drop duplicate messages sent within 30 seconds.", "category": "behavior", "type": "boolean", "default": True},
     {"key": "greetingInterceptor", "label": "Smart Greetings", "desc": "Answer 'hello' with a time-aware greeting + goals context (zero tokens).", "category": "behavior", "type": "boolean", "default": True},
     {"key": "mathInterceptor", "label": "Math Interceptor", "desc": "Answer math questions (15% of $347) with pure code — zero tokens.", "category": "behavior", "type": "boolean", "default": True},
+    {"key": "llmFollowUps", "label": "AI Follow-Up Suggestions", "desc": "Use the LLM to generate smart follow-up questions (costs tokens). OFF = free pattern-based suggestions.", "category": "behavior", "type": "boolean", "default": False},
 
     # Jarvis Intelligence
     {"key": "morningPrep", "label": "Morning Prep", "desc": "Auto-generate briefing from goals, bills, relationships, habits.", "category": "jarvis", "type": "boolean", "default": True},

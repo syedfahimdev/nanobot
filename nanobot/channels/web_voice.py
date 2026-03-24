@@ -534,15 +534,30 @@ class WebVoiceChannel(BaseChannel):
                 await broadcast({"type": "activity", "kind": "thinking", "text": msg.content, "latency_ms": delta_ms})
             return
 
-        # Final response
+        # Final response — extract LLM follow-up suggestions if present
+        import re as _re
+        response_text = msg.content
+        followups = []
+        fu_match = _re.search(r'\[FOLLOWUPS\]\s*(.+?)$', response_text, _re.MULTILINE)
+        if fu_match:
+            followups = [s.strip() for s in fu_match.group(1).split("|") if s.strip()]
+            response_text = response_text[:fu_match.start()].rstrip()
+
         is_subagent = meta.get("_subagent_result", False)
         _was_streamed = session_id in self._streamed_text  # Check BEFORE popping
         self._streamed_text.pop(session_id, None)
         await broadcast({
             "type": "response_text",
-            "text": msg.content,
+            "text": response_text,
             "subagent_result": is_subagent,
         })
+
+        # Send follow-up suggestions (LLM-generated or will be fetched by frontend via API)
+        if followups:
+            await broadcast({
+                "type": "followups",
+                "suggestions": [{"text": f, "icon": "sparkles"} for f in followups[:4]],
+            })
 
         # Detect profile switch and notify frontend
         if msg.content.startswith("Switched to profile:"):
