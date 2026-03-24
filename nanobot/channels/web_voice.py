@@ -463,9 +463,10 @@ class WebVoiceChannel(BaseChannel):
         # Streaming TTS sentence — enqueue for TTS + send text chunk for live display
         if meta.get("_tts_sentence"):
             await broadcast({"type": "response_chunk", "text": msg.content})
-            # Only generate TTS audio when voice mode is active
-            for cid, _ in live_clients:
-                if cid in self._voice_active:
+            # Only generate TTS audio when voice mode is active for ANY connected client
+            _any_voice_stream = bool(self._voice_active & set(cid for cid, _ in live_clients))
+            if _any_voice_stream:
+                for cid, _ in live_clients:
                     self._enqueue_tts(cid, msg.content)
             # Mark that this session had streaming TTS so final response skips TTS
             self._streamed_text[session_id] = True
@@ -578,7 +579,9 @@ class WebVoiceChannel(BaseChannel):
 
         # TTS: ONLY when voice mode is active for this session.
         # Skip entirely in text-only chat mode — no GPU calls, no TTS generation.
-        if session_id in self._voice_active and not _was_streamed and not meta.get("_voice_final"):
+        # Check if ANY connected client has voice active (handles reconnects/multi-device)
+        _any_voice = bool(self._voice_active & set(cid for cid, _ in live_clients))
+        if _any_voice and not _was_streamed and not meta.get("_voice_final"):
             _keep_reasoning = getattr(self, '_speak_reasoning', {}).get(session_id, False)
             clean = _strip_markdown(msg.content, keep_reasoning=_keep_reasoning)
             if clean:
