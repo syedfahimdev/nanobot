@@ -219,14 +219,13 @@ _FEATURE_DEFS: list[dict[str, Any]] = [
 
     # Voice providers
     {"key": "voiceSttProvider", "label": "Voice STT Provider", "desc": "Speech-to-text. deepgram (fast cloud) (GPU, emotion detection).", "category": "media", "type": "string", "default": "deepgram", "placeholder": "deepgram"},
-    {"key": "voiceTtsProvider", "label": "Voice TTS Provider", "desc": "TTS engine. deepgram (fast EN), fish-speech (80+ langs), svara-tts (Indian langs) (emotional) (17 langs).", "category": "media", "type": "string", "default": "deepgram", "placeholder": "deepgram, fish-speech, svara-tts"},
+    {"key": "voiceTtsProvider", "label": "Voice TTS Provider", "desc": "TTS engine. deepgram (fast EN), fish-speech (80+ langs), elevenlabs (premium quality, 29 langs).", "category": "media", "type": "string", "default": "deepgram", "placeholder": "deepgram, fish-speech, elevenlabs"},
     {"key": "voiceSttLanguage", "label": "STT Language (listen)", "desc": "What language you speak. multi=auto-detect, en=English, bn=Bengali, hi=Hindi. Can switch during voice call.", "category": "media", "type": "string", "default": "multi", "placeholder": "multi, en, bn, hi, zh, ur, ar, es, fr"},
     {"key": "voiceTtsLanguage", "label": "TTS Language (respond)", "desc": "What language Mawa speaks back. en=English, bn=Bengali, hi=Hindi. Independent from STT language.", "category": "media", "type": "string", "default": "en", "placeholder": "en, bn, hi, zh, ur, ar, es, fr"},
-    {"key": "svaraTtsEndpoint", "label": "Svara-TTS Endpoint", "desc": "Modal URL for Svara-TTS (19 Indian langs, Bengali native).", "category": "media", "type": "string", "default": "https://syedfahimdev--mawa-svara-tts-api.modal.run", "placeholder": "https://...modal.run"},
 
     # Phone calls
     {"key": "phoneCallEnabled", "label": "Phone Calls", "desc": "Allow Mawa to make outbound phone calls via Twilio.", "category": "media", "type": "boolean", "default": True},
-    {"key": "phoneCallVoiceProvider", "label": "Call Voice Provider", "desc": "Voice provider for phone calls. deepgram = Twilio TTS.", "category": "media", "type": "string", "default": "deepgram", "placeholder": "deepgram, fish-speech, svara-tts"},
+    {"key": "phoneCallVoiceProvider", "label": "Call Voice Provider", "desc": "Voice provider for phone calls. deepgram = Twilio TTS.", "category": "media", "type": "string", "default": "deepgram", "placeholder": "deepgram, fish-speech"},
     {"key": "phoneCallMode", "label": "Call Mode", "desc": "tts = one-way message. conversation = two-way AI call (requires Deepgram).", "category": "media", "type": "string", "default": "tts", "placeholder": "tts, conversation"},
     {"key": "phoneCallDefaultVoice", "label": "Call Voice", "desc": "TTS voice. Options: alice, man, woman, Polly.Joanna, Polly.Matthew.", "category": "media", "type": "string", "default": "alice", "placeholder": "alice, man, woman, Polly.Joanna, Polly.Matthew"},
 ]

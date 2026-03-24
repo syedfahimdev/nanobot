@@ -60,21 +60,25 @@ PROVIDERS = {
             {"id": "custom", "name": "Your Voice (clone)", "gender": "custom", "clone": True, "preview": None},
         ],
     },
-    "svara-tts": {
-        "label": "Svara-TTS",
-        "type": "modal",
-        "credentials": [],
-        "endpoint_setting": "svaraTtsEndpoint",
+    "elevenlabs": {
+        "label": "ElevenLabs",
+        "type": "cloud",
+        "credentials": [
+            {"key": "ELEVENLABS_API_KEY", "vault": "elevenlabs", "label": "ElevenLabs API Key", "url": "https://elevenlabs.io"},
+        ],
         "supports_stt": False,
         "supports_tts": True,
         "supports_clone": True,
-        "emotions": True,
-        "languages": ["bn", "hi", "en", "mr", "te", "kn", "gu", "ml", "pa", "ta", "as", "ne"],
+        "emotions": False,
+        "languages": ["en", "bn", "hi", "zh", "es", "fr", "de", "ar", "ja", "ko", "pt", "ru", "ur", "pl", "it", "tr", "nl"],
         "voices": [
-            {"id": "default", "name": "Default", "gender": "neutral", "preview": None},
-            {"id": "happy", "name": "Happy", "emotion": "happy", "preview": None},
-            {"id": "sad", "name": "Sad", "emotion": "sad", "preview": None},
-            {"id": "custom", "name": "Your Voice (clone)", "gender": "custom", "clone": True, "preview": None},
+            {"id": "21m00Tcm4TlvDq8ikWAM", "name": "Rachel", "gender": "female"},
+            {"id": "AZnzlk1XvdvUeBnXmlld", "name": "Domi", "gender": "female"},
+            {"id": "EXAVITQu4vr4xnSDxMaL", "name": "Bella", "gender": "female"},
+            {"id": "ErXwobaYiN019PkySvjV", "name": "Antoni", "gender": "male"},
+            {"id": "VR6AewLTigWG4xSOukaG", "name": "Arnold", "gender": "male"},
+            {"id": "pNInz6obpgDQGcFmaJgB", "name": "Adam", "gender": "male"},
+            {"id": "yoZ06aMxZJJ28mfd3POQ", "name": "Sam", "gender": "male"},
         ],
     },
 }
@@ -291,13 +295,16 @@ async def generate_tts(
                 return result
             logger.warning("Fish Speech TTS failed, falling back to Deepgram")
             return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
-        elif provider_name == "svara-tts":
-            endpoint = get_setting(workspace, "svaraTtsEndpoint", "")
-            lang = get_setting(workspace, "voiceTtsLanguage", "bn")
-            result = await _tts_svara(clean, endpoint, lang, emotion)
+        elif provider_name == "elevenlabs":
+            el_key = _get_elevenlabs_key()
+            voice_id = voice_id or "21m00Tcm4TlvDq8ikWAM"  # Rachel default
+            if not el_key:
+                logger.warning("ElevenLabs: no API key, falling back to Deepgram")
+                return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
+            result = await _tts_elevenlabs(clean, el_key, voice_id)
             if result:
                 return result
-            logger.warning("Svara-TTS failed, falling back to Deepgram")
+            logger.warning("ElevenLabs TTS failed, falling back to Deepgram")
             return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
         else:
             logger.warning("Unknown TTS provider '{}', using Deepgram", provider_name)
@@ -417,25 +424,47 @@ async def _tts_fish(text: str, api_key: str, language: str = "en") -> bytes | No
     return None
 
 
-async def _tts_svara(text: str, endpoint: str, language: str = "bn", emotion: str = "neutral") -> bytes | None:
-    """Svara-TTS via Modal endpoint. 19 Indian languages."""
-    if not endpoint:
-        return None
+def _get_elevenlabs_key() -> str | None:
+    """Get ElevenLabs API key from env or vault."""
+    val = os.environ.get("ELEVENLABS_API_KEY")
+    if val:
+        return val
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(endpoint, json={
-                "text": text,
-                "language": language,
-                "emotion": emotion,
-            })
-            resp.raise_for_status()
-            data = resp.json()
-            audio_b64 = data.get("audio_b64")
-            if audio_b64:
-                return base64.b64decode(audio_b64)
-            error = data.get("error")
-            if error:
-                logger.warning("Svara-TTS error: {}", error)
-    except Exception as e:
-        logger.error("Svara-TTS failed: {}", e)
+        from nanobot.setup.vault import load_vault
+        vault = load_vault()
+        for k in ["cred.elevenlabs_api_key", "cred.elevenlabs"]:
+            if vault.get(k):
+                return vault[k]
+    except Exception:
+        pass
     return None
+
+
+async def _tts_elevenlabs(text: str, api_key: str, voice_id: str = "21m00Tcm4TlvDq8ikWAM") -> bytes | None:
+    """ElevenLabs TTS — high quality, 29 languages, voice cloning."""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+                headers={
+                    "xi-api-key": api_key,
+                    "Content-Type": "application/json",
+                    "Accept": "audio/mpeg",
+                },
+                json={
+                    "text": text,
+                    "model_id": "eleven_multilingual_v2",
+                    "voice_settings": {
+                        "stability": 0.5,
+                        "similarity_boost": 0.75,
+                    },
+                },
+            )
+            resp.raise_for_status()
+            audio = resp.content
+            return audio if len(audio) > 100 else None
+    except Exception as e:
+        logger.error("ElevenLabs TTS failed: {}", e)
+    return None
+
+
