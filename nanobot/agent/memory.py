@@ -197,30 +197,24 @@ class MemoryStore:
                 short_term = "...\n" + short_term[-self._MAX_SHORT_TERM_CHARS:]
             parts.append(f"## Today\n{short_term}")
 
-        observations = self.read_observations().strip()
-        if observations:
-            # Only include top 5 observations to keep tokens low
-            lines = [l for l in observations.split("\n") if l.strip()]
-            top = "\n".join(lines[:5])
-            parts.append(f"## Patterns\n{top}")
-
-        # Inject learned rules from user corrections (high priority)
+        # Learnings from user corrections — these are HIGH PRIORITY, always inject
+        # (they're the user's explicit preferences, must be followed)
         learnings_file = self.memory_dir / "LEARNINGS.md"
         if learnings_file.exists():
             content = learnings_file.read_text(encoding="utf-8")
             rules = [l for l in content.split("\n") if l.strip().startswith("- ")]
             if rules:
-                top_rules = "\n".join(rules[-10:])
-                parts.append(f"## User Preferences (MUST follow)\n{top_rules}")
+                # Only last 5 to keep tokens low — most recent corrections matter most
+                top_rules = "\n".join(rules[-5:])
+                parts.append(f"## User Rules (MUST follow)\n{top_rules}")
 
-        # Inject tool reliability warnings (lower priority — just top 3 to save tokens)
-        tool_learnings_file = self.memory_dir / "TOOL_LEARNINGS.md"
-        if tool_learnings_file.exists():
-            content = tool_learnings_file.read_text(encoding="utf-8")
-            rules = [l for l in content.split("\n") if l.strip().startswith("- ")]
-            if rules:
-                top_rules = "\n".join(rules[-3:])
-                parts.append(f"## Tool Warnings\n{top_rules}")
+        # Everything else is searchable on demand — don't inject
+        # Patterns → memory_search, Tool warnings → memory_search, Goals → goals tool
+        hints = []
+        if (self.memory_dir / "OBSERVATIONS.md").exists():
+            hints.append("patterns in OBSERVATIONS.md")
+        if (self.memory_dir / "TOOL_LEARNINGS.md").exists():
+            hints.append("tool warnings in TOOL_LEARNINGS.md")
 
         # Inject tool reliability warnings from tool_scores.json
         scores_file = self.memory_dir / "tool_scores.json"
@@ -239,29 +233,27 @@ class MemoryStore:
             except (json.JSONDecodeError, OSError, TypeError):
                 pass
 
-        # Inject pending goals so agent is always aware of them
+        # Goals: just count + overdue flag — details via goals tool on demand
         goals_file = self.memory_dir / "GOALS.md"
         if goals_file.exists():
             try:
                 content = goals_file.read_text(encoding="utf-8")
-                pending = [l.strip()[6:] for l in content.split("\n") if l.strip().startswith("- [ ] ")]
+                pending = [l for l in content.split("\n") if l.strip().startswith("- [ ] ")]
                 if pending:
-                    overdue = []
-                    from datetime import datetime, date
+                    from datetime import date
                     import re
                     today = date.today().isoformat()
-                    for p in pending:
-                        m = re.search(r"\(due:\s*(\d{4}-\d{2}-\d{2})\)", p)
-                        if m and m.group(1) < today:
-                            overdue.append(p)
-                    goals_text = "\n".join(f"- [ ] {p}" for p in pending[:8])
+                    overdue = sum(1 for l in pending if (m := re.search(r"\(due:\s*(\d{4}-\d{2}-\d{2})\)", l)) and m.group(1) < today)
+                    hint = f"{len(pending)} pending goals"
                     if overdue:
-                        goals_text = "OVERDUE: " + ", ".join(overdue) + "\n" + goals_text
-                    parts.append(f"## Pending Goals ({len(pending)})\n{goals_text}\nUse the goals tool to manage these.")
+                        hint += f" ({overdue} OVERDUE)"
+                    hints.append(hint)
             except (OSError, TypeError):
                 pass
 
-        parts.append("Use memory_search to recall long-term facts, past episodes, or user preferences.")
+        # Single on-demand hint line instead of injecting everything
+        if hints:
+            parts.append("Available on demand: " + ", ".join(hints) + ". Use goals/memory_search tools to access.")
 
         return "\n\n".join(parts)
 

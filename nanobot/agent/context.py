@@ -65,14 +65,10 @@ class ContextBuilder:
         if channel in ("web_voice",):
             parts.append(GENERATIVE_UI_INSTRUCTION)
 
-        # Skills list: only inject short summary (names only) to save tokens.
-        # Full skill details loaded on demand via read_file when needed.
-        skills_summary = self.skills.build_skills_summary()
-        if skills_summary:
-            # Count skills and just list names — saves ~1000 tokens vs full descriptions
-            skill_lines = [l for l in skills_summary.split("\n") if l.strip().startswith("- ")]
-            skill_names_only = "\n".join(l.split(":")[0].strip() if ":" in l else l.strip() for l in skill_lines[:10])
-            parts.append(f"# Skills ({len(skill_lines)} available)\n{skill_names_only}\nUse read_file to read a skill's SKILL.md before using it.")
+        # Skills: don't list them — the LLM searches on demand
+        skill_count = len(self.skills.build_skills_summary().split("\n")) if self.skills.build_skills_summary() else 0
+        if skill_count > 0:
+            parts.append(f"You have {skill_count} skills installed. Use `list_dir(path=\"skills\")` to see them, then `read_file` on SKILL.md before using any skill.")
 
         return "\n\n---\n\n".join(parts)
 
