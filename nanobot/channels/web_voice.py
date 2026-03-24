@@ -3151,16 +3151,6 @@ copy();
 
         # Auto-switch TTS for non-English: if on Deepgram (English-only),
         # fall back to Coqui XTTS for multilingual support
-        if detected and detected != "en" and provider == "deepgram":
-            coqui_endpoint = get_setting(ws, "coquiXttsEndpoint", "")
-            if coqui_endpoint:
-                logger.info("Auto-switching TTS to Coqui XTTS for detected language: {}", detected)
-                from nanobot.hooks.builtin.voice_providers import _tts_coqui, _strip_md
-                clean = _strip_md(text)
-                if clean and len(clean) >= 2:
-                    result = await _tts_coqui(clean[:2000], coqui_endpoint, detected)
-                    if result:
-                        return result
 
         return await generate_tts(
             text=text,

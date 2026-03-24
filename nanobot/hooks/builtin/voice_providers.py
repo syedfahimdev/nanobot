@@ -44,41 +44,6 @@ PROVIDERS = {
             {"id": "aura-2-arcas-en", "name": "Arcas", "gender": "male", "preview": None},
         ],
     },
-    "mimo-audio": {
-        "label": "MiMo-Audio",
-        "type": "modal",
-        "credentials": [],  # No API key — uses Modal endpoint
-        "endpoint_setting": "mimoAudioEndpoint",
-        "supports_stt": True,
-        "supports_tts": True,
-        "supports_clone": True,
-        "emotions": True,
-        "languages": ["en", "zh"],
-        "voices": [
-            {"id": "default", "name": "MiMo Default", "gender": "neutral", "preview": None},
-            {"id": "happy", "name": "Happy", "gender": "neutral", "emotion": "happy", "preview": None},
-            {"id": "sad", "name": "Sad", "gender": "neutral", "emotion": "sad", "preview": None},
-            {"id": "excited", "name": "Excited", "gender": "neutral", "emotion": "excited", "preview": None},
-            {"id": "whisper", "name": "Whisper", "gender": "neutral", "emotion": "whisper", "preview": None},
-            {"id": "laughing", "name": "Laughing", "gender": "neutral", "emotion": "laughing", "preview": None},
-            {"id": "custom", "name": "Your Voice (clone)", "gender": "custom", "clone": True, "preview": None},
-        ],
-    },
-    "coqui-xtts": {
-        "label": "Coqui XTTS v2",
-        "type": "modal",
-        "credentials": [],
-        "endpoint_setting": "coquiXttsEndpoint",
-        "supports_stt": False,
-        "supports_tts": True,
-        "supports_clone": True,
-        "emotions": False,
-        "languages": ["en", "es", "fr", "de", "it", "pt", "pl", "tr", "ru", "nl", "cs", "ar", "zh", "ja", "ko", "hu", "hi"],
-        "voices": [
-            {"id": "default", "name": "XTTS Default", "gender": "female", "preview": None},
-            {"id": "custom", "name": "Your Voice (clone)", "gender": "custom", "clone": True, "preview": None},
-        ],
-    },
     "fish-speech": {
         "label": "Fish Speech",
         "type": "cloud",
@@ -315,24 +280,6 @@ async def generate_tts(
     try:
         if provider_name == "deepgram":
             return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
-        elif provider_name == "mimo-audio":
-            endpoint = get_setting(workspace, "mimoAudioEndpoint", "")
-            clone_path = _get_clone_sample(workspace) if voice_id == "custom" else None
-            result = await _tts_mimo_audio(clean, endpoint, emotion, clone_path)
-            if result:
-                return result
-            # Fallback to Deepgram
-            logger.warning("MiMo-Audio TTS failed, falling back to Deepgram")
-            return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
-        elif provider_name == "coqui-xtts":
-            endpoint = get_setting(workspace, "coquiXttsEndpoint", "")
-            lang = get_setting(workspace, "voiceTtsLanguage", "en")
-            clone_path = _get_clone_sample(workspace) if voice_id == "custom" else None
-            result = await _tts_coqui(clean, endpoint, lang, clone_path)
-            if result:
-                return result
-            logger.warning("Coqui XTTS TTS failed, falling back to Deepgram")
-            return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
         elif provider_name == "fish-speech":
             lang = get_setting(workspace, "voiceTtsLanguage", "en")
             fish_key = _get_fish_key()
@@ -426,47 +373,8 @@ async def _tts_deepgram(text: str, api_key: str | None, model: str) -> bytes | N
         return None
 
 
-async def _tts_mimo_audio(text: str, endpoint: str, emotion: str = "neutral", clone_path: str | None = None) -> bytes | None:
-    """MiMo-Audio TTS via Modal endpoint."""
-    if not endpoint:
-        return None
-    try:
-        payload: dict[str, Any] = {"mode": "tts", "text": text, "emotion": emotion}
-        if clone_path and os.path.exists(clone_path):
-            with open(clone_path, "rb") as f:
-                payload["mode"] = "tts"
-                payload["voice_sample_b64"] = base64.b64encode(f.read()).decode()
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(endpoint, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            audio_b64 = data.get("audio_b64")
-            if audio_b64:
-                return base64.b64decode(audio_b64)
-    except Exception as e:
-        logger.error("MiMo-Audio TTS failed: {}", e)
-    return None
 
 
-async def _tts_coqui(text: str, endpoint: str, language: str = "en", clone_path: str | None = None) -> bytes | None:
-    """Coqui XTTS v2 via Modal endpoint."""
-    if not endpoint:
-        return None
-    try:
-        payload: dict[str, Any] = {"mode": "xtts", "text": text, "language": language}
-        if clone_path and os.path.exists(clone_path):
-            with open(clone_path, "rb") as f:
-                payload["voice_sample_b64"] = base64.b64encode(f.read()).decode()
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(endpoint, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            audio_b64 = data.get("audio_b64")
-            if audio_b64:
-                return base64.b64decode(audio_b64)
-    except Exception as e:
-        logger.error("Coqui XTTS TTS failed: {}", e)
-    return None
 
 
 def _get_fish_key() -> str | None:
