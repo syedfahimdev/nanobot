@@ -57,9 +57,9 @@ MAWA_SYSTEM = (
 
 
 @app.cls(
-    gpu="T4",
-    timeout=300,
-    container_idle_timeout=180,
+    gpu="A10G",
+    timeout=600,
+    container_idle_timeout=300,
     volumes={MODEL_DIR: volume},
     memory=32768,
 )
@@ -202,7 +202,7 @@ class MimoAudio:
 
 
 @app.function(
-    gpu="T4", timeout=300, container_idle_timeout=180,
+    gpu="A10G", timeout=600, container_idle_timeout=300,
     volumes={MODEL_DIR: volume}, memory=32768,
 )
 @modal.web_endpoint(method="POST")

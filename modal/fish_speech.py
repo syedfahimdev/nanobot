@@ -15,8 +15,13 @@ image = (
         "torchaudio==2.5.1",
         "soundfile",
         "numpy<2",
-        "coqui-tts",
+        "coqui-tts==0.24.2",
         "fastapi[standard]",
+    )
+    .env({"COQUI_TOS_AGREED": "1"})
+    .run_commands(
+        # Pre-download XTTS v2 model during image build so cold starts are fast
+        "python -c \"from TTS.api import TTS; TTS('tts_models/multilingual/multi-dataset/xtts_v2')\" || echo 'Model download will happen at runtime'",
     )
 )
 

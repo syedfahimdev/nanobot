@@ -79,6 +79,39 @@ PROVIDERS = {
             {"id": "custom", "name": "Your Voice (clone)", "gender": "custom", "clone": True, "preview": None},
         ],
     },
+    "fish-speech": {
+        "label": "Fish Speech",
+        "type": "cloud",
+        "credentials": [
+            {"key": "FISH_API_KEY", "vault": "fish_audio", "label": "Fish.audio API Key (free tier)", "url": "https://fish.audio"},
+        ],
+        "supports_stt": False,
+        "supports_tts": True,
+        "supports_clone": True,
+        "emotions": True,
+        "languages": ["en", "bn", "hi", "zh", "es", "fr", "de", "ar", "ja", "ko", "pt", "ru", "ur", "ta", "te"],
+        "voices": [
+            {"id": "default", "name": "Default", "gender": "neutral", "preview": None},
+            {"id": "custom", "name": "Your Voice (clone)", "gender": "custom", "clone": True, "preview": None},
+        ],
+    },
+    "svara-tts": {
+        "label": "Svara-TTS",
+        "type": "modal",
+        "credentials": [],
+        "endpoint_setting": "svaraTtsEndpoint",
+        "supports_stt": False,
+        "supports_tts": True,
+        "supports_clone": True,
+        "emotions": True,
+        "languages": ["bn", "hi", "en", "mr", "te", "kn", "gu", "ml", "pa", "ta", "as", "ne"],
+        "voices": [
+            {"id": "default", "name": "Default", "gender": "neutral", "preview": None},
+            {"id": "happy", "name": "Happy", "emotion": "happy", "preview": None},
+            {"id": "sad", "name": "Sad", "emotion": "sad", "preview": None},
+            {"id": "custom", "name": "Your Voice (clone)", "gender": "custom", "clone": True, "preview": None},
+        ],
+    },
 }
 
 
@@ -300,6 +333,25 @@ async def generate_tts(
                 return result
             logger.warning("Coqui XTTS TTS failed, falling back to Deepgram")
             return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
+        elif provider_name == "fish-speech":
+            lang = get_setting(workspace, "voiceTtsLanguage", "en")
+            fish_key = _get_fish_key()
+            if not fish_key:
+                logger.warning("Fish Speech: no API key, falling back to Deepgram")
+                return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
+            result = await _tts_fish(clean, fish_key, lang)
+            if result:
+                return result
+            logger.warning("Fish Speech TTS failed, falling back to Deepgram")
+            return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
+        elif provider_name == "svara-tts":
+            endpoint = get_setting(workspace, "svaraTtsEndpoint", "")
+            lang = get_setting(workspace, "voiceTtsLanguage", "bn")
+            result = await _tts_svara(clean, endpoint, lang, emotion)
+            if result:
+                return result
+            logger.warning("Svara-TTS failed, falling back to Deepgram")
+            return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
         else:
             logger.warning("Unknown TTS provider '{}', using Deepgram", provider_name)
             return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
@@ -417,21 +469,65 @@ async def _tts_coqui(text: str, endpoint: str, language: str = "en", clone_path:
     return None
 
 
-async def _tts_mms(text: str, model: str = "facebook/mms-tts-eng", hf_token: str | None = None) -> bytes | None:
-    """Meta MMS-TTS via HuggingFace Inference API."""
+def _get_fish_key() -> str | None:
+    """Get Fish.audio API key from env or vault."""
+    val = os.environ.get("FISH_API_KEY")
+    if val:
+        return val
     try:
-        headers = {}
-        if hf_token:
-            headers["Authorization"] = f"Bearer {hf_token}"
+        from nanobot.setup.vault import load_vault
+        vault = load_vault()
+        for k in ["cred.fish_audio_api_key", "cred.fish_audio", "cred.fish_api_key"]:
+            if vault.get(k):
+                return vault[k]
+    except Exception:
+        pass
+    return None
+
+
+async def _tts_fish(text: str, api_key: str, language: str = "en") -> bytes | None:
+    """Fish Speech S2-Pro via fish.audio API. Free tier: 7 min + 8K credits/month."""
+    try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
-                f"https://router.huggingface.co/hf-inference/models/{model}",
-                headers=headers,
-                json={"inputs": text},
+                "https://api.fish.audio/v1/tts",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "text": text,
+                    "reference_id": "default",
+                    "format": "wav",
+                },
             )
             resp.raise_for_status()
             audio = resp.content
             return audio if len(audio) > 100 else None
     except Exception as e:
-        logger.error("MMS-TTS failed: {}", e)
+        logger.error("Fish Speech TTS failed: {}", e)
+    return None
+
+
+async def _tts_svara(text: str, endpoint: str, language: str = "bn", emotion: str = "neutral") -> bytes | None:
+    """Svara-TTS via Modal endpoint. 19 Indian languages."""
+    if not endpoint:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(endpoint, json={
+                "text": text,
+                "language": language,
+                "emotion": emotion,
+            })
+            resp.raise_for_status()
+            data = resp.json()
+            audio_b64 = data.get("audio_b64")
+            if audio_b64:
+                return base64.b64decode(audio_b64)
+            error = data.get("error")
+            if error:
+                logger.warning("Svara-TTS error: {}", error)
+    except Exception as e:
+        logger.error("Svara-TTS failed: {}", e)
     return None
