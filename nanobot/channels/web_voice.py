@@ -2636,16 +2636,14 @@ copy();
                         client_encoding = data.get("encoding", "linear16")
                         client_sample_rate = data.get("sample_rate", "16000")
 
-                        # Use configured language for STT — "multi" for auto-detect,
-                        # or a specific code (bn, hi, ar, etc.) for better accuracy
+                        # STT language — separate from TTS language
+                        # Client can override via WS message, or use saved setting
                         from nanobot.hooks.builtin.feature_registry import get_setting as _gs
-                        _stt_lang = _gs(self._get_workspace(), "voiceTtsLanguage", "en")
-                        # Map language codes: if not "en", use specific language for better STT accuracy
-                        _deepgram_lang = data.get("language", "multi" if _stt_lang == "en" else _stt_lang)
+                        _stt_lang = data.get("stt_language") or _gs(self._get_workspace(), "voiceSttLanguage", "multi")
 
                         params = {
                             "model": self.config.stt_model,
-                            "language": _deepgram_lang,
+                            "language": _stt_lang,
                             "smart_format": "true",
                             "punctuate": "true",
                             "interim_results": "true",
@@ -2785,6 +2783,34 @@ copy();
                             self._utterance_buffer[session_id] = []
                             self._enqueue_message(session_id, full_text)
                         await ws.send_json({"type": "stopped"})
+
+                    elif action == "set_stt_language":
+                        # Switch STT language on the fly during voice call
+                        new_lang = data.get("language", "multi").strip()
+                        from nanobot.hooks.builtin.feature_registry import save_setting
+                        save_setting(self._get_workspace(), "voiceSttLanguage", new_lang)
+                        logger.info("STT language switched to: {}", new_lang)
+                        await ws.send_json({"type": "stt_language_changed", "language": new_lang})
+                        # Reconnect Deepgram with new language if voice is active
+                        if dg_ws:
+                            try:
+                                await dg_ws.send(json.dumps({"type": "CloseStream"}))
+                                await dg_ws.close()
+                            except Exception:
+                                pass
+                            dg_ws = None
+                            if recv_task:
+                                recv_task.cancel()
+                                recv_task = None
+                            # Will auto-reconnect on next audio frame with new language
+
+                    elif action == "set_tts_language":
+                        # Switch TTS language on the fly
+                        new_lang = data.get("language", "en").strip()
+                        from nanobot.hooks.builtin.feature_registry import save_setting
+                        save_setting(self._get_workspace(), "voiceTtsLanguage", new_lang)
+                        logger.info("TTS language switched to: {}", new_lang)
+                        await ws.send_json({"type": "tts_language_changed", "language": new_lang})
 
                     elif action == "profile":
                         profile_name = data.get("name", "").strip()
