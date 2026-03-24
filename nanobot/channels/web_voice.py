@@ -2636,9 +2636,16 @@ copy();
                         client_encoding = data.get("encoding", "linear16")
                         client_sample_rate = data.get("sample_rate", "16000")
 
+                        # Use configured language for STT — "multi" for auto-detect,
+                        # or a specific code (bn, hi, ar, etc.) for better accuracy
+                        from nanobot.hooks.builtin.feature_registry import get_setting as _gs
+                        _stt_lang = _gs(self._get_workspace(), "voiceTtsLanguage", "en")
+                        # Map language codes: if not "en", use specific language for better STT accuracy
+                        _deepgram_lang = data.get("language", "multi" if _stt_lang == "en" else _stt_lang)
+
                         params = {
                             "model": self.config.stt_model,
-                            "language": data.get("language", "multi"),
+                            "language": _deepgram_lang,
                             "smart_format": "true",
                             "punctuate": "true",
                             "interim_results": "true",
@@ -3116,34 +3123,18 @@ copy();
         provider = get_setting(ws, "voiceTtsProvider", "deepgram")
         detected = getattr(self, "_detected_language", None)
 
-        # Auto-switch TTS for non-English detected speech
+        # Auto-switch TTS for non-English: if on Deepgram (English-only),
+        # fall back to Coqui XTTS for multilingual support
         if detected and detected != "en" and provider == "deepgram":
-            # Deepgram TTS is English-only — auto-switch to a multilingual provider
-            # Map Deepgram language codes to MMS-TTS models
-            lang_to_mms = {
-                "bn": "facebook/mms-tts-ben",  # Bengali
-                "hi": "facebook/mms-tts-hin",  # Hindi
-                "ur": "facebook/mms-tts-urd",  # Urdu
-                "ar": "facebook/mms-tts-ara",  # Arabic
-                "es": "facebook/mms-tts-spa",  # Spanish
-                "fr": "facebook/mms-tts-fra",  # French
-                "de": "facebook/mms-tts-deu",  # German
-                "zh": "facebook/mms-tts-cmn",  # Chinese Mandarin
-                "ja": "facebook/mms-tts-jpn",  # Japanese
-                "ko": "facebook/mms-tts-kor",  # Korean
-                "ta": "facebook/mms-tts-tam",  # Tamil
-                "gu": "facebook/mms-tts-guj",  # Gujarati
-            }
-            mms_model = lang_to_mms.get(detected)
-            if mms_model:
-                logger.info("Auto-switching TTS to MMS-TTS for detected language: {}", detected)
-                from nanobot.hooks.builtin.voice_providers import _tts_mms, _get_hf_token, _strip_md
+            coqui_endpoint = get_setting(ws, "coquiXttsEndpoint", "")
+            if coqui_endpoint:
+                logger.info("Auto-switching TTS to Coqui XTTS for detected language: {}", detected)
+                from nanobot.hooks.builtin.voice_providers import _tts_coqui, _strip_md
                 clean = _strip_md(text)
                 if clean and len(clean) >= 2:
-                    result = await _tts_mms(clean[:2000], mms_model, _get_hf_token())
+                    result = await _tts_coqui(clean[:2000], coqui_endpoint, detected)
                     if result:
                         return result
-                # Fallback to Deepgram English if MMS fails
 
         return await generate_tts(
             text=text,

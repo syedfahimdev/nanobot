@@ -219,11 +219,10 @@ _FEATURE_DEFS: list[dict[str, Any]] = [
 
     # Voice providers
     {"key": "voiceSttProvider", "label": "Voice STT Provider", "desc": "Speech-to-text. deepgram (fast cloud), mimo-audio (GPU, emotion detection).", "category": "media", "type": "string", "default": "deepgram", "placeholder": "deepgram, mimo-audio"},
-    {"key": "voiceTtsProvider", "label": "Voice TTS Provider", "desc": "Text-to-speech. deepgram (fast), mimo-audio (emotional, EN/ZH), fish-speech (multilingual+emotional), mms-tts (1100 langs, free HF).", "category": "media", "type": "string", "default": "deepgram", "placeholder": "deepgram, mimo-audio, fish-speech, mms-tts"},
-    {"key": "voiceTtsLanguage", "label": "Voice TTS Language", "desc": "Language code for multilingual TTS. en, bn (Bengali), hi (Hindi), zh (Chinese), ur (Urdu), ar (Arabic).", "category": "media", "type": "string", "default": "en", "placeholder": "en, bn, hi, zh, ur"},
+    {"key": "voiceTtsProvider", "label": "Voice TTS Provider", "desc": "Text-to-speech. deepgram (fast cloud), mimo-audio (emotional EN/ZH), coqui-xtts (17 langs + cloning).", "category": "media", "type": "string", "default": "deepgram", "placeholder": "deepgram, mimo-audio, coqui-xtts"},
+    {"key": "voiceTtsLanguage", "label": "Voice Language", "desc": "Language for STT + TTS. Also sets Deepgram speech recognition language. en=auto-detect, bn=Bengali, hi=Hindi, etc.", "category": "media", "type": "string", "default": "en", "placeholder": "en, bn, hi, zh, ur, ar, es, fr"},
     {"key": "mimoAudioEndpoint", "label": "MiMo-Audio Endpoint", "desc": "Modal URL for MiMo-Audio.", "category": "media", "type": "string", "default": "https://syedfahimdev--mawa-mimo-audio-api.modal.run", "placeholder": "https://...modal.run"},
     {"key": "coquiXttsEndpoint", "label": "Coqui XTTS Endpoint", "desc": "Modal URL for Coqui XTTS v2 (17 langs, voice clone).", "category": "media", "type": "string", "default": "https://syedfahimdev--mawa-multilingual-tts-api.modal.run", "placeholder": "https://...modal.run"},
-    {"key": "mmsTtsModel", "label": "MMS-TTS Model", "desc": "HuggingFace model for Meta MMS-TTS. facebook/mms-tts-eng (English), facebook/mms-tts-ben (Bengali), facebook/mms-tts-hin (Hindi).", "category": "media", "type": "string", "default": "facebook/mms-tts-eng", "placeholder": "facebook/mms-tts-eng, facebook/mms-tts-ben, facebook/mms-tts-hin, facebook/mms-tts-urd, facebook/mms-tts-ara"},
 
     # Phone calls
     {"key": "phoneCallEnabled", "label": "Phone Calls", "desc": "Allow Mawa to make outbound phone calls via Twilio.", "category": "media", "type": "boolean", "default": True},

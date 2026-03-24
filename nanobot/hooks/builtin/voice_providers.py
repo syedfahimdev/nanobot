@@ -79,29 +79,6 @@ PROVIDERS = {
             {"id": "custom", "name": "Your Voice (clone)", "gender": "custom", "clone": True, "preview": None},
         ],
     },
-    "mms-tts": {
-        "label": "Meta MMS-TTS",
-        "type": "huggingface",
-        "credentials": [
-            {"key": "HF_TOKEN", "vault": "huggingface", "label": "HuggingFace Token (free)", "url": "https://huggingface.co/settings/tokens"},
-        ],
-        "supports_stt": False,
-        "supports_tts": True,
-        "supports_clone": False,
-        "emotions": False,
-        "languages": ["en", "bn", "hi", "ur", "ar", "es", "fr", "de", "zh", "ja", "ko", "ta", "te", "ml", "gu", "pa"],
-        "voices": [
-            {"id": "facebook/mms-tts-eng", "name": "English", "language": "en"},
-            {"id": "facebook/mms-tts-ben", "name": "Bengali", "language": "bn"},
-            {"id": "facebook/mms-tts-hin", "name": "Hindi", "language": "hi"},
-            {"id": "facebook/mms-tts-urd", "name": "Urdu", "language": "ur"},
-            {"id": "facebook/mms-tts-ara", "name": "Arabic", "language": "ar"},
-            {"id": "facebook/mms-tts-spa", "name": "Spanish", "language": "es"},
-            {"id": "facebook/mms-tts-fra", "name": "French", "language": "fr"},
-            {"id": "facebook/mms-tts-tam", "name": "Tamil", "language": "ta"},
-            {"id": "facebook/mms-tts-guj", "name": "Gujarati", "language": "gu"},
-        ],
-    },
 }
 
 
@@ -322,14 +299,6 @@ async def generate_tts(
             if result:
                 return result
             logger.warning("Coqui XTTS TTS failed, falling back to Deepgram")
-            return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
-        elif provider_name == "mms-tts":
-            model = get_setting(workspace, "mmsTtsModel", "facebook/mms-tts-eng")
-            hf_token = _get_hf_token()
-            result = await _tts_mms(clean, model, hf_token)
-            if result:
-                return result
-            logger.warning("MMS-TTS failed, falling back to Deepgram")
             return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
         else:
             logger.warning("Unknown TTS provider '{}', using Deepgram", provider_name)
