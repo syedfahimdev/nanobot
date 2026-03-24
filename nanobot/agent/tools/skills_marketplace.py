@@ -141,6 +141,26 @@ class SkillsMarketplaceTool(Tool):
             skill_dir.mkdir(parents=True, exist_ok=True)
             (skill_dir / "SKILL.md").write_text(resp.text, encoding="utf-8")
 
+            # Try to download companion files (scripts, templates, configs)
+            try:
+                tree_url = f"https://api.github.com/repos/{owner_repo}/git/trees/main?recursive=1"
+                tree_resp = httpx.get(tree_url, timeout=10)
+                if tree_resp.status_code == 200:
+                    tree = tree_resp.json().get("tree", [])
+                    skill_prefix = f"skills/{skill_name}/"
+                    companion_files = [f for f in tree if f["path"].startswith(skill_prefix) and f["type"] == "blob" and not f["path"].endswith("SKILL.md")]
+                    for cf in companion_files[:10]:  # Max 10 companion files
+                        file_url = f"https://raw.githubusercontent.com/{owner_repo}/main/{cf['path']}"
+                        file_resp = httpx.get(file_url, timeout=10)
+                        if file_resp.status_code == 200:
+                            rel_path = cf["path"].replace(skill_prefix, "")
+                            dest = skill_dir / rel_path
+                            dest.parent.mkdir(parents=True, exist_ok=True)
+                            dest.write_bytes(file_resp.content)
+                            logger.debug("Skill companion file: {}", rel_path)
+            except Exception as e:
+                logger.debug("Could not fetch companion files: {}", e)
+
             logger.info("Skills marketplace: installed {} to {}", skill_id, skill_dir)
             return f"Skill '{skill_name}' installed to {skill_dir}. Read SKILL.md before using."
 
