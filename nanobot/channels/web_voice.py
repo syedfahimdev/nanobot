@@ -2082,34 +2082,101 @@ class WebVoiceChannel(BaseChannel):
             return web.json_response({"error": str(e)}, status=500)
 
     async def _suggestions_handler(self, request: web.Request) -> web.Response:
-        """Generate context-aware quick reply suggestions. GET /api/suggestions."""
+        """Generate context-aware follow-up suggestions. GET /api/suggestions?context=...
+
+        When context is provided (last assistant message), generates dynamic
+        follow-up questions. Otherwise falls back to time-based defaults.
+        """
         try:
             from datetime import datetime
+            import re
 
+            context = request.query.get("context", "").strip()
+            last_user = request.query.get("user", "").strip()
             now = datetime.now()
             hour = now.hour
-            weekday = now.strftime("%A")
             suggestions = []
 
-            # Time-based suggestions
-            if 6 <= hour <= 10:
-                suggestions.append({"text": "Check my email", "icon": "mail"})
-                suggestions.append({"text": "What's on my calendar today?", "icon": "calendar"})
-            elif 11 <= hour <= 14:
-                suggestions.append({"text": "Any urgent emails?", "icon": "mail"})
-            elif 17 <= hour <= 21:
-                suggestions.append({"text": "Summarize what happened today", "icon": "sparkles"})
+            if context:
+                # Dynamic follow-ups based on the last assistant response
+                ctx_lower = context.lower()
 
-            # Always available
-            suggestions.append({"text": "Check my goals", "icon": "target"})
+                # Weather-related
+                if any(w in ctx_lower for w in ["weather", "temperature", "forecast", "°f", "°c", "rain", "snow"]):
+                    suggestions.append({"text": "What about tomorrow?", "icon": "cloud"})
+                    suggestions.append({"text": "Show me a weekly forecast", "icon": "chart"})
 
-            # [#2] Merge predictive suggestions from usage patterns
+                # Email-related
+                if any(w in ctx_lower for w in ["email", "inbox", "message from", "subject:", "sender"]):
+                    suggestions.append({"text": "Reply to the important ones", "icon": "reply"})
+                    suggestions.append({"text": "Summarize unread emails", "icon": "sparkles"})
+                    suggestions.append({"text": "Mark them as read", "icon": "check"})
+
+                # Goal/task-related
+                if any(w in ctx_lower for w in ["goal", "task", "pending", "overdue", "completed", "done"]):
+                    suggestions.append({"text": "What should I focus on today?", "icon": "target"})
+                    suggestions.append({"text": "Add a new goal", "icon": "plus"})
+
+                # Calendar/schedule
+                if any(w in ctx_lower for w in ["calendar", "meeting", "appointment", "schedule", "event"]):
+                    suggestions.append({"text": "What's next on my schedule?", "icon": "clock"})
+                    suggestions.append({"text": "Block time for deep work", "icon": "shield"})
+
+                # Code/technical
+                if any(w in ctx_lower for w in ["code", "function", "error", "bug", "deploy", "commit"]):
+                    suggestions.append({"text": "Explain that in simpler terms", "icon": "brain"})
+                    suggestions.append({"text": "Can you write tests for this?", "icon": "check"})
+
+                # Chart/data
+                if any(w in ctx_lower for w in ["chart", "graph", "data", "statistics", "comparison", "percentage"]):
+                    suggestions.append({"text": "Show me a different view", "icon": "chart"})
+                    suggestions.append({"text": "Compare with last month", "icon": "trend"})
+
+                # Image generated
+                if any(w in ctx_lower for w in ["image generated", "generated:", ".png", ".jpg"]):
+                    suggestions.append({"text": "Generate another variation", "icon": "image"})
+                    suggestions.append({"text": "Make it more realistic", "icon": "sparkles"})
+
+                # Financial/billing
+                if any(w in ctx_lower for w in ["bill", "payment", "budget", "cost", "spending", "$"]):
+                    suggestions.append({"text": "Show me my spending this week", "icon": "dollar"})
+                    suggestions.append({"text": "Any bills due soon?", "icon": "alert"})
+
+                # Person/contact mentioned
+                name_match = re.search(r"(?:from|with|about|contact)\s+([A-Z][a-z]+)", context)
+                if name_match:
+                    name = name_match.group(1)
+                    suggestions.append({"text": f"When did I last talk to {name}?", "icon": "user"})
+
+                # Question answered — suggest deeper dive
+                if "?" not in context and len(context) > 100:
+                    suggestions.append({"text": "Tell me more about this", "icon": "arrow-right"})
+                    suggestions.append({"text": "Can you summarize that?", "icon": "sparkles"})
+
+                # Generic follow-ups if nothing specific matched
+                if not suggestions:
+                    suggestions.append({"text": "Tell me more", "icon": "arrow-right"})
+                    suggestions.append({"text": "What else should I know?", "icon": "sparkles"})
+                    suggestions.append({"text": "Can you help with something else?", "icon": "plus"})
+
+            # Fall back to time-based if no context or too few suggestions
+            if len(suggestions) < 2:
+                if 6 <= hour <= 10:
+                    suggestions.append({"text": "Check my email", "icon": "mail"})
+                    suggestions.append({"text": "What's on my calendar today?", "icon": "calendar"})
+                elif 11 <= hour <= 14:
+                    suggestions.append({"text": "Any urgent emails?", "icon": "mail"})
+                elif 17 <= hour <= 21:
+                    suggestions.append({"text": "Summarize what happened today", "icon": "sparkles"})
+                suggestions.append({"text": "Check my goals", "icon": "target"})
+
+            # Merge predictive suggestions from usage patterns
             from nanobot.hooks.builtin.code_features import get_predictive_suggestions
             for ps in get_predictive_suggestions(self._get_workspace()):
                 if not any(s["text"] == ps for s in suggestions):
                     suggestions.append({"text": ps, "icon": "sparkles"})
 
-            return web.json_response({"suggestions": suggestions[:5]})
+            return web.json_response({"suggestions": suggestions[:4]})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
