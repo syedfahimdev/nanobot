@@ -332,9 +332,9 @@ _MATH_FUNCS = {
 
 # Patterns that indicate a math question
 _MATH_PATTERNS = [
-    re.compile(r"(?:what(?:'s| is)|calculate|compute|how much is)\s+([\d\s+\-*/().%^]+)", re.I),
-    re.compile(r"(\d+)\s*%\s*(?:of)\s*\$?([\d,.]+)", re.I),  # "15% of $347"
+    re.compile(r"(\d+\.?\d*)\s*%\s*(?:of)\s*\$?([\d,.]+)", re.I),  # "15% of $347" — must be before generic
     re.compile(r"\$?([\d,.]+)\s*[+\-*/]\s*\$?([\d,.]+)"),  # "$100 + $50"
+    re.compile(r"(?:what(?:'s| is)|calculate|compute|how much is)\s+([\d\s+\-*/().^]+)", re.I),  # generic math (no % to avoid stealing percentage)
 ]
 
 
@@ -419,6 +419,18 @@ _TZ_ALIASES: dict[str, str] = {
     "AEST": "Australia/Sydney", "BDT": "Asia/Dhaka",
     "SGT": "Asia/Singapore", "HKT": "Asia/Hong_Kong",
     "PKT": "Asia/Karachi", "AST": "Asia/Riyadh",
+    # City names
+    "TOKYO": "Asia/Tokyo", "LONDON": "Europe/London",
+    "PARIS": "Europe/Paris", "BERLIN": "Europe/Berlin",
+    "SYDNEY": "Australia/Sydney", "DHAKA": "Asia/Dhaka",
+    "SEOUL": "Asia/Seoul", "SINGAPORE": "Asia/Singapore",
+    "DUBAI": "Asia/Dubai", "MUMBAI": "Asia/Kolkata",
+    "DELHI": "Asia/Kolkata", "KARACHI": "Asia/Karachi",
+    "SHANGHAI": "Asia/Shanghai", "BEIJING": "Asia/Shanghai",
+    "HONG KONG": "Asia/Hong_Kong", "BANGKOK": "Asia/Bangkok",
+    "CHICAGO": "America/Chicago", "DENVER": "America/Denver",
+    "LA": "America/Los_Angeles", "NYC": "America/New_York",
+    "NEW YORK": "America/New_York", "SAN FRANCISCO": "America/Los_Angeles",
 }
 
 _TZ_PATTERN = re.compile(

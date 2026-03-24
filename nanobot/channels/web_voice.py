@@ -248,6 +248,8 @@ class WebVoiceChannel(BaseChannel):
         self._pending_count: dict[str, int] = {}
         # Latency tracking per session
         self._activity_ts: dict[str, float] = {}  # last activity timestamp
+        # Detected language from multi-language STT (auto-switches TTS)
+        self._detected_language: str | None = None
 
     @staticmethod
     def _get_workspace():
@@ -588,7 +590,7 @@ class WebVoiceChannel(BaseChannel):
             ws = self._clients.get(session_id)
             if not ws or ws.closed:
                 break
-            audio = await self._deepgram_tts(text)
+            audio = await self._generate_tts(text)
             if audio and not ws.closed:
                 await ws.send_json({
                     "type": "tts_audio",
@@ -1159,30 +1161,78 @@ class WebVoiceChannel(BaseChannel):
 
             tools = []
 
-            # Built-in tools
-            builtins = [
-                {"name": "read_file", "type": "builtin", "desc": "Read file contents"},
-                {"name": "write_file", "type": "builtin", "desc": "Write to a file"},
-                {"name": "edit_file", "type": "builtin", "desc": "Edit file with find/replace"},
-                {"name": "list_dir", "type": "builtin", "desc": "List directory contents"},
-                {"name": "exec", "type": "builtin", "desc": "Execute shell commands"},
-                {"name": "web_search", "type": "builtin", "desc": "Search the web"},
-                {"name": "web_fetch", "type": "builtin", "desc": "Fetch a URL"},
-                {"name": "message", "type": "builtin", "desc": "Send message to a channel"},
-                {"name": "memory_search", "type": "builtin", "desc": "Search memory via semantic embeddings"},
-                {"name": "memory_save", "type": "builtin", "desc": "Save knowledge to memory"},
-                {"name": "goals", "type": "builtin", "desc": "Track persistent goals and tasks"},
-                {"name": "remember_media", "type": "builtin", "desc": "Remember images, receipts, documents"},
-                {"name": "cron", "type": "builtin", "desc": "Schedule reminders and tasks"},
-                {"name": "spawn", "type": "builtin", "desc": "Spawn a background subagent"},
-            ]
-            for t in builtins:
-                score_data = scores.get(t["name"], {})
+            # Dynamically list ALL registered tools from the agent loop — never hardcoded
+            from nanobot.agent.tools.registry import ToolRegistry
+            from nanobot.agent.tools.base import Tool
+
+            # Get the active agent loop's tool registry if available
+            registered: dict[str, Tool] = {}
+            try:
+                # Build a fresh registry to list all tools that WOULD be registered
+                from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
+                from nanobot.agent.tools.shell import ExecTool
+                from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
+                from nanobot.agent.tools.message import MessageTool
+                from nanobot.agent.tools.memory_search import MemorySearchTool
+                from nanobot.agent.tools.memory_save import MemorySaveTool
+                from nanobot.agent.tools.goals import GoalsTool
+                from nanobot.agent.tools.media_memory import MediaMemoryTool
+                from nanobot.agent.tools.cron import CronTool
+                from nanobot.agent.tools.spawn import SpawnTool
+                from nanobot.agent.tools.background_shell import BackgroundShellTool
+                from nanobot.agent.tools.credentials import CredentialsTool
+                from nanobot.agent.tools.settings_tool import SettingsTool
+                from nanobot.agent.tools.image_gen import ImageGenTool
+                from nanobot.agent.tools.phone_call import PhoneCallTool
+                from nanobot.agent.tools.skill_creator import SkillCreatorTool
+                from nanobot.agent.tools.skills_marketplace import SkillsMarketplaceTool
+                from nanobot.agent.tools.knowledge_ingest import KnowledgeIngestTool
+                from nanobot.agent.tools.inbox import InboxTool
+                ws = get_workspace_path()
+                for cls in [ReadFileTool, WriteFileTool, EditFileTool, ListDirTool]:
+                    t = cls(None, None)
+                    registered[t.name] = t
+                for cls_ws in [ExecTool, MemorySearchTool, MemorySaveTool, GoalsTool,
+                               MediaMemoryTool, CronTool, BackgroundShellTool,
+                               CredentialsTool, SettingsTool, ImageGenTool, PhoneCallTool,
+                               SkillCreatorTool, SkillsMarketplaceTool, KnowledgeIngestTool, InboxTool]:
+                    try:
+                        t = cls_ws(ws)
+                        registered[t.name] = t
+                    except Exception:
+                        try:
+                            t = cls_ws()
+                            registered[t.name] = t
+                        except Exception:
+                            pass
+                for cls_simple in [WebSearchTool, WebFetchTool, MessageTool, SpawnTool]:
+                    try:
+                        t = cls_simple()
+                        registered[t.name] = t
+                    except Exception:
+                        pass
+                # GenUI tools
+                try:
+                    from nanobot.agent.tools.genui_tools import get_genui_tools
+                    for gt in get_genui_tools(ws):
+                        registered[gt.name] = gt
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.debug("Tool listing fallback: {}", e)
+
+            # Build response from registered tools
+            for name, tool in registered.items():
+                score_data = scores.get(name, {})
                 total = score_data.get("success", 0) + score_data.get("fail", 0)
-                t["calls"] = total
-                t["successRate"] = round(score_data["success"] / total * 100, 1) if total > 0 else None
-                t["lastUsed"] = score_data.get("last_used", "")
-                tools.append(t)
+                tools.append({
+                    "name": name,
+                    "type": "genui" if name in ("weather","stock_chart","qr_code","run_code","compare","timeline","show_map","system_monitor") else "builtin",
+                    "desc": tool.description[:80] if hasattr(tool, 'description') else "",
+                    "calls": total,
+                    "successRate": round(score_data["success"] / total * 100, 1) if total > 0 else None,
+                    "lastUsed": score_data.get("last_used", ""),
+                })
 
             return web.json_response({"tools": tools})
         except Exception as e:
@@ -2162,28 +2212,49 @@ copy();
 
             vault = load_vault()
             creds = []
-            # Collect credential entries (cred.*)
-            cred_names = set()
-            for k in vault:
-                if k.startswith("cred.") and not k.endswith(".username"):
-                    cred_names.add(k[5:])
 
-            for name in sorted(cred_names):
-                username = vault.get(f"cred.{name}.username", "")
-                value = vault.get(f"cred.{name}", "")
+            # Show ALL vault entries grouped by category
+            for k in sorted(vault.keys()):
+                value = str(vault[k])
+                # Categorize
+                if k.startswith("cred."):
+                    if k.endswith(".username"):
+                        continue  # Skip username entries, shown with their credential
+                    display_name = k[5:]  # Remove "cred." prefix
+                    username = vault.get(f"{k}.username", "")
+                    category = "credential"
+                elif k.startswith("providers."):
+                    parts = k.split(".")
+                    display_name = f"{parts[1]} ({parts[2] if len(parts) > 2 else 'key'})"
+                    username = ""
+                    category = "provider"
+                elif k.startswith("channels."):
+                    parts = k.split(".")
+                    display_name = f"{parts[1]} ({'.'.join(parts[2:]) if len(parts) > 2 else 'config'})"
+                    username = ""
+                    category = "channel"
+                elif k.startswith("tools."):
+                    parts = k.split(".")
+                    display_name = f"{parts[1]} ({'.'.join(parts[2:]) if len(parts) > 2 else 'config'})"
+                    username = ""
+                    category = "tool"
+                else:
+                    display_name = k
+                    username = ""
+                    category = "other"
+
                 creds.append({
-                    "name": name,
+                    "name": display_name,
+                    "key": k,
                     "username": username,
                     "masked": "*" * min(len(value), 12) if value else "",
                     "length": len(value),
+                    "category": category,
                 })
-
-            # Also count API keys (non-cred vault entries)
-            api_keys = [k for k in vault if not k.startswith("cred.")]
 
             return web.json_response({
                 "credentials": creds,
-                "apiKeyCount": len(api_keys),
+                "apiKeyCount": sum(1 for c in creds if c["category"] in ("provider", "tool")),
                 "totalSecrets": len(vault),
             })
         except Exception as e:
@@ -2481,7 +2552,7 @@ copy();
 
                         params = {
                             "model": self.config.stt_model,
-                            "language": data.get("language", "en"),
+                            "language": data.get("language", "multi"),
                             "smart_format": "true",
                             "punctuate": "true",
                             "interim_results": "true",
@@ -2522,12 +2593,19 @@ copy();
                                                             sentiments = result.get("channel", {}).get("alternatives", [{}])[0].get("sentiment", {})
                                                             if sentiments:
                                                                 sentiment_data = sentiments
+                                                        # Extract detected language from multi-language STT
+                                                        detected_lang = result.get("channel", {}).get("detected_language") or result.get("metadata", {}).get("detected_language")
+                                                        if detected_lang and is_final:
+                                                            self._detected_language = detected_lang
+
                                                         msg_out = {
                                                             "type": "transcript",
                                                             "is_final": is_final,
                                                             "text": text,
                                                             "confidence": round(confidence, 3),
                                                         }
+                                                        if detected_lang:
+                                                            msg_out["detected_language"] = detected_lang
                                                         if sentiment_data:
                                                             msg_out["sentiment"] = sentiment_data
                                                         # Broadcast to all clients
@@ -2936,6 +3014,55 @@ copy();
         raise ConnectionError("Failed to connect to Deepgram after max retries")
 
     # ── Deepgram APIs ──────────────────────────────────────────────
+
+    async def _generate_tts(self, text: str) -> bytes | None:
+        """Generate TTS using the configured provider (dispatches to Deepgram/MiMo/Coqui/MMS).
+
+        If multi-language STT detected a non-English language and the provider
+        supports it, automatically adjust TTS language.
+        """
+        from nanobot.hooks.builtin.voice_providers import generate_tts
+        from nanobot.hooks.builtin.feature_registry import get_setting
+
+        ws = self._get_workspace()
+        provider = get_setting(ws, "voiceTtsProvider", "deepgram")
+        detected = getattr(self, "_detected_language", None)
+
+        # Auto-switch TTS for non-English detected speech
+        if detected and detected != "en" and provider == "deepgram":
+            # Deepgram TTS is English-only — auto-switch to a multilingual provider
+            # Map Deepgram language codes to MMS-TTS models
+            lang_to_mms = {
+                "bn": "facebook/mms-tts-ben",  # Bengali
+                "hi": "facebook/mms-tts-hin",  # Hindi
+                "ur": "facebook/mms-tts-urd",  # Urdu
+                "ar": "facebook/mms-tts-ara",  # Arabic
+                "es": "facebook/mms-tts-spa",  # Spanish
+                "fr": "facebook/mms-tts-fra",  # French
+                "de": "facebook/mms-tts-deu",  # German
+                "zh": "facebook/mms-tts-cmn",  # Chinese Mandarin
+                "ja": "facebook/mms-tts-jpn",  # Japanese
+                "ko": "facebook/mms-tts-kor",  # Korean
+                "ta": "facebook/mms-tts-tam",  # Tamil
+                "gu": "facebook/mms-tts-guj",  # Gujarati
+            }
+            mms_model = lang_to_mms.get(detected)
+            if mms_model:
+                logger.info("Auto-switching TTS to MMS-TTS for detected language: {}", detected)
+                from nanobot.hooks.builtin.voice_providers import _tts_mms, _get_hf_token, _strip_md
+                clean = _strip_md(text)
+                if clean and len(clean) >= 2:
+                    result = await _tts_mms(clean[:2000], mms_model, _get_hf_token())
+                    if result:
+                        return result
+                # Fallback to Deepgram English if MMS fails
+
+        return await generate_tts(
+            text=text,
+            workspace=ws,
+            deepgram_api_key=self.config.deepgram_api_key,
+            deepgram_model=self.config.tts_model,
+        )
 
     async def _deepgram_tts(self, text: str) -> bytes | None:
         text = _strip_markdown(text)

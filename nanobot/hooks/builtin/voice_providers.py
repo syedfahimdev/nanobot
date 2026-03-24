@@ -270,3 +270,199 @@ def delete_voice_sample(workspace: Path, name: str) -> bool:
         path.unlink()
         return True
     return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TTS Dispatcher — routes to the correct provider
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def generate_tts(
+    text: str,
+    workspace: Path,
+    provider_name: str | None = None,
+    voice_id: str | None = None,
+    emotion: str = "neutral",
+    deepgram_api_key: str | None = None,
+    deepgram_model: str = "aura-2-luna-en",
+) -> bytes | None:
+    """Generate TTS audio using the configured provider.
+
+    Returns raw PCM/WAV audio bytes, or None on failure.
+    Falls back to Deepgram if the selected provider fails.
+    """
+    from nanobot.hooks.builtin.feature_registry import get_setting
+
+    if not provider_name:
+        provider_name = get_setting(workspace, "voiceTtsProvider", "deepgram")
+
+    # Strip markdown from text
+    clean = _strip_md(text)
+    if not clean or len(clean) < 2:
+        return None
+    if len(clean) > 2000:
+        clean = clean[:2000]
+
+    try:
+        if provider_name == "deepgram":
+            return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
+        elif provider_name == "mimo-audio":
+            endpoint = get_setting(workspace, "mimoAudioEndpoint", "")
+            clone_path = _get_clone_sample(workspace) if voice_id == "custom" else None
+            result = await _tts_mimo_audio(clean, endpoint, emotion, clone_path)
+            if result:
+                return result
+            # Fallback to Deepgram
+            logger.warning("MiMo-Audio TTS failed, falling back to Deepgram")
+            return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
+        elif provider_name == "coqui-xtts":
+            endpoint = get_setting(workspace, "coquiXttsEndpoint", "")
+            lang = get_setting(workspace, "voiceTtsLanguage", "en")
+            clone_path = _get_clone_sample(workspace) if voice_id == "custom" else None
+            result = await _tts_coqui(clean, endpoint, lang, clone_path)
+            if result:
+                return result
+            logger.warning("Coqui XTTS TTS failed, falling back to Deepgram")
+            return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
+        elif provider_name == "mms-tts":
+            model = get_setting(workspace, "mmsTtsModel", "facebook/mms-tts-eng")
+            hf_token = _get_hf_token()
+            result = await _tts_mms(clean, model, hf_token)
+            if result:
+                return result
+            logger.warning("MMS-TTS failed, falling back to Deepgram")
+            return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
+        else:
+            logger.warning("Unknown TTS provider '{}', using Deepgram", provider_name)
+            return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
+    except Exception as e:
+        logger.error("TTS dispatch error ({}): {}", provider_name, e)
+        if provider_name != "deepgram":
+            return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
+        return None
+
+
+def _strip_md(text: str) -> str:
+    """Strip markdown formatting for TTS."""
+    import re
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    text = re.sub(r'`(.+?)`', r'\1', text)
+    text = re.sub(r'#{1,6}\s+', '', text)
+    text = re.sub(r'\[(.+?)\]\(.+?\)', r'\1', text)
+    text = re.sub(r'[-*]\s+', '', text)
+    return text.strip()
+
+
+def _get_clone_sample(workspace: Path) -> str | None:
+    """Get the default voice clone sample path."""
+    samples = get_voice_samples(workspace)
+    if samples:
+        return samples[0]["path"]
+    return None
+
+
+def _get_hf_token() -> str | None:
+    val = os.environ.get("HF_TOKEN")
+    if val:
+        return val
+    try:
+        from nanobot.setup.vault import load_vault
+        vault = load_vault()
+        for k in ["cred.huggingface_api_key", "cred.huggingface", "HF_TOKEN"]:
+            if vault.get(k):
+                return vault[k]
+    except Exception:
+        pass
+    return None
+
+
+async def _tts_deepgram(text: str, api_key: str | None, model: str) -> bytes | None:
+    """Deepgram TTS — fast cloud API."""
+    if not api_key:
+        api_key = os.environ.get("DEEPGRAM_API_KEY")
+        if not api_key:
+            try:
+                from nanobot.setup.vault import load_vault
+                vault = load_vault()
+                api_key = vault.get("cred.deepgram_api_key") or vault.get("cred.deepgram")
+            except Exception:
+                pass
+    if not api_key:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                "https://api.deepgram.com/v1/speak",
+                headers={"Authorization": f"Token {api_key}", "Content-Type": "application/json"},
+                params={"model": model, "encoding": "linear16", "sample_rate": "24000", "container": "none"},
+                json={"text": text},
+            )
+            resp.raise_for_status()
+            audio = resp.content
+            return audio if len(audio) > 100 else None
+    except Exception as e:
+        logger.error("Deepgram TTS failed: {}", e)
+        return None
+
+
+async def _tts_mimo_audio(text: str, endpoint: str, emotion: str = "neutral", clone_path: str | None = None) -> bytes | None:
+    """MiMo-Audio TTS via Modal endpoint."""
+    if not endpoint:
+        return None
+    try:
+        payload: dict[str, Any] = {"mode": "tts", "text": text, "emotion": emotion}
+        if clone_path and os.path.exists(clone_path):
+            with open(clone_path, "rb") as f:
+                payload["mode"] = "tts"
+                payload["voice_sample_b64"] = base64.b64encode(f.read()).decode()
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(endpoint, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            audio_b64 = data.get("audio_b64")
+            if audio_b64:
+                return base64.b64decode(audio_b64)
+    except Exception as e:
+        logger.error("MiMo-Audio TTS failed: {}", e)
+    return None
+
+
+async def _tts_coqui(text: str, endpoint: str, language: str = "en", clone_path: str | None = None) -> bytes | None:
+    """Coqui XTTS v2 via Modal endpoint."""
+    if not endpoint:
+        return None
+    try:
+        payload: dict[str, Any] = {"mode": "xtts", "text": text, "language": language}
+        if clone_path and os.path.exists(clone_path):
+            with open(clone_path, "rb") as f:
+                payload["voice_sample_b64"] = base64.b64encode(f.read()).decode()
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(endpoint, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            audio_b64 = data.get("audio_b64")
+            if audio_b64:
+                return base64.b64decode(audio_b64)
+    except Exception as e:
+        logger.error("Coqui XTTS TTS failed: {}", e)
+    return None
+
+
+async def _tts_mms(text: str, model: str = "facebook/mms-tts-eng", hf_token: str | None = None) -> bytes | None:
+    """Meta MMS-TTS via HuggingFace Inference API."""
+    try:
+        headers = {}
+        if hf_token:
+            headers["Authorization"] = f"Bearer {hf_token}"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"https://router.huggingface.co/hf-inference/models/{model}",
+                headers=headers,
+                json={"inputs": text},
+            )
+            resp.raise_for_status()
+            audio = resp.content
+            return audio if len(audio) > 100 else None
+    except Exception as e:
+        logger.error("MMS-TTS failed: {}", e)
+    return None

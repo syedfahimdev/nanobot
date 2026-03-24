@@ -241,6 +241,13 @@ class AgentLoop:
         # Phone calls via Twilio
         from nanobot.agent.tools.phone_call import PhoneCallTool
         self.tools.register(PhoneCallTool(self.workspace))
+        # Generative UI tools (weather, stock chart, QR, code runner, compare, timeline, map, system monitor)
+        try:
+            from nanobot.agent.tools.genui_tools import get_genui_tools
+            for tool in get_genui_tools(self.workspace):
+                self.tools.register(tool)
+        except Exception as e:
+            logger.debug("GenUI tools not loaded: {}", e)
         # Native Playwright browser
         try:
             from nanobot.agent.tools.browser import BrowserTool
@@ -1365,8 +1372,12 @@ class AgentLoop:
             record_turn_metric, humanize_error,
         )
 
+        # Load behavior settings to gate interceptors
+        from nanobot.hooks.builtin.feature_registry import get_setting as _get_feat
+        _ws = self.workspace
+
         # [#11] Message dedup — skip if same message sent within 30s
-        if is_duplicate(key, msg.content):
+        if _get_feat(_ws, "messageDedup", True) and is_duplicate(key, msg.content):
             self.model = _original_model
             return None  # Silently drop duplicate
 
@@ -1394,20 +1405,23 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=answer)
 
         # [#1] Response cache — skip LLM for identical questions
-        cached = get_cached_response(msg.content)
-        if cached:
-            return await _send_quick_answer(cached, "Cache hit")
+        if _get_feat(_ws, "responseCaching", True):
+            cached = get_cached_response(msg.content)
+            if cached:
+                return await _send_quick_answer(cached, "Cache hit")
 
         # [#9] Time-aware greeting — zero tokens
-        greeting = get_greeting_response(msg.content, self.workspace)
-        if greeting:
-            return await _send_quick_answer(greeting, "Greeting")
+        if _get_feat(_ws, "greetingInterceptor", True):
+            greeting = get_greeting_response(msg.content, self.workspace)
+            if greeting:
+                return await _send_quick_answer(greeting, "Greeting")
 
         # [Pre-LLM] Try to answer with pure code — zero tokens (math, timezone, regex)
-        from nanobot.hooks.builtin.claude_capabilities import try_code_answer
-        code_answer = try_code_answer(msg.content, self.workspace)
-        if code_answer:
-            return await _send_quick_answer(code_answer, "Code answer")
+        if _get_feat(_ws, "mathInterceptor", True):
+            from nanobot.hooks.builtin.claude_capabilities import try_code_answer
+            code_answer = try_code_answer(msg.content, self.workspace)
+            if code_answer:
+                return await _send_quick_answer(code_answer, "Code answer")
 
         # [#2] Priority detection — log urgency level
         priority = detect_priority(msg.content)
@@ -1415,8 +1429,11 @@ class AgentLoop:
             logger.info("HIGH PRIORITY message from {}: {}", key, msg.content[:60])
 
         # [#10] Frustration detection — adjust response tone
-        is_frustrated, frustration_score = detect_frustration(msg.content, key)
-        _frustration_preamble = get_frustration_preamble(frustration_score) if is_frustrated else ""
+        if _get_feat(_ws, "frustrationDetection", True):
+            is_frustrated, frustration_score = detect_frustration(msg.content, key)
+            _frustration_preamble = get_frustration_preamble(frustration_score) if is_frustrated else ""
+        else:
+            is_frustrated, frustration_score, _frustration_preamble = False, 0.0, ""
 
         history = session.get_history(max_messages=0)
         enriched_content = msg.content

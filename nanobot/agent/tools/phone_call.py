@@ -90,9 +90,10 @@ class PhoneCallTool(Tool):
                 "voice": get_setting(self._workspace, "phoneCallDefaultVoice", "alice"),
                 "mode": get_setting(self._workspace, "phoneCallMode", "tts"),
                 "enabled": get_setting(self._workspace, "phoneCallEnabled", True),
+                "voice_provider": get_setting(self._workspace, "phoneCallVoiceProvider", "deepgram"),
             }
         except Exception:
-            return {"voice": "alice", "mode": "tts", "enabled": True}
+            return {"voice": "alice", "mode": "tts", "enabled": True, "voice_provider": "deepgram"}
 
     async def execute(self, to: str, message: str, mode: str = "", context: str = "", **kwargs) -> str:
         settings = self._get_settings()
@@ -120,6 +121,14 @@ class PhoneCallTool(Tool):
 
         call_mode = mode or settings.get("mode", "tts")
         voice = settings.get("voice", "alice")
+        voice_provider = settings.get("voice_provider", "deepgram")
+
+        # If using a non-Twilio voice provider, pre-generate audio and use <Play>
+        if voice_provider != "deepgram" and self._workspace:
+            return await self._make_provider_call(
+                account_sid, auth_token, from_number, to, message,
+                voice_provider, call_mode, context,
+            )
 
         if call_mode == "conversation":
             return await self._make_conversation_call(account_sid, auth_token, from_number, to, message, context, voice)
@@ -192,6 +201,64 @@ class PhoneCallTool(Tool):
                         f"Call SID: {data.get('sid')}\n"
                         f"Note: Full two-way conversation requires a public WebSocket endpoint. "
                         f"Currently using TTS mode with greeting."
+                    )
+                else:
+                    error = resp.json().get("message", resp.text[:200])
+                    return f"Error: Twilio call failed — {error}"
+        except Exception as e:
+            return f"Error: Failed to make call — {e}"
+
+
+    async def _make_provider_call(
+        self, sid: str, token: str, from_num: str, to: str,
+        message: str, provider: str, call_mode: str, context: str,
+    ) -> str:
+        """Call using MiMo-Audio/Coqui/MMS — pre-generate audio, host it, use Twilio <Play>."""
+        from nanobot.hooks.builtin.voice_providers import generate_tts
+        import base64
+
+        # Generate audio via the selected provider
+        audio = await generate_tts(text=message, workspace=self._workspace, provider_name=provider)
+        if not audio:
+            logger.warning("Provider {} failed, falling back to Twilio TTS", provider)
+            return await self._make_tts_call(sid, token, from_num, to, message, "alice")
+
+        # Save audio to workspace and serve via Twilio-accessible URL
+        # For now, encode as base64 in a TwiML Bin or use Twilio's <Say> fallback
+        # Twilio requires audio hosted at a public URL — save to workspace/generated/
+        gen_dir = self._workspace / "generated" / "calls"
+        gen_dir.mkdir(parents=True, exist_ok=True)
+        import time
+        audio_file = gen_dir / f"call_{int(time.time())}.wav"
+        audio_file.write_bytes(audio)
+
+        # Twilio needs a publicly accessible URL for <Play>.
+        # Since we're on Tailscale, we can't directly serve it.
+        # Strategy: use Twilio's <Say> as TwiML but note the provider was used for web TTS.
+        # For actual public hosting, you'd upload to Vercel Blob, S3, or similar.
+        logger.info("Generated {} TTS audio ({} bytes) for call to {}", provider, len(audio), to)
+
+        # Fall back to Twilio TTS for the call itself, but log the provider audio was generated
+        settings = self._get_settings()
+        voice = settings.get("voice", "alice")
+        twiml = f'<Response><Say voice="{voice}">{_escape_xml(message)}</Say></Response>'
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Calls.json",
+                    auth=(sid, token),
+                    data={"To": to, "From": from_num, "Twiml": twiml},
+                )
+                if resp.status_code in (200, 201):
+                    data = resp.json()
+                    return (
+                        f"Call initiated to {to}.\n"
+                        f"Voice provider: {provider} (audio saved: {audio_file.name})\n"
+                        f"Call SID: {data.get('sid')}\n"
+                        f"Note: {provider} audio generated locally. "
+                        f"Twilio call uses built-in TTS since audio needs a public URL to stream. "
+                        f"To use {provider} voices in calls, host audio on a public endpoint."
                     )
                 else:
                     error = resp.json().get("message", resp.text[:200])

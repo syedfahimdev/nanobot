@@ -278,9 +278,8 @@ def detect_correlations(workspace: Path) -> list[str]:
                 elif days_left < 0:
                     alerts.append(f"OVERDUE goal ({-days_left}d): {task}")
 
-    # Pattern: Wedding date approaching (from memory)
-    wedding_match = re.search(r"wedding.*?(\d{4}-\d{2}-\d{2}|\w+ \d{1,2},? \d{4})", combined, re.I)
-    if wedding_match:
+    # Pattern: Wedding date approaching (from memory) — check ALL mentions
+    for wedding_match in re.finditer(r"wedding.*?(\d{4}-\d{2}-\d{2}|\w+ \d{1,2},? \d{4})", combined, re.I):
         try:
             for fmt in ("%Y-%m-%d", "%B %d, %Y", "%B %d %Y"):
                 try:

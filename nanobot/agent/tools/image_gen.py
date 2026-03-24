@@ -27,7 +27,7 @@ from nanobot.agent.tools.base import Tool
 # Provider configurations
 _PROVIDERS = {
     "pollinations": {
-        "url": "https://image.pollinations.ai/prompt/{prompt}",
+        "url": "https://gen.pollinations.ai/prompt/{prompt}",
         "default_model": "flux",
         "env_key": "",  # No API key needed — 100% free
         "vault_key": "",
@@ -228,7 +228,7 @@ class ImageGenTool(Tool):
         """Generate via Pollinations.ai — 100% free, no API key."""
         try:
             from urllib.parse import quote
-            url = f"https://image.pollinations.ai/prompt/{quote(prompt)}?width={w}&height={h}&model={model}&nologo=true"
+            url = f"https://gen.pollinations.ai/prompt/{quote(prompt)}?width={w}&height={h}&model={model}&nologo=true"
             async with httpx.AsyncClient(timeout=60, follow_redirects=True) as c:
                 r = await c.get(url)
                 if r.status_code == 200 and len(r.content) > 1000:
@@ -241,7 +241,7 @@ class ImageGenTool(Tool):
     async def _gen_huggingface(self, key: str, prompt: str, model: str) -> bytes | None:
         """Generate via Hugging Face Inference API (free with token)."""
         try:
-            url = f"https://api-inference.huggingface.co/models/{model}"
+            url = f"https://router.huggingface.co/hf-inference/models/{model}"
             async with httpx.AsyncClient(timeout=120) as c:
                 r = await c.post(url,
                     headers={"Authorization": f"Bearer {key}"},
