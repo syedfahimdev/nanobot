@@ -1,10 +1,11 @@
-"""Phone call tool — outbound calls with conversational AI via Twilio + Deepgram.
+"""Phone call tool — outbound calls via ElevenLabs Conversational AI.
 
 Two modes:
-1. Simple TTS call — Twilio speaks a static message (no Deepgram needed)
-2. Conversational call — Twilio streams audio ↔ Deepgram STT/TTS ↔ Mawa agent
+1. TTS call — Twilio speaks a static message (one-way, cheap)
+2. Conversation — ElevenLabs agent handles the full call (STT + LLM + TTS)
+   Mawa's context (memory, goals, user profile) is injected into the agent.
 
-Provider, voice, and mode configurable via mawa_settings.json.
+For conversation mode, ElevenLabs handles everything — no serverless GPUs needed.
 """
 
 from __future__ import annotations
@@ -27,7 +28,6 @@ def _get_cred(name: str) -> str | None:
     try:
         from nanobot.setup.vault import load_vault
         vault = load_vault()
-        # Try multiple key formats
         for key in [f"cred.{name.lower()}", f"cred.{name}", name.lower()]:
             if vault.get(key):
                 return vault[key]
@@ -36,11 +36,61 @@ def _get_cred(name: str) -> str | None:
     return None
 
 
+def _build_mawa_context(workspace: Path) -> str:
+    """Build Mawa's context from memory layers for the ElevenLabs agent."""
+    parts = []
+    mem_dir = workspace / "memory"
+
+    # User profile from LONG_TERM
+    lt = mem_dir / "LONG_TERM.md"
+    if lt.exists():
+        content = lt.read_text(encoding="utf-8")[:2000]
+        parts.append("User profile and facts:\n" + content)
+
+    # Today's context from SHORT_TERM
+    st = mem_dir / "SHORT_TERM.md"
+    if st.exists():
+        content = st.read_text(encoding="utf-8")[:1000]
+        parts.append("Today's context:\n" + content)
+
+    # Goals
+    goals = mem_dir / "GOALS.md"
+    if goals.exists():
+        content = goals.read_text(encoding="utf-8")[:500]
+        parts.append("Goals:\n" + content)
+
+    # Learnings (how user likes to be helped)
+    learnings = mem_dir / "LEARNINGS.md"
+    if learnings.exists():
+        content = learnings.read_text(encoding="utf-8")[:500]
+        parts.append("User preferences:\n" + content)
+
+    return "\n\n".join(parts) if parts else "No context available."
+
+
+AGENT_SYSTEM_PROMPT = """You are Mawa, a warm and intelligent personal AI assistant.
+You are currently on a phone call with your user.
+
+RULES:
+- Be concise — this is a phone call, not a chat
+- Be warm, natural, and conversational
+- Use the context below to personalize your responses
+- If asked about something not in your context, say you'll check and follow up in the app
+- Never say "I'm an AI" — you are Mawa, the user's personal assistant
+
+USER CONTEXT:
+{context}
+
+CALL CONTEXT:
+{call_context}"""
+
+
 class PhoneCallTool(Tool):
-    """Make outbound phone calls — simple TTS or conversational AI."""
+    """Make outbound phone calls — TTS message or full AI conversation via ElevenLabs."""
 
     def __init__(self, workspace: Path | None = None):
         self._workspace = workspace
+        self._agent_id: str | None = None
 
     @property
     def name(self) -> str:
@@ -50,9 +100,9 @@ class PhoneCallTool(Tool):
     def description(self) -> str:
         return (
             "Make an outbound phone call. Two modes:\n"
-            "1. 'tts' — speak a one-way message (Twilio TTS)\n"
-            "2. 'conversation' — two-way AI call (Twilio + Deepgram STT/TTS + Mawa agent)\n"
-            "Requires Twilio credentials. Use when the user asks to call someone."
+            "1. 'tts' — speak a one-way message (Twilio TTS, cheap)\n"
+            "2. 'conversation' — full two-way AI call (ElevenLabs agent with Mawa's memory)\n"
+            "Requires Twilio + ElevenLabs credentials for conversation mode."
         )
 
     @property
@@ -66,16 +116,16 @@ class PhoneCallTool(Tool):
                 },
                 "message": {
                     "type": "string",
-                    "description": "For TTS mode: the message to speak. For conversation mode: the opening greeting.",
+                    "description": "For TTS: the message. For conversation: the greeting + why you're calling.",
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["tts", "conversation"],
-                    "description": "tts = one-way message. conversation = two-way AI call. Default from settings.",
+                    "description": "tts = one-way message. conversation = two-way AI call via ElevenLabs.",
                 },
                 "context": {
                     "type": "string",
-                    "description": "For conversation mode: context about why you're calling (helps Mawa respond appropriately).",
+                    "description": "For conversation: context about why you're calling.",
                 },
             },
             "required": ["to", "message"],
@@ -90,53 +140,41 @@ class PhoneCallTool(Tool):
                 "voice": get_setting(self._workspace, "phoneCallDefaultVoice", "alice"),
                 "mode": get_setting(self._workspace, "phoneCallMode", "tts"),
                 "enabled": get_setting(self._workspace, "phoneCallEnabled", True),
-                "voice_provider": get_setting(self._workspace, "phoneCallVoiceProvider", "deepgram"),
             }
         except Exception:
-            return {"voice": "alice", "mode": "tts", "enabled": True, "voice_provider": "deepgram"}
+            return {"voice": "alice", "mode": "tts", "enabled": True}
 
     async def execute(self, to: str, message: str, mode: str = "", context: str = "", **kwargs) -> str:
         settings = self._get_settings()
 
         if not settings.get("enabled", True):
-            return "Phone calls are disabled. Enable in settings: settings(set, 'phoneCallEnabled', true)"
-
-        # Get Twilio credentials
-        account_sid = _get_cred("TWILIO_ACCOUNT_SID") or _get_cred("twilio_sid")
-        auth_token = _get_cred("TWILIO_AUTH_TOKEN") or _get_cred("twilio_token")
-        from_number = _get_cred("TWILIO_PHONE_NUMBER") or _get_cred("twilio_phone")
-
-        if not all([account_sid, auth_token, from_number]):
-            return (
-                "Error: Twilio credentials not configured. Save them:\n"
-                "- credentials(save, 'twilio_sid', 'your_account_sid')\n"
-                "- credentials(save, 'twilio_token', 'your_auth_token')\n"
-                "- credentials(save, 'twilio_phone', '+1your_number')\n\n"
-                "Get free at https://www.twilio.com/try-twilio"
-            )
+            return "Phone calls are disabled. Enable in settings."
 
         # Normalize phone number
         if not to.startswith("+"):
             to = f"+1{to}"
 
         call_mode = mode or settings.get("mode", "tts")
-        voice = settings.get("voice", "alice")
-        voice_provider = settings.get("voice_provider", "deepgram")
-
-        # If using a non-Twilio voice provider, pre-generate audio and use <Play>
-        if voice_provider != "deepgram" and self._workspace:
-            return await self._make_provider_call(
-                account_sid, auth_token, from_number, to, message,
-                voice_provider, call_mode, context,
-            )
 
         if call_mode == "conversation":
-            return await self._make_conversation_call(account_sid, auth_token, from_number, to, message, context, voice)
+            return await self._make_elevenlabs_call(to, message, context)
         else:
-            return await self._make_tts_call(account_sid, auth_token, from_number, to, message, voice)
+            return await self._make_tts_call(to, message, settings.get("voice", "alice"))
 
-    async def _make_tts_call(self, sid: str, token: str, from_num: str, to: str, message: str, voice: str) -> str:
+    async def _make_tts_call(self, to: str, message: str, voice: str) -> str:
         """Simple one-way TTS call via Twilio."""
+        sid = _get_cred("TWILIO_ACCOUNT_SID") or _get_cred("twilio_sid")
+        token = _get_cred("TWILIO_AUTH_TOKEN") or _get_cred("twilio_token")
+        from_num = _get_cred("TWILIO_PHONE_NUMBER") or _get_cred("twilio_phone")
+
+        if not all([sid, token, from_num]):
+            return (
+                "Error: Twilio credentials not configured. Save them:\n"
+                "- credentials(save, 'twilio_sid', 'your_account_sid')\n"
+                "- credentials(save, 'twilio_token', 'your_auth_token')\n"
+                "- credentials(save, 'twilio_phone', '+1your_number')"
+            )
+
         twiml = f'<Response><Say voice="{voice}">{_escape_xml(message)}</Say></Response>'
 
         try:
@@ -146,125 +184,165 @@ class PhoneCallTool(Tool):
                     auth=(sid, token),
                     data={"To": to, "From": from_num, "Twiml": twiml},
                 )
-
                 if resp.status_code in (200, 201):
                     data = resp.json()
-                    logger.info("TTS call initiated: {} → {} (SID: {})", from_num, to, data.get("sid"))
-                    return f"Call initiated to {to}. Mawa will speak: \"{message[:60]}...\"\nCall SID: {data.get('sid')}"
+                    return f"Call initiated to {to}.\nMessage: \"{message[:60]}...\"\nCall SID: {data.get('sid')}"
                 else:
-                    error = resp.json().get("message", resp.text[:200])
-                    return f"Error: Twilio call failed — {error}"
+                    return f"Error: Twilio call failed — {resp.json().get('message', resp.text[:200])}"
         except Exception as e:
             return f"Error: Failed to make call — {e}"
 
-    async def _make_conversation_call(self, sid: str, token: str, from_num: str, to: str, greeting: str, context: str, voice: str) -> str:
-        """Two-way conversational call using Twilio Media Streams + Deepgram.
+    async def _make_elevenlabs_call(self, to: str, greeting: str, call_context: str) -> str:
+        """Two-way conversational call via ElevenLabs Conversational AI.
 
         Flow:
-        1. Twilio calls the number
-        2. On connect, TwiML starts a media stream to our WebSocket
-        3. Our server receives audio → Deepgram STT → agent → Deepgram TTS → back to Twilio
+        1. Build Mawa's context from memory
+        2. Create/update ElevenLabs agent with context
+        3. Initiate outbound call via ElevenLabs phone API
         """
-        # Check if Deepgram is configured
-        dg_key = _get_cred("DEEPGRAM_API_KEY") or _get_cred("deepgram")
-        if not dg_key:
-            # Fall back to TTS mode
-            logger.warning("Deepgram not configured, falling back to TTS call")
-            return await self._make_tts_call(sid, token, from_num, to, greeting, voice)
+        el_key = _get_cred("ELEVENLABS_API_KEY") or _get_cred("elevenlabs_api_key")
+        if not el_key:
+            return (
+                "Error: ElevenLabs API key not configured for conversation calls.\n"
+                "Save it: credentials(save, 'elevenlabs_api_key', 'your_key')\n"
+                "Get one at: https://elevenlabs.io"
+            )
 
-        # For conversation mode, we need a publicly accessible WebSocket URL
-        # The TwiML connects Twilio's media stream to our server
-        # For now, use TTS with a note about conversation setup
-        twiml = (
-            f'<Response>'
-            f'<Say voice="{voice}">{_escape_xml(greeting)}</Say>'
-            f'<Pause length="1"/>'
-            f'<Say voice="{voice}">If you need anything, just let me know through the app.</Say>'
-            f'</Response>'
+        # Build context from Mawa's memory
+        mawa_context = _build_mawa_context(self._workspace) if self._workspace else "No workspace context."
+
+        system_prompt = AGENT_SYSTEM_PROMPT.format(
+            context=mawa_context[:3000],
+            call_context=call_context or f"Greeting: {greeting}",
         )
 
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Calls.json",
-                    auth=(sid, token),
-                    data={"To": to, "From": from_num, "Twiml": twiml},
+            headers = {"xi-api-key": el_key, "Content-Type": "application/json"}
+
+            # Step 1: Create or update the agent
+            agent_id = await self._ensure_agent(headers, system_prompt, greeting)
+            if not agent_id:
+                return "Error: Failed to create ElevenLabs conversation agent."
+
+            # Step 2: Check if Twilio is configured for outbound
+            twilio_sid = _get_cred("TWILIO_ACCOUNT_SID") or _get_cred("twilio_sid")
+            twilio_token = _get_cred("TWILIO_AUTH_TOKEN") or _get_cred("twilio_token")
+            twilio_phone = _get_cred("TWILIO_PHONE_NUMBER") or _get_cred("twilio_phone")
+
+            if all([twilio_sid, twilio_token, twilio_phone]):
+                # Outbound call via ElevenLabs + Twilio
+                result = await self._initiate_outbound_call(headers, agent_id, to, twilio_sid, twilio_token, twilio_phone)
+                return result
+            else:
+                # No Twilio — return agent info for manual connection
+                return (
+                    f"ElevenLabs conversation agent ready!\n"
+                    f"Agent ID: {agent_id}\n"
+                    f"Context: {call_context or 'general'}\n"
+                    f"Connect via: wss://api.elevenlabs.io/v1/convai/conversation?agent_id={agent_id}\n\n"
+                    f"To make outbound calls, save Twilio credentials."
                 )
 
+        except Exception as e:
+            logger.error("ElevenLabs call error: {}", e)
+            return f"Error: ElevenLabs call failed — {e}"
+
+    async def _ensure_agent(self, headers: dict, system_prompt: str, greeting: str) -> str | None:
+        """Create or update the ElevenLabs conversation agent."""
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                # Try to update existing agent first
+                if self._agent_id:
+                    resp = await client.patch(
+                        f"https://api.elevenlabs.io/v1/convai/agents/{self._agent_id}",
+                        headers=headers,
+                        json={
+                            "conversation_config": {
+                                "agent": {
+                                    "prompt": {"prompt": system_prompt},
+                                    "first_message": greeting,
+                                }
+                            }
+                        },
+                    )
+                    if resp.status_code == 200:
+                        logger.info("Updated ElevenLabs agent: {}", self._agent_id)
+                        return self._agent_id
+
+                # Create new agent
+                resp = await client.post(
+                    "https://api.elevenlabs.io/v1/convai/agents/create",
+                    headers=headers,
+                    json={
+                        "name": "Mawa Phone Agent",
+                        "conversation_config": {
+                            "agent": {
+                                "first_message": greeting,
+                                "language": "en",
+                                "prompt": {
+                                    "prompt": system_prompt,
+                                    "temperature": 0.7,
+                                },
+                            },
+                            "tts": {
+                                "voice_id": "21m00Tcm4TlvDq8ikWAM",  # Rachel
+                            },
+                        },
+                    },
+                )
                 if resp.status_code in (200, 201):
                     data = resp.json()
-                    logger.info("Conversation call initiated: {} → {} (SID: {})", from_num, to, data.get("sid"))
-                    return (
-                        f"Call initiated to {to}.\n"
-                        f"Greeting: \"{greeting[:60]}...\"\n"
-                        f"Context: {context[:60] if context else 'none'}\n"
-                        f"Call SID: {data.get('sid')}\n"
-                        f"Note: Full two-way conversation requires a public WebSocket endpoint. "
-                        f"Currently using TTS mode with greeting."
-                    )
+                    self._agent_id = data.get("agent_id")
+                    logger.info("Created ElevenLabs agent: {}", self._agent_id)
+                    return self._agent_id
                 else:
-                    error = resp.json().get("message", resp.text[:200])
-                    return f"Error: Twilio call failed — {error}"
+                    logger.error("Agent create failed: {} {}", resp.status_code, resp.text[:200])
+                    return None
         except Exception as e:
-            return f"Error: Failed to make call — {e}"
+            logger.error("Agent ensure error: {}", e)
+            return None
 
-
-    async def _make_provider_call(
-        self, sid: str, token: str, from_num: str, to: str,
-        message: str, provider: str, call_mode: str, context: str,
+    async def _initiate_outbound_call(
+        self, headers: dict, agent_id: str, to: str,
+        twilio_sid: str, twilio_token: str, twilio_phone: str,
     ) -> str:
-        """Call using MiMo-Audio/Coqui/MMS — pre-generate audio, host it, use Twilio <Play>."""
-        from nanobot.hooks.builtin.voice_providers import generate_tts
-        import base64
-
-        # Generate audio via the selected provider
-        audio = await generate_tts(text=message, workspace=self._workspace, provider_name=provider)
-        if not audio:
-            logger.warning("Provider {} failed, falling back to Twilio TTS", provider)
-            return await self._make_tts_call(sid, token, from_num, to, message, "alice")
-
-        # Save audio to workspace and serve via Twilio-accessible URL
-        # For now, encode as base64 in a TwiML Bin or use Twilio's <Say> fallback
-        # Twilio requires audio hosted at a public URL — save to workspace/generated/
-        gen_dir = self._workspace / "generated" / "calls"
-        gen_dir.mkdir(parents=True, exist_ok=True)
-        import time
-        audio_file = gen_dir / f"call_{int(time.time())}.wav"
-        audio_file.write_bytes(audio)
-
-        # Twilio needs a publicly accessible URL for <Play>.
-        # Since we're on Tailscale, we can't directly serve it.
-        # Strategy: use Twilio's <Say> as TwiML but note the provider was used for web TTS.
-        # For actual public hosting, you'd upload to Vercel Blob, S3, or similar.
-        logger.info("Generated {} TTS audio ({} bytes) for call to {}", provider, len(audio), to)
-
-        # Fall back to Twilio TTS for the call itself, but log the provider audio was generated
-        settings = self._get_settings()
-        voice = settings.get("voice", "alice")
-        twiml = f'<Response><Say voice="{voice}">{_escape_xml(message)}</Say></Response>'
-
+        """Initiate an outbound call through ElevenLabs + Twilio."""
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
-                    f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Calls.json",
-                    auth=(sid, token),
-                    data={"To": to, "From": from_num, "Twiml": twiml},
+                    f"https://api.elevenlabs.io/v1/convai/twilio/outbound-call",
+                    headers=headers,
+                    json={
+                        "agent_id": agent_id,
+                        "agent_phone_number_id": twilio_phone,
+                        "to_number": to,
+                        "twilio_account_sid": twilio_sid,
+                        "twilio_auth_token": twilio_token,
+                    },
                 )
                 if resp.status_code in (200, 201):
                     data = resp.json()
+                    call_sid = data.get("call_sid", data.get("sid", ""))
                     return (
-                        f"Call initiated to {to}.\n"
-                        f"Voice provider: {provider} (audio saved: {audio_file.name})\n"
-                        f"Call SID: {data.get('sid')}\n"
-                        f"Note: {provider} audio generated locally. "
-                        f"Twilio call uses built-in TTS since audio needs a public URL to stream. "
-                        f"To use {provider} voices in calls, host audio on a public endpoint."
+                        f"Conversation call initiated to {to}!\n"
+                        f"Agent: Mawa (ElevenLabs AI)\n"
+                        f"Call SID: {call_sid}\n"
+                        f"The AI agent has Mawa's full context — memory, goals, user profile.\n"
+                        f"Agent ID: {agent_id}"
                     )
                 else:
-                    error = resp.json().get("message", resp.text[:200])
-                    return f"Error: Twilio call failed — {error}"
+                    error = resp.text[:200]
+                    logger.error("Outbound call failed: {}", error)
+                    # Fallback: return agent ID for manual connection
+                    return (
+                        f"Outbound call API returned {resp.status_code}.\n"
+                        f"Agent is ready — connect manually or via Twilio webhook:\n"
+                        f"Agent ID: {agent_id}\n"
+                        f"WebSocket: wss://api.elevenlabs.io/v1/convai/conversation?agent_id={agent_id}\n"
+                        f"Error: {error}"
+                    )
         except Exception as e:
-            return f"Error: Failed to make call — {e}"
+            return f"Error initiating call: {e}\nAgent ID: {agent_id}"
 
 
 def _escape_xml(text: str) -> str:
