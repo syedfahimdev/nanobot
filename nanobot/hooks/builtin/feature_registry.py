@@ -77,8 +77,15 @@ def save_settings_bulk(workspace: Path, updates: dict[str, Any]) -> None:
 
 
 def get_setting(workspace: Path, key: str, default: Any = None) -> Any:
-    """Get a single setting value."""
-    return load_settings(workspace).get(key, default)
+    """Get a single setting value. Falls back to _FEATURE_DEFS default if not in file."""
+    val = load_settings(workspace).get(key)
+    if val is not None:
+        return val
+    # Check feature definitions for default
+    for fdef in _FEATURE_DEFS:
+        if fdef["key"] == key:
+            return fdef.get("default", default)
+    return default
 
 
 # ── Migrate old scattered files into unified ────────────────────────────────
