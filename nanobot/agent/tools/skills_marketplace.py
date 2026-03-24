@@ -1,4 +1,8 @@
-"""Skills Marketplace tool — search and install skills from skills.sh.
+"""Skills Marketplace tool — search and install skills from skills.sh + clawhub.
+
+Two sources:
+1. skills.sh (npx skills) — original marketplace
+2. clawhub (npx clawhub@latest) — newer, more skills, companion files
 
 Mawa can search for skills when she encounters tasks she can't handle,
 discover community skills, and install them with user approval.
@@ -8,6 +12,7 @@ from __future__ import annotations
 
 import subprocess
 import re
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -25,12 +30,10 @@ class SkillsMarketplaceTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Search the skills.sh marketplace to find and install community skills. "
-            "Use when: you can't complete a task and need a new skill, "
-            "the user asks to find/install a skill, "
-            "or you want to suggest a skill that could help. "
-            "Actions: search (find skills by keyword), install (add a skill), "
-            "list (show installed skills)."
+            "Search and install skills from two marketplaces:\n"
+            "1. skills.sh — format: owner/repo@skill-name\n"
+            "2. clawhub — format: skill-slug (downloads with companion files)\n"
+            "Actions: search, install, list. Source: 'skills.sh' or 'clawhub'."
         )
 
     @property
@@ -45,26 +48,40 @@ class SkillsMarketplaceTool(Tool):
                 },
                 "query": {
                     "type": "string",
-                    "description": "Search query (for search action). E.g., 'pdf', 'frontend', 'slack'.",
+                    "description": "Search query. E.g., 'pdf', 'weather', 'excel'.",
                 },
                 "skill_id": {
                     "type": "string",
-                    "description": "Skill ID to install (for install action). Format: owner/repo@skill-name.",
+                    "description": "Skill ID. skills.sh: owner/repo@skill. clawhub: skill-slug.",
+                },
+                "source": {
+                    "type": "string",
+                    "enum": ["skills.sh", "clawhub", "both"],
+                    "description": "Which marketplace. Default: both.",
                 },
             },
             "required": ["action"],
         }
 
-    async def execute(self, action: str, query: str = "", skill_id: str = "", **kwargs: Any) -> str:
+    async def execute(self, action: str, query: str = "", skill_id: str = "", source: str = "both", **kwargs: Any) -> str:
         if action == "search":
-            return self._search(query)
+            results = []
+            if source in ("skills.sh", "both"):
+                results.append(self._search_skillssh(query))
+            if source in ("clawhub", "both"):
+                results.append(self._search_clawhub(query))
+            return "\n\n".join(r for r in results if r)
         elif action == "install":
-            return self._install(skill_id)
+            # Auto-detect source from skill_id format
+            if "@" in skill_id:
+                return self._install_skillssh(skill_id)
+            else:
+                return self._install_clawhub(skill_id)
         elif action == "list":
             return self._list()
         return f"Unknown action: {action}"
 
-    def _search(self, query: str) -> str:
+    def _search_skillssh(self, query: str) -> str:
         if not query or len(query) < 2:
             return "Error: query required (at least 2 characters)."
 
@@ -105,7 +122,7 @@ class SkillsMarketplaceTool(Tool):
         except Exception as e:
             return f"Error searching: {e}"
 
-    def _install(self, skill_id: str) -> str:
+    def _install_skillssh(self, skill_id: str) -> str:
         if not skill_id:
             return "Error: skill_id required (format: owner/repo@skill-name)."
 
@@ -166,6 +183,71 @@ class SkillsMarketplaceTool(Tool):
 
         except Exception as e:
             return f"Error installing: {e}"
+
+    def _search_clawhub(self, query: str) -> str:
+        """Search clawhub marketplace."""
+        if not query or len(query) < 2:
+            return ""
+        try:
+            result = subprocess.run(
+                ["npx", "clawhub@latest", "search", query],
+                capture_output=True, text=True, timeout=20,
+                env={**__import__("os").environ, "NO_COLOR": "1"},
+            )
+            output = result.stdout.strip()
+            # Parse clawhub output — format: "slug  Name  (score)"
+            lines = [l.strip() for l in output.split("\n") if l.strip() and not l.startswith("-") and not l.startswith("[")]
+            if not lines:
+                return ""
+            results = []
+            for line in lines[:7]:
+                parts = line.split("  ")
+                slug = parts[0].strip() if parts else line.strip()
+                name = parts[1].strip() if len(parts) > 1 else slug
+                results.append(f"- **{slug}** — {name}")
+            return f"**Clawhub** ({len(results)} results for '{query}'):\n" + "\n".join(results) + \
+                f"\n\nTo install from clawhub: skills_marketplace(action='install', skill_id='{results[0].split('**')[1]}')" if results else ""
+        except Exception as e:
+            return f"Clawhub search error: {e}"
+
+    def _install_clawhub(self, slug: str) -> str:
+        """Install skill from clawhub to workspace/skills/."""
+        if not slug:
+            return "Error: skill slug required."
+        try:
+            from nanobot.config.paths import get_workspace_path
+            skill_dir = get_workspace_path() / "skills"
+            skill_dir.mkdir(parents=True, exist_ok=True)
+
+            result = subprocess.run(
+                ["npx", "clawhub@latest", "install", slug, "--force"],
+                capture_output=True, text=True, timeout=30,
+                cwd=str(skill_dir),
+            )
+
+            # clawhub creates skills/slug/ inside cwd — check for double nesting
+            nested = skill_dir / "skills" / slug
+            target = skill_dir / slug
+            if nested.exists() and not target.exists():
+                import shutil
+                shutil.move(str(nested), str(target))
+                # Clean up empty skills/skills/ dir
+                try:
+                    (skill_dir / "skills").rmdir()
+                except OSError:
+                    pass
+
+            if target.exists() and (target / "SKILL.md").exists():
+                files = list(target.rglob("*"))
+                file_count = sum(1 for f in files if f.is_file())
+                logger.info("Clawhub: installed {} ({} files)", slug, file_count)
+                return f"Skill '{slug}' installed from clawhub ({file_count} files). Read SKILL.md before using."
+            else:
+                error = result.stderr[:200] or result.stdout[:200]
+                return f"Install may have failed: {error}"
+
+        except Exception as e:
+            return f"Error installing from clawhub: {e}"
 
     def _list(self) -> str:
         try:
