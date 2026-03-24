@@ -26,6 +26,19 @@ from nanobot.agent.tools.base import Tool
 
 # Provider configurations
 _PROVIDERS = {
+    "pollinations": {
+        "url": "https://image.pollinations.ai/prompt/{prompt}",
+        "default_model": "flux",
+        "env_key": "",  # No API key needed — 100% free
+        "vault_key": "",
+        "free": True,
+    },
+    "huggingface": {
+        "url": "https://api-inference.huggingface.co/models/{model}",
+        "default_model": "black-forest-labs/FLUX.1-schnell",
+        "env_key": "HF_TOKEN",
+        "vault_key": "huggingface",
+    },
     "together": {
         "url": "https://api.together.xyz/v1/images/generations",
         "default_model": "black-forest-labs/FLUX.1-schnell-Free",
@@ -121,7 +134,7 @@ class ImageGenTool(Tool):
         try:
             from nanobot.hooks.builtin.feature_registry import get_setting
             return {
-                "provider": get_setting(self._workspace, "imageGenProvider", "together"),
+                "provider": get_setting(self._workspace, "imageGenProvider", "pollinations"),
                 "model": get_setting(self._workspace, "imageGenModel", ""),
             }
         except Exception:
@@ -155,20 +168,30 @@ class ImageGenTool(Tool):
         if not provider:
             return f"Error: Unknown image provider '{provider_name}'. Available: {', '.join(_PROVIDERS.keys())}"
 
-        api_key = _get_api_key(provider)
-        if not api_key:
-            # Try all providers as fallback
-            for name, prov in _PROVIDERS.items():
-                api_key = _get_api_key(prov)
-                if api_key:
-                    provider_name = name
-                    provider = prov
-                    break
+        # Free providers don't need API keys
+        if provider.get("free"):
+            api_key = "free"
+        else:
+            api_key = _get_api_key(provider)
+            if not api_key:
+                # Try free providers first, then others
+                for name, prov in _PROVIDERS.items():
+                    if prov.get("free"):
+                        provider_name = name
+                        provider = prov
+                        api_key = "free"
+                        break
+                    key = _get_api_key(prov)
+                    if key:
+                        provider_name = name
+                        provider = prov
+                        api_key = key
+                        break
 
         if not api_key:
             return (
                 "Error: No image generation API key found. Configure one in settings:\n"
-                "1. `settings(action='set', key='imageGenProvider', value='together')`\n"
+                "1. `settings(action='set', key='imageGenProvider', value='pollinations')` (FREE, no key needed)\n"
                 "2. Save your API key: `credentials(action='save', name='together_api_key', value='...')`\n\n"
                 "Supported: together (free tier), fal, replicate, openai, stability"
             )
@@ -177,7 +200,11 @@ class ImageGenTool(Tool):
 
         # Route to the right provider
         result = None
-        if provider_name == "together":
+        if provider_name == "pollinations":
+            result = await self._gen_pollinations(enhanced, model, width, height)
+        elif provider_name == "huggingface":
+            result = await self._gen_huggingface(api_key, enhanced, model)
+        elif provider_name == "together":
             result = await self._gen_together(api_key, enhanced, model, width, height)
         elif provider_name == "fal":
             result = await self._gen_fal(api_key, enhanced, model, width, height)
@@ -196,6 +223,35 @@ class ImageGenTool(Tool):
         filepath.write_bytes(result)
         logger.info("Generated image via {}: {} ({} bytes)", provider_name, filepath, len(result))
         return f"Image generated: {filepath}"
+
+    async def _gen_pollinations(self, prompt: str, model: str, w: int, h: int) -> bytes | None:
+        """Generate via Pollinations.ai — 100% free, no API key."""
+        try:
+            from urllib.parse import quote
+            url = f"https://image.pollinations.ai/prompt/{quote(prompt)}?width={w}&height={h}&model={model}&nologo=true"
+            async with httpx.AsyncClient(timeout=60, follow_redirects=True) as c:
+                r = await c.get(url)
+                if r.status_code == 200 and len(r.content) > 1000:
+                    return r.content
+                logger.warning("Pollinations: {} ({}b)", r.status_code, len(r.content))
+        except Exception as e:
+            logger.warning("Pollinations error: {}", e)
+        return None
+
+    async def _gen_huggingface(self, key: str, prompt: str, model: str) -> bytes | None:
+        """Generate via Hugging Face Inference API (free with token)."""
+        try:
+            url = f"https://api-inference.huggingface.co/models/{model}"
+            async with httpx.AsyncClient(timeout=120) as c:
+                r = await c.post(url,
+                    headers={"Authorization": f"Bearer {key}"},
+                    json={"inputs": prompt})
+                if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
+                    return r.content
+                logger.warning("HuggingFace: {} {}", r.status_code, r.text[:100])
+        except Exception as e:
+            logger.warning("HuggingFace error: {}", e)
+        return None
 
     async def _gen_together(self, key: str, prompt: str, model: str, w: int, h: int) -> bytes | None:
         try:

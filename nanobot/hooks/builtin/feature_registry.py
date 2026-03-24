@@ -201,7 +201,7 @@ _FEATURE_DEFS: list[dict[str, Any]] = [
     {"key": "contactAutoExtract", "label": "Contact Auto-Extract", "desc": "Extract contacts from memory on heartbeat.", "category": "maintenance", "type": "boolean", "default": True},
 
     # Media generation
-    {"key": "imageGenProvider", "label": "Image Provider", "desc": "Provider for image generation. Options: together (free), fal, replicate, openai, stability.", "category": "media", "type": "string", "default": "together", "placeholder": "together, fal, replicate, openai, stability"},
+    {"key": "imageGenProvider", "label": "Image Provider", "desc": "Provider for image generation. Free: pollinations (no key), together, huggingface. Paid: fal, replicate, openai, stability.", "category": "media", "type": "string", "default": "pollinations", "placeholder": "pollinations, huggingface, together, fal, replicate, openai, stability"},
     {"key": "imageGenModel", "label": "Image Model", "desc": "Model to use. Leave empty for provider default.", "category": "media", "type": "string", "default": "", "placeholder": "provider default"},
     {"key": "imageGenEnabled", "label": "Image Generation", "desc": "Allow Mawa to generate images when asked or when a visual would help.", "category": "media", "type": "boolean", "default": True},
 
