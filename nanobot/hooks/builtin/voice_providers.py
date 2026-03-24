@@ -44,11 +44,6 @@ PROVIDERS = {
             {"id": "aura-2-arcas-en", "name": "Arcas", "gender": "male", "preview": None},
         ],
     },
-    "fish-speech": {
-        "label": "Fish Speech",
-        "type": "cloud",
-        "credentials": [
-            {"key": "FISH_API_KEY", "vault": "fish_audio", "label": "Fish.audio API Key (free tier)", "url": "https://fish.audio"},
         ],
         "supports_stt": False,
         "supports_tts": True,
@@ -284,12 +279,6 @@ async def generate_tts(
     try:
         if provider_name == "deepgram":
             return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
-        elif provider_name == "fish-speech":
-            lang = get_setting(workspace, "voiceTtsLanguage", "en")
-            fish_key = _get_fish_key()
-            if not fish_key:
-                logger.warning("Fish Speech: no API key, falling back to Deepgram")
-                return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
             result = await _tts_fish(clean, fish_key, lang)
             if result:
                 return result
@@ -386,44 +375,8 @@ async def _tts_deepgram(text: str, api_key: str | None, model: str) -> bytes | N
 
 
 
-def _get_fish_key() -> str | None:
-    """Get Fish.audio API key from env or vault."""
-    val = os.environ.get("FISH_API_KEY")
-    if val:
-        return val
-    try:
-        from nanobot.setup.vault import load_vault
-        vault = load_vault()
-        for k in ["cred.fish_audio_api_key", "cred.fish_audio", "cred.fish_api_key"]:
-            if vault.get(k):
-                return vault[k]
-    except Exception:
-        pass
-    return None
 
 
-async def _tts_fish(text: str, api_key: str, language: str = "en") -> bytes | None:
-    """Fish Speech S2-Pro via fish.audio API. Free tier: 7 min + 8K credits/month."""
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                "https://api.fish.audio/v1/tts",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "text": text,
-                    "reference_id": "default",
-                    "format": "wav",
-                },
-            )
-            resp.raise_for_status()
-            audio = resp.content
-            return audio if len(audio) > 100 else None
-    except Exception as e:
-        logger.error("Fish Speech TTS failed: {}", e)
-    return None
 
 
 def _get_elevenlabs_key() -> str | None:
