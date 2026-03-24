@@ -44,17 +44,6 @@ PROVIDERS = {
             {"id": "aura-2-arcas-en", "name": "Arcas", "gender": "male", "preview": None},
         ],
     },
-        ],
-        "supports_stt": False,
-        "supports_tts": True,
-        "supports_clone": True,
-        "emotions": True,
-        "languages": ["en", "bn", "hi", "zh", "es", "fr", "de", "ar", "ja", "ko", "pt", "ru", "ur", "ta", "te"],
-        "voices": [
-            {"id": "default", "name": "Default", "gender": "neutral", "preview": None},
-            {"id": "custom", "name": "Your Voice (clone)", "gender": "custom", "clone": True, "preview": None},
-        ],
-    },
     "elevenlabs": {
         "label": "ElevenLabs",
         "type": "cloud",
