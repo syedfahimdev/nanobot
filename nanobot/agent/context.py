@@ -66,15 +66,15 @@ class ContextBuilder:
             parts.append(GENERATIVE_UI_INSTRUCTION)
 
         # LLM-generated follow-up suggestions (opt-in — costs tokens)
+        # Skip in voice mode — causes LLM to say "follow up" out loud
         from nanobot.hooks.builtin.feature_registry import get_setting
-        if get_setting(self.workspace, "llmFollowUps", False):
+        if get_setting(self.workspace, "llmFollowUps", False) and channel not in ("web_voice", "discord_voice"):
             parts.append(
                 "## Follow-Up Suggestions\n\n"
-                "IMPORTANT: At the END of every response, you MUST add a line starting with "
+                "At the END of every response, add a line starting with "
                 "`[FOLLOWUPS]` followed by 2-3 short follow-up questions separated by `|`.\n"
                 "Example: `[FOLLOWUPS] What about next week?|Show me a chart|Tell me more`\n"
-                "Keep each under 40 chars. Make them contextual to what you just answered.\n"
-                "This is REQUIRED — always include it, even for short responses."
+                "Keep each under 40 chars. Make them contextual to what you just answered."
             )
 
         # Skills: don't list them — the LLM searches on demand
