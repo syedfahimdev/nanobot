@@ -134,3 +134,55 @@ class ListSubagentsTool(Tool):
         for t in tasks:
             lines.append(f"  - [{t['id']}] {t['label']}: {t['task'][:80]}")
         return "\n".join(lines)
+
+
+class CancelSubagentTool(Tool):
+    """Tool to cancel a running subagent."""
+
+    def __init__(self, manager: "SubagentManager"):
+        self._manager = manager
+        self._session_key = "cli:direct"
+
+    def set_context(self, channel: str, chat_id: str) -> None:
+        self._session_key = f"{channel}:{chat_id}"
+
+    @property
+    def name(self) -> str:
+        return "cancel_subagent"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Cancel a running subagent task. Use when:\n"
+            "- User says 'cancel that task' or 'stop that'\n"
+            "- A task is taking too long and you want to take over\n"
+            "- User changed their mind about a background task\n"
+            "Pass task_id to cancel a specific task, or 'all' to cancel all."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "ID of the task to cancel (from list_subagents), or 'all' to cancel all",
+                },
+            },
+            "required": ["task_id"],
+        }
+
+    async def execute(self, task_id: str, **kwargs: Any) -> str:
+        if task_id == "all":
+            count = await self._manager.cancel_by_session(self._session_key)
+            return f"Cancelled {count} subagent(s)." if count else "No running subagents to cancel."
+
+        # Cancel specific task
+        tasks = self._manager.get_running_tasks()
+        for t in tasks:
+            if t["id"] == task_id:
+                count = await self._manager.cancel_by_session(self._session_key)
+                return f"Cancelled task [{task_id}]: {t['label']}"
+
+        return f"Task '{task_id}' not found. Use list_subagents to see running tasks."
