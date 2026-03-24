@@ -45,9 +45,15 @@ def _card(inner: str) -> str:
 
 async def _geocode(city: str) -> tuple[float, float, str]:
     """Resolve city name to (lat, lon, display_name) via Open-Meteo geocoding."""
+    import re
+    # Strip US state abbreviations — Open-Meteo doesn't understand "CT", "NY", etc.
+    cleaned = re.sub(r',?\s*[A-Z]{2}\s*$', '', city.strip())
+    if not cleaned:
+        cleaned = city
+
     url = "https://geocoding-api.open-meteo.com/v1/search"
     async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.get(url, params={"name": city, "count": 1, "language": "en"})
+        r = await client.get(url, params={"name": cleaned, "count": 1, "language": "en"})
         r.raise_for_status()
         data = r.json()
     results = data.get("results")
