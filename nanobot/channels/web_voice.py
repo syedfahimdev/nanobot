@@ -352,6 +352,13 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_post("/api/delegations", self._delegations_save_handler)
         self._app.router.add_get("/api/decisions", self._decisions_handler)
         self._app.router.add_get("/api/people-prep", self._people_prep_handler)
+        # Voice providers
+        self._app.router.add_get("/api/voice/providers", self._voice_providers_handler)
+        self._app.router.add_get("/api/voice/voices", self._voice_voices_handler)
+        self._app.router.add_post("/api/voice/validate", self._voice_validate_handler)
+        self._app.router.add_get("/api/voice/samples", self._voice_samples_handler)
+        self._app.router.add_post("/api/voice/samples", self._voice_sample_upload_handler)
+        self._app.router.add_delete("/api/voice/samples/{name}", self._voice_sample_delete_handler)
         self._app.router.add_get("/api/features", self._features_manifest_handler)
         self._app.router.add_post("/api/features", self._features_save_handler)
         self._app.router.add_post("/api/budget", self._budget_save_handler)
@@ -1809,6 +1816,40 @@ class WebVoiceChannel(BaseChannel):
         if not name:
             return web.json_response({"error": "name required"}, status=400)
         return web.json_response(get_people_prep(self._get_workspace(), name))
+
+    # ── Voice Provider API ──
+
+    async def _voice_providers_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.voice_providers import get_all_providers
+        return web.json_response({"providers": get_all_providers()})
+
+    async def _voice_voices_handler(self, request: web.Request) -> web.Response:
+        provider = request.query.get("provider", "deepgram")
+        from nanobot.hooks.builtin.voice_providers import get_provider_voices
+        return web.json_response(get_provider_voices(provider))
+
+    async def _voice_validate_handler(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        provider = body.get("provider", "")
+        from nanobot.hooks.builtin.voice_providers import validate_provider
+        result = await validate_provider(provider, self._get_workspace())
+        return web.json_response(result)
+
+    async def _voice_samples_handler(self, request: web.Request) -> web.Response:
+        from nanobot.hooks.builtin.voice_providers import get_voice_samples
+        return web.json_response({"samples": get_voice_samples(self._get_workspace())})
+
+    async def _voice_sample_upload_handler(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        from nanobot.hooks.builtin.voice_providers import save_voice_sample
+        path = save_voice_sample(self._get_workspace(), body.get("audio_b64", ""), body.get("name", "my_voice"))
+        return web.json_response({"ok": True, "path": path})
+
+    async def _voice_sample_delete_handler(self, request: web.Request) -> web.Response:
+        name = request.match_info.get("name", "")
+        from nanobot.hooks.builtin.voice_providers import delete_voice_sample
+        ok = delete_voice_sample(self._get_workspace(), name)
+        return web.json_response({"ok": ok})
 
     async def _features_manifest_handler(self, request: web.Request) -> web.Response:
         """GET /api/features — full manifest of all configurable features."""
