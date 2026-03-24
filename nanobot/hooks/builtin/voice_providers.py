@@ -440,8 +440,14 @@ def _get_elevenlabs_key() -> str | None:
     return None
 
 
-async def _tts_elevenlabs(text: str, api_key: str, voice_id: str = "21m00Tcm4TlvDq8ikWAM") -> bytes | None:
-    """ElevenLabs TTS — high quality, 29 languages, voice cloning."""
+async def _tts_elevenlabs(text: str, api_key: str, voice_id: str = "21m00Tcm4TlvDq8ikWAM", flash: bool = True) -> bytes | None:
+    """ElevenLabs TTS — Flash (~75ms) or Multilingual v2 (~300ms).
+
+    Flash (eleven_flash_v2_5): ultra-low latency, great for voice chat
+    Multilingual (eleven_multilingual_v2): higher quality, 29 languages
+    """
+    # Flash for voice chat speed, multilingual for quality/languages
+    model = "eleven_flash_v2_5" if flash else "eleven_multilingual_v2"
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
@@ -453,7 +459,7 @@ async def _tts_elevenlabs(text: str, api_key: str, voice_id: str = "21m00Tcm4Tlv
                 },
                 json={
                     "text": text,
-                    "model_id": "eleven_multilingual_v2",
+                    "model_id": model,
                     "voice_settings": {
                         "stability": 0.5,
                         "similarity_boost": 0.75,
