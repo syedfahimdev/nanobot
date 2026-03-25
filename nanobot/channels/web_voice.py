@@ -640,65 +640,46 @@ class WebVoiceChannel(BaseChannel):
         _provider = get_setting(_ws_path, "voiceTtsProvider", "deepgram")
         _use_streaming = get_setting(_ws_path, "deepgramTtsStreaming", True)
 
-        while True:
-            try:
-                text = await asyncio.wait_for(q.get(), timeout=30.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                break
-            # Format text for natural TTS output (all providers)
-            if _provider == "deepgram":
-                text = format_text_for_aura2(text)
-            logger.debug("TTS worker generating for '{}' ({})", text[:40], session_id)
-            ws = self._clients.get(session_id)
-            if not ws or ws.closed:
-                break
-
-            # ElevenLabs: use streaming API for lower latency
-            if _provider == "elevenlabs":
+        try:
+            while True:
                 try:
-                    await self._stream_elevenlabs_to_client(text, session_id, ws)
-                except Exception as e:
-                    logger.error("ElevenLabs streaming failed: {}, falling back to buffered", e)
-                    audio = await self._generate_tts(text, session_id=session_id)
-                    if audio and not ws.closed:
-                        await ws.send_json({
-                            "type": "tts_audio",
-                            "audio_b64": base64.b64encode(audio).decode(),
-                            "sample_rate": 24000,
-                        })
-            elif _provider == "deepgram" and _use_streaming:
-                # Deepgram WebSocket streaming — ultra-low latency
-                try:
-                    await self._stream_deepgram_to_client(text, session_id, ws)
-                except Exception as e:
-                    logger.error("Deepgram streaming failed: {}, falling back to REST", e)
-                    audio = await self._generate_tts(text, session_id=session_id)
-                    if audio and not ws.closed:
-                        await ws.send_json({
-                            "type": "tts_audio",
-                            "audio_b64": base64.b64encode(audio).decode(),
-                            "sample_rate": 24000,
-                        })
-            else:
-                # Deepgram REST / other: buffered
-                audio = await self._generate_tts(text, session_id=session_id)
-                if audio and not ws.closed:
-                    try:
-                        await ws.send_json({
-                            "type": "tts_audio",
-                            "audio_b64": base64.b64encode(audio).decode(),
-                            "sample_rate": 24000,
-                        })
-                    except Exception as e:
-                        logger.error("TTS send failed: {}", e)
-                        break
+                    text = await asyncio.wait_for(q.get(), timeout=30.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    break
+                # Format text for natural TTS output (all providers)
+                if _provider == "deepgram":
+                    text = format_text_for_aura2(text)
+                logger.debug("TTS worker generating for '{}' ({})", text[:40], session_id)
+                ws = self._clients.get(session_id)
+                if not ws or ws.closed:
+                    break
 
-        # TTS done — clear playing flag and add cooldown before accepting STT
-        self._tts_playing.discard(session_id)
-        # Clean up Deepgram streaming connection when worker exits
-        stream = self._dg_tts_stream.pop(session_id, None)
-        if stream:
-            await stream.close()
+                try:
+                    # ElevenLabs: use streaming API for lower latency
+                    if _provider == "elevenlabs":
+                        await self._stream_elevenlabs_to_client(text, session_id, ws)
+                    elif _provider == "deepgram" and _use_streaming:
+                        await self._stream_deepgram_to_client(text, session_id, ws)
+                    else:
+                        # Deepgram REST / other: buffered
+                        audio = await self._generate_tts(text, session_id=session_id)
+                        if audio and not ws.closed:
+                            await ws.send_json({
+                                "type": "tts_audio",
+                                "audio_b64": base64.b64encode(audio).decode(),
+                                "sample_rate": 24000,
+                            })
+                            logger.debug("TTS sent {}KB WAV for '{}'", len(audio) // 1024, text[:30])
+                except Exception as e:
+                    logger.error("TTS generation/send failed for '{}': {}", text[:30], e)
+        finally:
+            # ALWAYS clear playing flag — even on crash, timeout, or exception
+            self._tts_playing.discard(session_id)
+            logger.debug("TTS worker done for {} — echo suppression cleared", session_id)
+            # Clean up Deepgram streaming connection
+            stream = self._dg_tts_stream.pop(session_id, None)
+            if stream:
+                await stream.close()
 
     async def _stream_elevenlabs_to_client(self, text: str, session_id: str, ws) -> None:
         """Stream ElevenLabs TTS — accumulates on server, sends complete MP3 to client."""
