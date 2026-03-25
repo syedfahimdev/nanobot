@@ -256,6 +256,8 @@ class WebVoiceChannel(BaseChannel):
         self._dg_tts_stream: dict[str, Any] = {}
         # TTS playback state — suppress STT while speaking to prevent echo feedback
         self._tts_playing: set[str] = set()
+        # Track recent TTS text for smart echo detection (compare STT against what Mawa said)
+        self._recent_tts_text: dict[str, str] = {}
 
     @staticmethod
     def _get_workspace():
@@ -614,6 +616,21 @@ class WebVoiceChannel(BaseChannel):
 
     _ECHO_COOLDOWN_SECS = 4.0  # Suppress STT for 4s after TTS audio plays (covers speaker playback + mic tail)
 
+    @staticmethod
+    def _is_echo(transcript: str, tts_text: str) -> bool:
+        """Check if an STT transcript is an echo of what Mawa just said.
+
+        Uses word overlap — if >50% of the transcript's words appear in the
+        recent TTS text, it's likely echo from the speaker.
+        """
+        t_words = set(transcript.lower().split())
+        m_words = set(tts_text.lower().split())
+        if not t_words:
+            return True  # Empty transcript during TTS = definitely echo
+        overlap = len(t_words & m_words)
+        ratio = overlap / len(t_words)
+        return ratio > 0.5
+
     def _enqueue_tts(self, session_id: str, text: str) -> None:
         """Add a sentence to the ordered TTS queue for this session."""
         if session_id not in self._tts_queues:
@@ -650,6 +667,8 @@ class WebVoiceChannel(BaseChannel):
                 if _provider == "deepgram":
                     text = format_text_for_aura2(text)
                 logger.debug("TTS worker generating for '{}' ({})", text[:40], session_id)
+                # Track what Mawa is saying for echo detection
+                self._recent_tts_text[session_id] = self._recent_tts_text.get(session_id, "") + " " + text
                 ws = self._clients.get(session_id)
                 if not ws or ws.closed:
                     break
@@ -675,9 +694,10 @@ class WebVoiceChannel(BaseChannel):
         finally:
             # ALWAYS clear playing flag — even on crash, timeout, or exception
             self._tts_playing.discard(session_id)
-            # Echo cooldown AFTER all sentences are spoken — not between each one
+            # Echo cooldown AFTER all sentences are spoken
             await asyncio.sleep(self._ECHO_COOLDOWN_SECS)
             self._tts_playing.discard(session_id)
+            self._recent_tts_text.pop(session_id, None)
             logger.debug("TTS worker done for {} — echo suppression cleared after {}s cooldown", session_id, self._ECHO_COOLDOWN_SECS)
             # Clean up Deepgram streaming connection
             stream = self._dg_tts_stream.pop(session_id, None)
@@ -3199,11 +3219,25 @@ copy();
 
         is_interrupt = bool(_INTERRUPT_PATTERNS.search(text.strip()))
 
-        # Echo suppression: drop STT transcripts while TTS is playing.
-        # Allow interrupt patterns ("stop", "wait", "no") through to cancel speech.
+        # Smart echo suppression: while TTS is playing, distinguish between
+        # Mawa's own voice echo (drop) and user follow-up questions (keep).
         if session_id in self._tts_playing and not is_interrupt:
-            logger.debug("Echo suppression: dropping '{}' (TTS playing for {})", text[:40], session_id)
-            return
+            # Check if this transcript matches what Mawa is currently saying
+            recent_tts = self._recent_tts_text.get(session_id, "")
+            if recent_tts and self._is_echo(text, recent_tts):
+                logger.debug("Echo suppression: dropping echo '{}' (matches TTS)", text[:40])
+                return
+            else:
+                # Doesn't match TTS — this is a real user follow-up during playback
+                # Cancel current TTS and process the follow-up
+                logger.info("User follow-up during TTS: '{}' — processing", text[:40])
+                # Clear TTS queue to stop speaking
+                q = self._tts_queues.get(session_id)
+                if q:
+                    while not q.empty():
+                        try: q.get_nowait()
+                        except: break
+                self._tts_playing.discard(session_id)
 
         if is_interrupt:
             asyncio.create_task(self._send_stop(session_id))
