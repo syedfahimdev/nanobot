@@ -510,12 +510,14 @@ class DeepgramTTSStream:
         self.sample_rate = sample_rate
         self._ws = None
         self._audio_callback = None
+        self._flush_callback = None
         self._recv_task = None
         self._connected = False
 
-    async def connect(self, audio_callback):
+    async def connect(self, audio_callback, flush_callback=None):
         """Connect to Deepgram TTS WebSocket. audio_callback(bytes) receives PCM chunks."""
         self._audio_callback = audio_callback
+        self._flush_callback = flush_callback
         url = (
             f"wss://api.deepgram.com/v1/speak"
             f"?model={self.model}"
@@ -549,6 +551,8 @@ class DeepgramTTSStream:
                         msg_type = data.get("type", "")
                         if msg_type == "Flushed":
                             logger.debug("Deepgram TTS: flush acknowledged")
+                            if self._flush_callback:
+                                await self._flush_callback()
                         elif msg_type == "Warning":
                             logger.warning("Deepgram TTS warning: {}", data.get("warn_msg", ""))
                         elif msg_type == "Error":

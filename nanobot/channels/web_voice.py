@@ -749,7 +749,10 @@ class WebVoiceChannel(BaseChannel):
             async def _on_audio(pcm_data: bytes, _sid=session_id):
                 await self._on_deepgram_audio(_sid, pcm_data)
 
-            await stream.connect(_on_audio)
+            async def _on_flush(_sid=session_id):
+                await self._flush_dg_audio(_sid)
+
+            await stream.connect(_on_audio, flush_callback=_on_flush)
             self._dg_tts_stream[session_id] = stream
 
         # Format text for Aura-2 and send
@@ -757,21 +760,42 @@ class WebVoiceChannel(BaseChannel):
         await stream.speak(formatted)
         await stream.flush()
 
+    _DG_AUDIO_BUF_SIZE = 12000  # ~250ms at 24kHz 16-bit mono — good balance of latency vs decode reliability
+
     async def _on_deepgram_audio(self, session_id: str, pcm_data: bytes):
-        """Forward raw PCM from Deepgram directly to the browser."""
+        """Accumulate PCM chunks from Deepgram and send larger WAV segments to the browser."""
+        if not hasattr(self, '_dg_audio_buf'):
+            self._dg_audio_buf: dict[str, bytearray] = {}
+
+        buf = self._dg_audio_buf.setdefault(session_id, bytearray())
+        buf.extend(pcm_data)
+
+        if len(buf) >= self._DG_AUDIO_BUF_SIZE:
+            await self._flush_dg_audio(session_id)
+
+    async def _flush_dg_audio(self, session_id: str):
+        """Send accumulated PCM buffer as a single WAV to the browser."""
+        if not hasattr(self, '_dg_audio_buf'):
+            return
+        buf = self._dg_audio_buf.get(session_id)
+        if not buf:
+            return
+        pcm = bytes(buf)
+        buf.clear()
+
         ws = self._clients.get(session_id)
         if not ws or ws.closed:
             return
-        wav_header = self._build_wav_header(len(pcm_data), 24000)
-        audio = wav_header + pcm_data
+        wav_header = self._build_wav_header(len(pcm), 24000)
+        audio = wav_header + pcm
         try:
             await ws.send_json({
                 "type": "tts_audio",
                 "audio_b64": base64.b64encode(audio).decode(),
                 "sample_rate": 24000,
             })
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error("Deepgram audio send failed for {}: {}", session_id, e)
 
     @staticmethod
     def _build_wav_header(data_size: int, sample_rate: int = 24000) -> bytes:
