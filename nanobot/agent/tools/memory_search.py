@@ -75,9 +75,12 @@ class MemorySearchTool(Tool):
             return "Error: query too short."
         pattern = re.compile("|".join(re.escape(w) for w in words), re.IGNORECASE)
 
-        # Search memory files
+        # Search memory files (exclude internal system files)
+        _EXCLUDE = {"CORRECTIONS.md", "TOOL_LEARNINGS.md", "PROMPT_STATS.json", ".workflow_state.json"}
         if folder in ("memory", "all") and self._memory_dir.exists():
             for md_file in sorted(self._memory_dir.glob("*.md")):
+                if md_file.name in _EXCLUDE:
+                    continue
                 if len(results) >= top_k:
                     break
                 self._search_file(md_file, pattern, results, top_k)

@@ -61,6 +61,11 @@ class SelfCorrector:
         categories = []
         result = event.result or ""
 
+        # Skip pattern matching for tools that return search results containing
+        # other tools' error logs (e.g., memory_search returning CORRECTIONS.md)
+        if event.name in ("memory_search", "read_file", "inbox") and re.match(r"^Found \d+ result", result):
+            return []
+
         for pattern, category in _ERROR_PATTERNS:
             if pattern.search(result):
                 categories.append(category)
