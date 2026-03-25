@@ -254,6 +254,8 @@ class WebVoiceChannel(BaseChannel):
         self._speak_reasoning: dict[str, bool] = {}
         # Per-session Deepgram TTS WebSocket streams
         self._dg_tts_stream: dict[str, Any] = {}
+        # TTS playback state — suppress STT while speaking to prevent echo feedback
+        self._tts_playing: set[str] = set()
 
     @staticmethod
     def _get_workspace():
@@ -615,6 +617,8 @@ class WebVoiceChannel(BaseChannel):
         if session_id not in self._tts_queues:
             self._tts_queues[session_id] = asyncio.Queue()
         self._tts_queues[session_id].put_nowait(text)
+        # Mark session as playing TTS — suppress STT echo
+        self._tts_playing.add(session_id)
         if session_id not in self._tts_workers or self._tts_workers[session_id].done():
             self._tts_workers[session_id] = asyncio.create_task(self._tts_worker(session_id))
 
@@ -686,6 +690,8 @@ class WebVoiceChannel(BaseChannel):
                         logger.error("TTS send failed: {}", e)
                         break
 
+        # TTS done — clear playing flag and add cooldown before accepting STT
+        self._tts_playing.discard(session_id)
         # Clean up Deepgram streaming connection when worker exits
         stream = self._dg_tts_stream.pop(session_id, None)
         if stream:
@@ -3196,6 +3202,12 @@ copy();
         Interrupt patterns ('no', 'stop', 'wait') still cancel via /stop.
         media: list of base64 data URIs (images) or file paths.
         """
+        # Echo suppression: drop STT transcripts that arrived while TTS is playing.
+        # The mic picks up Mawa's own voice from the speaker and Deepgram transcribes it.
+        if session_id in self._tts_playing:
+            logger.debug("Echo suppression: dropping '{}' (TTS playing for {})", text[:40], session_id)
+            return
+
         is_interrupt = bool(_INTERRUPT_PATTERNS.search(text.strip()))
 
         if is_interrupt:
