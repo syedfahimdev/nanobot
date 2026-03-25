@@ -9,13 +9,16 @@ All providers registered with:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
+import struct
 from pathlib import Path
 from typing import Any
 
 import httpx
+import websockets
 from loguru import logger
 
 
@@ -483,3 +486,148 @@ async def stream_tts_elevenlabs(
     return None
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Deepgram TTS WebSocket Streaming
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class DeepgramTTSStream:
+    """Persistent WebSocket connection to Deepgram's TTS streaming API.
+
+    Keeps a single connection open per voice session. Text is sent as chunks,
+    audio arrives as raw PCM (linear16) and is forwarded to the client immediately.
+
+    Key Deepgram features used:
+    - WebSocket streaming for ultra-low latency (~200ms TTFB)
+    - linear16 encoding at 24000Hz (direct PCM — no MP3 decode needed)
+    - container=none (prevents clicking from header misinterpretation)
+    - Flush command to finalize audio after each sentence
+    - Aura-2 context-aware voices with natural emotion from text formatting
+    """
+
+    def __init__(self, api_key: str, model: str = "aura-2-thalia-en", sample_rate: int = 24000):
+        self.api_key = api_key
+        self.model = model
+        self.sample_rate = sample_rate
+        self._ws = None
+        self._audio_callback = None
+        self._recv_task = None
+        self._connected = False
+
+    async def connect(self, audio_callback):
+        """Connect to Deepgram TTS WebSocket. audio_callback(bytes) receives PCM chunks."""
+        self._audio_callback = audio_callback
+        url = (
+            f"wss://api.deepgram.com/v1/speak"
+            f"?model={self.model}"
+            f"&encoding=linear16"
+            f"&sample_rate={self.sample_rate}"
+            f"&container=none"
+        )
+        try:
+            self._ws = await websockets.connect(
+                url,
+                additional_headers={"Authorization": f"Token {self.api_key}"},
+                ping_interval=20,
+            )
+            self._connected = True
+            self._recv_task = asyncio.create_task(self._receive_loop())
+            logger.debug("Deepgram TTS WebSocket connected (model={}, sr={})", self.model, self.sample_rate)
+        except Exception as e:
+            logger.error("Deepgram TTS WebSocket connect failed: {}", e)
+            self._connected = False
+
+    async def _receive_loop(self):
+        """Receive audio data from Deepgram and forward to callback."""
+        try:
+            async for message in self._ws:
+                if isinstance(message, bytes) and len(message) > 0:
+                    if self._audio_callback:
+                        await self._audio_callback(message)
+                elif isinstance(message, str):
+                    try:
+                        data = json.loads(message)
+                        msg_type = data.get("type", "")
+                        if msg_type == "Flushed":
+                            logger.debug("Deepgram TTS: flush acknowledged")
+                        elif msg_type == "Warning":
+                            logger.warning("Deepgram TTS warning: {}", data.get("warn_msg", ""))
+                        elif msg_type == "Error":
+                            logger.error("Deepgram TTS error: {}", data.get("err_msg", ""))
+                    except json.JSONDecodeError:
+                        pass
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.debug("Deepgram TTS WebSocket closed: {}", e)
+        except Exception as e:
+            logger.error("Deepgram TTS receive error: {}", e)
+        finally:
+            self._connected = False
+
+    async def speak(self, text: str):
+        """Send text to be spoken. Audio arrives via the callback."""
+        if not self._connected or not self._ws:
+            return
+        try:
+            await self._ws.send(json.dumps({"type": "Speak", "text": text}))
+        except Exception as e:
+            logger.error("Deepgram TTS send error: {}", e)
+            self._connected = False
+
+    async def flush(self):
+        """Flush remaining audio. Call after sending the last text chunk."""
+        if not self._connected or not self._ws:
+            return
+        try:
+            await self._ws.send(json.dumps({"type": "Flush"}))
+        except Exception as e:
+            logger.error("Deepgram TTS flush error: {}", e)
+
+    async def clear(self):
+        """Clear the audio buffer (interrupt current speech)."""
+        if not self._connected or not self._ws:
+            return
+        try:
+            await self._ws.send(json.dumps({"type": "Clear"}))
+        except Exception:
+            pass
+
+    async def close(self):
+        """Close the WebSocket connection."""
+        self._connected = False
+        if self._ws:
+            try:
+                await self._ws.send(json.dumps({"type": "Close"}))
+                await self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+        if self._recv_task:
+            self._recv_task.cancel()
+            self._recv_task = None
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
+
+
+def format_text_for_aura2(text: str) -> str:
+    """Format text for natural Aura-2 speech output.
+
+    Aura-2 is context-aware — proper punctuation directly affects
+    pacing, intonation, and expressiveness.
+    """
+    import re
+
+    text = text.strip()
+    if text and text[-1] not in '.!?':
+        text += '.'
+
+    # Add natural pauses for lists (comma before last item)
+    text = re.sub(r'(\w+)\s+(\w+)\s+and\s+(\w+)', r'\1, \2, and \3', text)
+
+    # Add comma after direct address ("Hello Maria" → "Hello, Maria")
+    text = re.sub(r'\b(Hello|Hey|Hi|Okay|Sure|Well|Look|See|Right)\s+([A-Z])', r'\1, \2', text)
+
+    # Numbers: add periods between groups for phone numbers
+    text = re.sub(r'(\d{3})(\d{3})(\d{4})', r'\1.\2.\3', text)
+
+    return text

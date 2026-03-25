@@ -35,6 +35,8 @@ class ContextBuilder:
         "- Keep it conversational, 2-3 sentences max unless asked for more.\n"
         "- For lists, say them naturally: 'First is X, then Y, and finally Z.'\n"
         "- If you can't understand the speech, say 'Sorry, I didn't catch that. Can you say it again?'\n"
+        "- Use proper punctuation — periods end sentences, commas create pauses, "
+        "question marks change intonation. This directly affects how natural the voice sounds.\n"
         "- Never say 'Sure, I'd be happy to help!' or any customer service filler."
     )
 

@@ -22,6 +22,7 @@ import json
 import os
 import re
 import ssl
+import struct
 import subprocess
 import time
 from pathlib import Path
@@ -251,6 +252,8 @@ class WebVoiceChannel(BaseChannel):
         # Track which sessions have active voice calls (only TTS for these)
         self._voice_active: set[str] = set()
         self._speak_reasoning: dict[str, bool] = {}
+        # Per-session Deepgram TTS WebSocket streams
+        self._dg_tts_stream: dict[str, Any] = {}
 
     @staticmethod
     def _get_workspace():
@@ -419,6 +422,12 @@ class WebVoiceChannel(BaseChannel):
         for task in self._tts_workers.values():
             task.cancel()
         self._tts_workers.clear()
+        for stream in self._dg_tts_stream.values():
+            try:
+                await stream.close()
+            except Exception:
+                pass
+        self._dg_tts_stream.clear()
         if self._runner:
             await self._runner.cleanup()
 
@@ -613,7 +622,8 @@ class WebVoiceChannel(BaseChannel):
         """Process TTS queue sequentially to preserve sentence order.
 
         For ElevenLabs: streams audio chunks to client as they arrive (~200ms to first audio).
-        For Deepgram: sends full audio buffer (already fast due to PCM).
+        For Deepgram streaming: persistent WebSocket — text in, PCM out in real-time.
+        For Deepgram REST: sends full audio buffer (already fast due to PCM).
         """
         q = self._tts_queues.get(session_id)
         if not q:
@@ -621,8 +631,10 @@ class WebVoiceChannel(BaseChannel):
         logger.debug("TTS worker started for {}", session_id)
 
         from nanobot.hooks.builtin.feature_registry import get_setting
+        from nanobot.hooks.builtin.voice_providers import format_text_for_aura2
         _ws_path = self._get_workspace()
         _provider = get_setting(_ws_path, "voiceTtsProvider", "deepgram")
+        _use_streaming = get_setting(_ws_path, "deepgramTtsStreaming", True)
 
         while True:
             try:
@@ -640,7 +652,19 @@ class WebVoiceChannel(BaseChannel):
                     await self._stream_elevenlabs_to_client(text, session_id, ws)
                 except Exception as e:
                     logger.error("ElevenLabs streaming failed: {}, falling back to buffered", e)
-                    # Fallback to buffered
+                    audio = await self._generate_tts(text, session_id=session_id)
+                    if audio and not ws.closed:
+                        await ws.send_json({
+                            "type": "tts_audio",
+                            "audio_b64": base64.b64encode(audio).decode(),
+                            "sample_rate": 24000,
+                        })
+            elif _provider == "deepgram" and _use_streaming:
+                # Deepgram WebSocket streaming — ultra-low latency
+                try:
+                    await self._stream_deepgram_to_client(text, session_id, ws)
+                except Exception as e:
+                    logger.error("Deepgram streaming failed: {}, falling back to REST", e)
                     audio = await self._generate_tts(text, session_id=session_id)
                     if audio and not ws.closed:
                         await ws.send_json({
@@ -649,7 +673,7 @@ class WebVoiceChannel(BaseChannel):
                             "sample_rate": 24000,
                         })
             else:
-                # Deepgram / other: buffered (already fast for PCM)
+                # Deepgram REST / other: buffered
                 audio = await self._generate_tts(text, session_id=session_id)
                 if audio and not ws.closed:
                     try:
@@ -661,6 +685,11 @@ class WebVoiceChannel(BaseChannel):
                     except Exception as e:
                         logger.error("TTS send failed: {}", e)
                         break
+
+        # Clean up Deepgram streaming connection when worker exits
+        stream = self._dg_tts_stream.pop(session_id, None)
+        if stream:
+            await stream.close()
 
     async def _stream_elevenlabs_to_client(self, text: str, session_id: str, ws) -> None:
         """Stream ElevenLabs TTS — accumulates on server, sends complete MP3 to client."""
@@ -690,6 +719,73 @@ class WebVoiceChannel(BaseChannel):
                 logger.debug("ElevenLabs streaming: sent {}KB for '{}'", len(audio) // 1024, text[:30])
             except Exception as e:
                 logger.error("ElevenLabs send failed: {}", e)
+
+    async def _stream_deepgram_to_client(self, text: str, session_id: str, ws) -> None:
+        """Stream Deepgram TTS via persistent WebSocket — text in, PCM out."""
+        from nanobot.hooks.builtin.voice_providers import DeepgramTTSStream, format_text_for_aura2
+        from nanobot.hooks.builtin.feature_registry import get_setting
+
+        _ws_path = self._get_workspace()
+        tts_model = get_setting(_ws_path, "deepgramTtsModel", None) or self.config.tts_model
+
+        # Get or create persistent stream for this session
+        stream = self._dg_tts_stream.get(session_id)
+        if not stream or not stream.is_connected:
+            api_key = self.config.deepgram_api_key
+            if not api_key:
+                api_key = os.environ.get("DEEPGRAM_API_KEY")
+                if not api_key:
+                    try:
+                        from nanobot.setup.vault import load_vault
+                        vault = load_vault()
+                        api_key = vault.get("cred.deepgram_api_key") or vault.get("cred.deepgram")
+                    except Exception:
+                        pass
+            if not api_key:
+                raise RuntimeError("No Deepgram API key")
+
+            stream = DeepgramTTSStream(api_key=api_key, model=tts_model, sample_rate=24000)
+
+            async def _on_audio(pcm_data: bytes, _sid=session_id):
+                await self._on_deepgram_audio(_sid, pcm_data)
+
+            await stream.connect(_on_audio)
+            self._dg_tts_stream[session_id] = stream
+
+        # Format text for Aura-2 and send
+        formatted = format_text_for_aura2(text)
+        await stream.speak(formatted)
+        await stream.flush()
+
+    async def _on_deepgram_audio(self, session_id: str, pcm_data: bytes):
+        """Forward raw PCM from Deepgram directly to the browser."""
+        ws = self._clients.get(session_id)
+        if not ws or ws.closed:
+            return
+        wav_header = self._build_wav_header(len(pcm_data), 24000)
+        audio = wav_header + pcm_data
+        try:
+            await ws.send_json({
+                "type": "tts_audio",
+                "audio_b64": base64.b64encode(audio).decode(),
+                "sample_rate": 24000,
+            })
+        except Exception:
+            pass
+
+    @staticmethod
+    def _build_wav_header(data_size: int, sample_rate: int = 24000) -> bytes:
+        """Build a minimal WAV header for PCM linear16 mono audio."""
+        channels = 1
+        bits_per_sample = 16
+        byte_rate = sample_rate * channels * bits_per_sample // 8
+        block_align = channels * bits_per_sample // 8
+        return struct.pack(
+            '<4sI4s4sIHHIIHH4sI',
+            b'RIFF', 36 + data_size, b'WAVE',
+            b'fmt ', 16, 1, channels, sample_rate, byte_rate, block_align, bits_per_sample,
+            b'data', data_size,
+        )
 
     # ── Middleware ──────────────────────────────────────────────────
 
@@ -2705,6 +2801,12 @@ copy();
                             self._streamed_text.pop(old_id, None)
                             self._activity_ts.pop(old_id, None)
                             self._detected_language.pop(old_id, None)
+                            dg_tts = self._dg_tts_stream.pop(old_id, None)
+                            if dg_tts:
+                                try:
+                                    await dg_tts.close()
+                                except Exception:
+                                    pass
                             self._clients[session_id] = ws
                             self._utterance_buffer.setdefault(session_id, [])
                             self._pending_count.setdefault(session_id, 0)
@@ -3024,6 +3126,13 @@ copy();
             if tts_worker:
                 tts_worker.cancel()
             self._tts_queues.pop(session_id, None)
+            # Close Deepgram TTS streaming connection
+            dg_tts = self._dg_tts_stream.pop(session_id, None)
+            if dg_tts:
+                try:
+                    await dg_tts.close()
+                except Exception:
+                    pass
 
             # Auto-consolidate on disconnect so no conversation is lost
             try:

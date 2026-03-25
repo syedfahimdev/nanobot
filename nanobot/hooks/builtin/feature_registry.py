@@ -229,6 +229,8 @@ _FEATURE_DEFS: list[dict[str, Any]] = [
     {"key": "elevenlabsSimilarity", "label": "Voice Similarity", "desc": "How closely to match the original voice. Higher = more accurate but less expressive.", "category": "media", "type": "number", "default": 0.7, "min": 0.0, "max": 1.0},
     {"key": "elevenlabsStyle", "label": "Voice Style", "desc": "Style exaggeration. 0.0=neutral, 0.5=expressive, 1.0=very dramatic. Only works with v2 models.", "category": "media", "type": "number", "default": 0.4, "min": 0.0, "max": 1.0},
     {"key": "elevenlabsSpeakerBoost", "label": "Speaker Boost", "desc": "Boost speaker clarity. Recommended for low-quality audio playback.", "category": "media", "type": "boolean", "default": True},
+    {"key": "deepgramTtsModel", "label": "Deepgram TTS Voice", "desc": "Aura-2 voice for TTS. thalia=warm female, orion=warm male, luna=soft female, zeus=deep male.", "category": "media", "type": "string", "default": "aura-2-thalia-en", "placeholder": "aura-2-thalia-en, aura-2-orion-en, aura-2-luna-en, aura-2-zeus-en"},
+    {"key": "deepgramTtsStreaming", "label": "Streaming TTS", "desc": "Use WebSocket streaming for ultra-low latency TTS. Faster than REST but uses a persistent connection.", "category": "media", "type": "boolean", "default": True},
 
     # Phone calls
     {"key": "phoneCallEnabled", "label": "Phone Calls", "desc": "Allow Mawa to make outbound phone calls via Twilio.", "category": "media", "type": "boolean", "default": True},
