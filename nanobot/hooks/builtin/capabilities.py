@@ -87,24 +87,22 @@ def generate_capabilities(
         parts.append("\n".join(tool_section))
 
     # ── Settings & Toggles ──
-    settings_path = workspace / "intelligence.json"
-    if settings_path.exists():
-        try:
-            settings = json.loads(settings_path.read_text())
-            toggles = []
-            toggle_labels = {
-                "smartErrorRecovery": "Smart Error Recovery — I classify errors and suggest recovery strategies",
-                "intentTracking": "Intent Tracking — I remember what we're talking about across messages",
-                "dynamicContextBudget": "Dynamic Context Budget — I adjust how much tool output I keep based on context size",
-                "responseQualityGate": "Response Quality Gate — I detect when I'm deflecting and retry harder",
-                "mcpAutoReconnect": "MCP Auto-Reconnect — I automatically reconnect to broken MCP servers",
-            }
-            for key, label in toggle_labels.items():
-                status = "ON" if settings.get(key, True) else "OFF"
-                toggles.append(f"- [{status}] {label}")
-            parts.append("## Intelligence Features\n" + "\n".join(toggles))
-        except Exception:
-            pass
+    try:
+        from nanobot.hooks.builtin.feature_registry import get_setting
+        toggle_labels = {
+            "smartErrorRecovery": "Smart Error Recovery — I classify errors and suggest recovery strategies",
+            "intentTracking": "Intent Tracking — I remember what we're talking about across messages",
+            "dynamicContextBudget": "Dynamic Context Budget — I adjust how much tool output I keep based on context size",
+            "responseQualityGate": "Response Quality Gate — I detect when I'm deflecting and retry harder",
+            "mcpAutoReconnect": "MCP Auto-Reconnect — I automatically reconnect to broken MCP servers",
+        }
+        toggles = []
+        for key, label in toggle_labels.items():
+            status = "ON" if get_setting(workspace, key, True) else "OFF"
+            toggles.append(f"- [{status}] {label}")
+        parts.append("## Intelligence Features\n" + "\n".join(toggles))
+    except Exception:
+        pass
 
     # ── Skills ──
     skills_dir = workspace / "skills"

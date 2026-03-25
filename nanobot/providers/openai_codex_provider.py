@@ -246,6 +246,17 @@ async def _iter_sse(response: httpx.Response) -> AsyncGenerator[dict[str, Any], 
             continue
         buffer.append(line)
 
+    # Flush remaining buffer if stream ends without trailing blank line
+    if buffer:
+        data_lines = [l[5:].strip() for l in buffer if l.startswith("data:")]
+        if data_lines:
+            data = "\n".join(data_lines).strip()
+            if data and data != "[DONE]":
+                try:
+                    yield json.loads(data)
+                except Exception:
+                    pass
+
 
 async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequest], str]:
     content = ""

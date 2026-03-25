@@ -1,5 +1,6 @@
 """Spawn, update, and list tools for background subagents."""
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -376,7 +377,10 @@ class CancelSubagentTool(Tool):
         tasks = self._manager.get_running_tasks()
         for t in tasks:
             if t["id"] == task_id:
-                count = await self._manager.cancel_by_session(self._session_key)
+                bg_task = self._manager._running_tasks.get(task_id)
+                if bg_task and not bg_task.done():
+                    bg_task.cancel()
+                    await asyncio.gather(bg_task, return_exceptions=True)
                 return f"Cancelled task [{task_id}]: {t['label']}"
 
         return f"Task '{task_id}' not found. Use list_subagents to see running tasks."

@@ -268,11 +268,6 @@ async def generate_tts(
     try:
         if provider_name == "deepgram":
             return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
-            result = await _tts_fish(clean, fish_key, lang)
-            if result:
-                return result
-            logger.warning("Fish Speech TTS failed, falling back to Deepgram")
-            return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
         elif provider_name == "elevenlabs":
             el_key = _get_elevenlabs_key()
             el_voice = voice_id or get_setting(workspace, "elevenlabsVoiceId", "21m00Tcm4TlvDq8ikWAM")
@@ -281,7 +276,7 @@ async def generate_tts(
             if not el_key:
                 logger.warning("ElevenLabs: no API key, falling back to Deepgram")
                 return await _tts_deepgram(clean, deepgram_api_key, deepgram_model)
-            result = await _tts_elevenlabs(clean, el_key, el_voice, flash=use_flash)
+            result = await _tts_elevenlabs(clean, el_key, el_voice, flash=use_flash, model_id=el_model, workspace=workspace)
             if result:
                 return result
             logger.warning("ElevenLabs TTS failed, falling back to Deepgram")
@@ -384,9 +379,29 @@ def _get_elevenlabs_key() -> str | None:
     return None
 
 
-async def _tts_elevenlabs(text: str, api_key: str, voice_id: str = "21m00Tcm4TlvDq8ikWAM", flash: bool = True, model_id: str = "") -> bytes | None:
-    """ElevenLabs TTS — Flash, Turbo, or Multilingual v2."""
+def _build_elevenlabs_voice_settings(workspace: Path | None = None, model_id: str = "") -> dict:
+    """Build voice_settings dict from user settings. Reads dynamically — never hardcoded.
+
+    v3 doesn't support style/speaker_boost — emotion comes from the model's
+    contextual understanding of the text. v2 models use explicit style params.
+    """
+    from nanobot.hooks.builtin.feature_registry import get_setting
+    ws = workspace or Path("/root/.nanobot/workspace")
+    settings: dict = {
+        "stability": get_setting(ws, "elevenlabsStability", 0.3),
+        "similarity_boost": get_setting(ws, "elevenlabsSimilarity", 0.7),
+    }
+    # Only v2 models support style and speaker_boost
+    if "v2" in model_id and "v3" not in model_id:
+        settings["style"] = get_setting(ws, "elevenlabsStyle", 0.4)
+        settings["use_speaker_boost"] = get_setting(ws, "elevenlabsSpeakerBoost", True)
+    return settings
+
+
+async def _tts_elevenlabs(text: str, api_key: str, voice_id: str = "21m00Tcm4TlvDq8ikWAM", flash: bool = True, model_id: str = "", workspace: Path | None = None) -> bytes | None:
+    """ElevenLabs TTS — buffered. Returns full MP3."""
     model = model_id or ("eleven_flash_v2_5" if flash else "eleven_multilingual_v2")
+    voice_settings = _build_elevenlabs_voice_settings(workspace, model_id=model)
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
@@ -399,10 +414,7 @@ async def _tts_elevenlabs(text: str, api_key: str, voice_id: str = "21m00Tcm4Tlv
                 json={
                     "text": text,
                     "model_id": model,
-                    "voice_settings": {
-                        "stability": 0.5,
-                        "similarity_boost": 0.75,
-                    },
+                    "voice_settings": voice_settings,
                 },
             )
             resp.raise_for_status()
@@ -410,6 +422,64 @@ async def _tts_elevenlabs(text: str, api_key: str, voice_id: str = "21m00Tcm4Tlv
             return audio if len(audio) > 100 else None
     except Exception as e:
         logger.error("ElevenLabs TTS failed: {}", e)
+    return None
+
+
+async def stream_tts_elevenlabs(
+    text: str,
+    api_key: str,
+    voice_id: str = "21m00Tcm4TlvDq8ikWAM",
+    model_id: str = "eleven_flash_v2_5",
+    chunk_callback=None,
+    workspace: Path | None = None,
+) -> bytes | None:
+    """ElevenLabs streaming TTS — yields audio chunks via callback as they arrive.
+
+    Uses the /v1/text-to-speech/{voice_id}/stream endpoint.
+
+    Args:
+        chunk_callback: async fn(chunk_bytes) called for each audio chunk.
+            If None, buffers and returns the full audio.
+    Returns:
+        Full audio bytes if no callback, else None (chunks sent via callback).
+    """
+    voice_settings = _build_elevenlabs_voice_settings(workspace, model_id=model_id)
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            async with client.stream(
+                "POST",
+                f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream",
+                headers={
+                    "xi-api-key": api_key,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "text": text,
+                    "model_id": model_id,
+                    "voice_settings": voice_settings,
+                    "output_format": "mp3_44100_128",
+                },
+            ) as resp:
+                resp.raise_for_status()
+                if chunk_callback:
+                    # Stream chunks to callback as they arrive
+                    buf = bytearray()
+                    async for chunk in resp.aiter_bytes(4096):
+                        buf.extend(chunk)
+                        # Send chunks of ~8KB+ for reliable decoding
+                        if len(buf) >= 8192:
+                            await chunk_callback(bytes(buf))
+                            buf.clear()
+                    # Flush remaining
+                    if buf:
+                        await chunk_callback(bytes(buf))
+                    return None
+                else:
+                    # Buffer full response
+                    audio = await resp.aread()
+                    return audio if len(audio) > 100 else None
+    except Exception as e:
+        logger.error("ElevenLabs streaming TTS failed: {}", e)
     return None
 
 

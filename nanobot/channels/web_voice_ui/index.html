@@ -1455,6 +1455,385 @@ button:not(:disabled):hover {
   border-radius: 50%;
   box-shadow: 0 0 10px var(--accent-violet);
 }
+
+/* Agents toggle button */
+.agents-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  position: relative;
+}
+
+.agents-toggle::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  background: var(--accent-cyan);
+  border-radius: 50%;
+  box-shadow: 0 0 10px var(--accent-cyan);
+}
+
+.agents-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  background: var(--accent-cyan);
+  color: #000;
+  font-size: 0.6rem;
+  font-weight: 700;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  box-shadow: 0 0 10px rgba(0, 212, 255, 0.4);
+}
+
+/* Agents Panel Overlay */
+.agents-overlay {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.7);
+  z-index: 999;
+  backdrop-filter: blur(4px);
+}
+
+.agents-overlay.open {
+  display: block;
+}
+
+.agents-panel {
+  position: fixed;
+  top: 0;
+  right: -100%;
+  width: 90%;
+  max-width: 420px;
+  height: 100vh;
+  max-height: 100vh;
+  z-index: 1001;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border-color);
+  transition: right 0.3s ease;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.agents-panel.open {
+  right: 0;
+}
+
+.agents-panel-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-shrink: 0;
+  background: var(--bg-panel-elevated);
+}
+
+.agents-panel-header span {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  letter-spacing: 2px;
+  color: var(--accent-cyan);
+}
+
+.agents-panel-header button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.3rem;
+  cursor: pointer;
+  padding: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.agents-panel-header button:hover {
+  color: var(--text-primary);
+}
+
+.agents-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.agents-section-title {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.agents-section-title .count {
+  color: var(--accent-cyan);
+}
+
+.agents-section {
+  margin-bottom: 20px;
+}
+
+.agents-empty {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-family: var(--font-mono);
+  padding: 12px 0;
+}
+
+/* Agent Cards */
+.agent-card {
+  background: var(--bg-panel-elevated);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 12px;
+  margin-bottom: 8px;
+  position: relative;
+  overflow: hidden;
+}
+
+.agent-card.running {
+  border-left: 3px solid var(--accent-cyan);
+  animation: agent-pulse 2s infinite;
+}
+
+.agent-card.completed {
+  border-left: 3px solid var(--accent-green);
+}
+
+.agent-card.failed {
+  border-left: 3px solid var(--accent-red);
+}
+
+.agent-card.cancelled {
+  border-left: 3px solid var(--text-muted);
+}
+
+@keyframes agent-pulse {
+  0%, 100% { border-left-color: var(--accent-cyan); }
+  50% { border-left-color: rgba(0, 212, 255, 0.3); }
+}
+
+.agent-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.agent-card-label {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 70%;
+}
+
+.agent-card-elapsed {
+  font-size: 0.65rem;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+
+.agent-progress {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 2px;
+  overflow: hidden;
+  margin: 8px 0;
+}
+
+.agent-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-cyan), var(--accent-green));
+  transition: width 0.3s ease;
+  border-radius: 2px;
+}
+
+.agent-card-info {
+  font-size: 0.7rem;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+}
+
+.agent-card-result {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  margin-top: 6px;
+  max-height: 40px;
+  overflow: hidden;
+  line-height: 1.4;
+}
+
+.agent-card-tools {
+  font-size: 0.65rem;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+.agent-controls {
+  margin-top: 8px;
+  display: flex;
+  gap: 6px;
+}
+
+.agent-controls button {
+  padding: 4px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.65rem;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  min-height: 28px;
+}
+
+.agent-controls button:active {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.agent-controls button.cancel {
+  border-color: var(--accent-red);
+  color: var(--accent-red);
+}
+
+.agent-controls button.retry {
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+}
+
+/* Delegation cards */
+.delegation-card {
+  background: var(--bg-panel-elevated);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 12px;
+  margin-bottom: 8px;
+}
+
+.delegation-card.active {
+  border-left: 3px solid var(--accent-amber);
+}
+
+.delegation-card.completed {
+  border-left: 3px solid var(--accent-green);
+}
+
+/* Message header — label + timestamp */
+.msg-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.msg-time {
+  font-size: 10px;
+  color: #555;
+  font-family: 'Geist Mono', monospace;
+}
+
+/* Message action bar — visible on hover */
+.msg-actions {
+  display: none;
+  gap: 2px;
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255,255,255,0.05);
+}
+.msg:hover .msg-actions { display: flex; }
+@media (max-width: 768px) {
+  .msg-actions { display: flex; }  /* Always visible on mobile (no hover) */
+}
+.msg-action-btn {
+  background: none;
+  border: 1px solid rgba(255,255,255,0.1);
+  color: #666;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  transition: all 0.15s;
+}
+.msg-action-btn:hover {
+  background: rgba(255,255,255,0.08);
+  color: #aaa;
+  border-color: rgba(255,255,255,0.2);
+}
+
+/* Capability tips — inline under messages */
+.capability-tip {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  margin: 4px 0 8px 0;
+  background: linear-gradient(135deg, rgba(78, 205, 196, 0.08), rgba(78, 205, 196, 0.03));
+  border: 1px solid rgba(78, 205, 196, 0.2);
+  border-radius: 8px;
+  font-size: 12px;
+  color: #b0b0b0;
+  animation: tipSlideIn 0.3s ease-out;
+}
+.capability-tip .tip-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
+.capability-tip .tip-text { flex: 1; line-height: 1.4; }
+.capability-tip .tip-action {
+  padding: 3px 10px;
+  border: 1px solid rgba(78, 205, 196, 0.5);
+  border-radius: 4px;
+  background: transparent;
+  color: #4ecdc4;
+  cursor: pointer;
+  font-size: 11px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.capability-tip .tip-action:hover { background: rgba(78, 205, 196, 0.15); }
+.capability-tip .tip-dismiss {
+  background: none;
+  border: none;
+  color: #666;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+.capability-tip .tip-dismiss:hover { color: #aaa; }
+@keyframes tipSlideIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 </style>
 </head>
 <body>
@@ -1505,6 +1884,9 @@ button:not(:disabled):hover {
         
         <div class="shortcut-key">L</div>
         <div class="shortcut-desc">Clear system log</div>
+
+        <div class="shortcut-key">G</div>
+        <div class="shortcut-desc">Toggle agents panel</div>
       </div>
       
       <div style="margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--border-color);">
@@ -1552,11 +1934,34 @@ button:not(:disabled):hover {
     <select class="profile-select" id="profileSelect" onchange="switchProfile(this.value)" title="LLM Profile">
       <option value="">Loading...</option>
     </select>
+    <button class="agents-toggle" onclick="toggleAgentsPanel()">Agents<span class="agents-badge" id="agentsBadge"></span></button>
     <button class="activity-toggle" onclick="toggleActivityPanel()">System Log</button>
     <span class="queue-badge" id="queueBadge"></span>
     <div class="status">
       <div class="status-dot" id="statusDot"></div>
       <span id="statusText">SYSTEM READY</span>
+    </div>
+  </div>
+</div>
+
+<div class="agents-overlay" id="agentsOverlay" onclick="toggleAgentsPanel()"></div>
+<div class="agents-panel" id="agentsPanel">
+  <div class="agents-panel-header">
+    <span>&#9674; AGENTS</span>
+    <button onclick="toggleAgentsPanel()">&times;</button>
+  </div>
+  <div class="agents-panel-body">
+    <div class="agents-section">
+      <div class="agents-section-title">Active <span class="count" id="agentsActiveCount">0</span></div>
+      <div id="agentsActive"><div class="agents-empty">No active agents</div></div>
+    </div>
+    <div class="agents-section">
+      <div class="agents-section-title">Recent</div>
+      <div id="agentsHistory"><div class="agents-empty">No recent agents</div></div>
+    </div>
+    <div class="agents-section">
+      <div class="agents-section-title">Delegations</div>
+      <div id="agentsDelegations"><div class="agents-empty">No delegations</div></div>
     </div>
   </div>
 </div>
@@ -1656,34 +2061,169 @@ function scrollToBottom(el) {
   setTimeout(() => { el.scrollTop = el.scrollHeight; }, 0);
 }
 
+function formatMsgTime(date) {
+  var h = date.getHours(), m = date.getMinutes();
+  var ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12 || 12;
+  return h + ':' + (m < 10 ? '0' : '') + m + ' ' + ampm;
+}
+
 function addMessage(role, text, cls) {
-  const conv = document.getElementById('conversation');
-  conv.querySelectorAll('.interim').forEach(el => el.remove());
-  conv.querySelectorAll('.typing-indicator').forEach(el => el.remove());
+  var conv = document.getElementById('conversation');
+  conv.querySelectorAll('.interim').forEach(function(el) { el.remove(); });
+  conv.querySelectorAll('.typing-indicator').forEach(function(el) { el.remove(); });
 
   if (role === 'assistant') {
-    const pending = conv.querySelector('.msg.assistant.pending');
+    var pending = conv.querySelector('.msg.assistant.pending');
     if (pending) {
       pending.classList.remove('pending');
       pending.querySelector('.msg-body').textContent = text;
+      // Update timestamp
+      var ts = pending.querySelector('.msg-time');
+      if (ts) ts.textContent = formatMsgTime(new Date());
+      // Add actions if not present
+      if (!pending.querySelector('.msg-actions')) {
+        pending.appendChild(buildMsgActions(role, text));
+      }
       scrollToBottom(conv);
       return pending;
     }
   }
 
-  const div = document.createElement('div');
+  var div = document.createElement('div');
   div.className = 'msg ' + (cls || role);
-  const label = document.createElement('div');
+
+  // Header row: label + timestamp
+  var header = document.createElement('div');
+  header.className = 'msg-header';
+  var label = document.createElement('span');
   label.className = 'label';
-  label.textContent = role === 'user' ? '◈ USER' : '◈ MAWA';
-  div.appendChild(label);
-  const body = document.createElement('div');
+  label.textContent = role === 'user' ? '\u25C8 USER' : '\u25C8 MAWA';
+  header.appendChild(label);
+  var time = document.createElement('span');
+  time.className = 'msg-time';
+  time.textContent = formatMsgTime(new Date());
+  header.appendChild(time);
+  div.appendChild(header);
+
+  var body = document.createElement('div');
   body.className = 'msg-body';
   body.textContent = text;
   div.appendChild(body);
+
+  // Action bar (visible on hover)
+  div.appendChild(buildMsgActions(role, text));
+
   conv.appendChild(div);
   scrollToBottom(conv);
   return div;
+}
+
+function buildMsgActions(role, text) {
+  var actions = document.createElement('div');
+  actions.className = 'msg-actions';
+
+  // Copy button
+  var copyBtn = document.createElement('button');
+  copyBtn.className = 'msg-action-btn';
+  copyBtn.title = 'Copy message';
+  copyBtn.textContent = '\uD83D\uDCCB';
+  copyBtn.onclick = function() {
+    navigator.clipboard.writeText(text).then(function() {
+      copyBtn.textContent = '\u2713';
+      setTimeout(function() { copyBtn.textContent = '\uD83D\uDCCB'; }, 1500);
+    });
+  };
+  actions.appendChild(copyBtn);
+
+  // Edit & resend (user messages only)
+  if (role === 'user') {
+    var editBtn = document.createElement('button');
+    editBtn.className = 'msg-action-btn';
+    editBtn.title = 'Edit and resend';
+    editBtn.textContent = '\u270E';
+    editBtn.onclick = function() {
+      var input = document.getElementById('textInput');
+      input.value = text;
+      input.focus();
+      input.select();
+    };
+    actions.appendChild(editBtn);
+  }
+
+  // Branch — resend same message as-is
+  var branchBtn = document.createElement('button');
+  branchBtn.className = 'msg-action-btn';
+  branchBtn.title = 'Resend this message';
+  branchBtn.textContent = '\u21BB';
+  branchBtn.onclick = function() {
+    if (role === 'user') {
+      // Resend user message
+      addMessage('user', text);
+      showTypingIndicator();
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ action: 'text', text: text }));
+      }
+      setStatus('PROCESSING', 'processing');
+    } else {
+      // For assistant messages, ask to elaborate
+      var followUp = 'Tell me more about: ' + text.substring(0, 80);
+      addMessage('user', followUp);
+      showTypingIndicator();
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ action: 'text', text: followUp }));
+      }
+      setStatus('PROCESSING', 'processing');
+    }
+  };
+  actions.appendChild(branchBtn);
+
+  return actions;
+}
+
+function renderTipUnderMessage(tip) {
+  var conv = document.getElementById('conversation');
+  var tipDiv = document.createElement('div');
+  tipDiv.className = 'capability-tip';
+  tipDiv.setAttribute('data-tip-id', tip.id || '');
+
+  var icon = document.createElement('span');
+  icon.className = 'tip-icon';
+  icon.textContent = '\u{1F4A1}';
+  tipDiv.appendChild(icon);
+
+  var textSpan = document.createElement('span');
+  textSpan.className = 'tip-text';
+  textSpan.textContent = tip.text;
+  tipDiv.appendChild(textSpan);
+
+  if (tip.feature_key && tip.action) {
+    var btn = document.createElement('button');
+    btn.className = 'tip-action';
+    btn.textContent = tip.action === 'enable' ? 'Enable' : 'Disable';
+    btn.onclick = function() {
+      var val = tip.action === 'enable';
+      fetch('/api/features', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({key: tip.feature_key, value: val})
+      }).then(function() {
+        btn.textContent = 'Done!';
+        btn.disabled = true;
+        btn.style.opacity = '0.5';
+      });
+    };
+    tipDiv.appendChild(btn);
+  }
+
+  var dismiss = document.createElement('button');
+  dismiss.className = 'tip-dismiss';
+  dismiss.textContent = '\u00d7';
+  dismiss.onclick = function() { tipDiv.remove(); };
+  tipDiv.appendChild(dismiss);
+
+  conv.appendChild(tipDiv);
+  scrollToBottom(conv);
 }
 
 function showTypingIndicator() {
@@ -1994,6 +2534,9 @@ function handleMessage(data) {
       removeTypingIndicator();
       if (data.subagent_result) playChime();
       addMessage('assistant', data.text);
+      if (data.tips && data.tips.length > 0) {
+        data.tips.forEach(function(tip) { renderTipUnderMessage(tip); });
+      }
       setStatus(isListening ? 'AUDIO ACTIVE — SPEAK TO ENGAGE' : 'SYSTEM ONLINE', 'active');
       break;
     case 'tts_audio':
@@ -2015,6 +2558,12 @@ function handleMessage(data) {
     case 'error':
       console.error('System error:', data.message);
       addActivity('tool', 'ERROR: ' + data.message);
+      break;
+    case 'agent_progress':
+    case 'agent_cancelled':
+    case 'agent_retried':
+    case 'agent_update_sent':
+      if (agentsPanelOpen) loadAgents();
       break;
   }
 }
@@ -2661,6 +3210,7 @@ const COMMANDS = [
   { id: 'clear', name: 'Clear Conversation', desc: 'Remove all messages', shortcut: 'C', icon: '🗑️', action: clearConversation },
   { id: 'clearlog', name: 'Clear System Log', desc: 'Remove all activity entries', shortcut: 'L', icon: '📋', action: clearActivity },
   { id: 'help', name: 'Show Help', desc: 'Display keyboard shortcuts', shortcut: '?', icon: '❓', action: toggleHelpModal },
+  { id: 'agents', name: 'Agents Panel', desc: 'View active agents and delegations', shortcut: 'G', icon: '⚡', action: toggleAgentsPanel },
 ];
 
 let commandPaletteOpen = false;
@@ -2754,6 +3304,240 @@ function clearConversation() {
 }
 
 // ============================================
+// Agents Panel
+// ============================================
+
+let agentsPanelOpen = false;
+let agentPollInterval = null;
+
+function toggleAgentsPanel() {
+  const panel = document.getElementById('agentsPanel');
+  const overlay = document.getElementById('agentsOverlay');
+  agentsPanelOpen = !agentsPanelOpen;
+  if (agentsPanelOpen) {
+    panel.classList.add('open');
+    overlay.classList.add('open');
+    loadAgents();
+    loadDelegations();
+    if (!agentPollInterval) agentPollInterval = setInterval(loadAgents, 3000);
+  } else {
+    panel.classList.remove('open');
+    overlay.classList.remove('open');
+    if (agentPollInterval) { clearInterval(agentPollInterval); agentPollInterval = null; }
+  }
+}
+
+async function loadAgents() {
+  try {
+    const r = await fetch('/api/agents');
+    const agents = await r.json();
+    renderAgents(agents);
+  } catch(e) { console.debug('Agent load error:', e); }
+}
+
+function renderAgents(agents) {
+  const active = agents.filter(a => a.status === 'running');
+  const history = agents.filter(a => a.status !== 'running').slice(-20).reverse();
+
+  document.getElementById('agentsActiveCount').textContent = active.length;
+  updateAgentsBadge(active.length);
+
+  const activeEl = document.getElementById('agentsActive');
+  if (active.length) {
+    while (activeEl.firstChild) activeEl.removeChild(activeEl.firstChild);
+    active.forEach(a => { const d = document.createElement('div'); d.className = 'agent-card-wrap'; appendAgentCard(d, a); activeEl.appendChild(d); });
+  } else {
+    activeEl.textContent = '';
+    const empty = document.createElement('div');
+    empty.className = 'agents-empty';
+    empty.textContent = 'No active agents';
+    activeEl.appendChild(empty);
+  }
+
+  const historyEl = document.getElementById('agentsHistory');
+  if (history.length) {
+    while (historyEl.firstChild) historyEl.removeChild(historyEl.firstChild);
+    history.forEach(a => { const d = document.createElement('div'); d.className = 'agent-card-wrap'; appendAgentCard(d, a); historyEl.appendChild(d); });
+  } else {
+    historyEl.textContent = '';
+    const empty = document.createElement('div');
+    empty.className = 'agents-empty';
+    empty.textContent = 'No recent agents';
+    historyEl.appendChild(empty);
+  }
+}
+
+function appendAgentCard(container, agent) {
+  const status = agent.status || 'running';
+  const progress = agent.progress || 0;
+  const tools = (agent.tools_used || []).slice(-3);
+  const elapsed = agent.started_at ? getAgentElapsed(agent.started_at, agent.completed_at) : '';
+  const lastTool = tools.length ? tools[tools.length - 1] : '';
+  const labelText = agent.label || (agent.task ? agent.task.substring(0, 50) : 'Agent');
+  const id = agent.task_id || agent.id || '';
+
+  const card = document.createElement('div');
+  card.className = 'agent-card ' + status;
+
+  const header = document.createElement('div');
+  header.className = 'agent-card-header';
+  const labelEl = document.createElement('div');
+  labelEl.className = 'agent-card-label';
+  const icons = { running: '\u26A1', completed: '\u2713', failed: '\u2717', cancelled: '\u2014' };
+  labelEl.textContent = (icons[status] || '\u2014') + ' ' + labelText;
+  const elapsedEl = document.createElement('div');
+  elapsedEl.className = 'agent-card-elapsed';
+  elapsedEl.textContent = elapsed;
+  header.appendChild(labelEl);
+  header.appendChild(elapsedEl);
+  card.appendChild(header);
+
+  if (status === 'running') {
+    const progWrap = document.createElement('div');
+    progWrap.className = 'agent-progress';
+    const progFill = document.createElement('div');
+    progFill.className = 'agent-progress-fill';
+    progFill.style.width = progress + '%';
+    progWrap.appendChild(progFill);
+    card.appendChild(progWrap);
+    const info = document.createElement('div');
+    info.className = 'agent-card-info';
+    info.textContent = progress + '% \u00B7 ' + (agent.iteration || 0) + '/' + (agent.max_iterations || 15) + ' iter' + (lastTool ? ' \u00B7 ' + lastTool : '');
+    card.appendChild(info);
+  }
+
+  if (agent.result_preview) {
+    const result = document.createElement('div');
+    result.className = 'agent-card-result';
+    result.textContent = agent.result_preview;
+    card.appendChild(result);
+  }
+
+  if (tools.length) {
+    const toolsEl = document.createElement('div');
+    toolsEl.className = 'agent-card-tools';
+    toolsEl.textContent = 'Tools: ' + tools.join(', ');
+    card.appendChild(toolsEl);
+  }
+
+  if (status === 'running') {
+    const ctrl = document.createElement('div');
+    ctrl.className = 'agent-controls';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'cancel';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.onclick = function() { agentCancel(id); };
+    const msgBtn = document.createElement('button');
+    msgBtn.textContent = 'Message';
+    msgBtn.onclick = function() { agentSendUpdate(id); };
+    ctrl.appendChild(cancelBtn);
+    ctrl.appendChild(msgBtn);
+    card.appendChild(ctrl);
+  } else if (status === 'completed' || status === 'failed') {
+    const ctrl = document.createElement('div');
+    ctrl.className = 'agent-controls';
+    const retryBtn = document.createElement('button');
+    retryBtn.className = 'retry';
+    retryBtn.textContent = 'Retry';
+    retryBtn.onclick = function() { agentRetry(id); };
+    ctrl.appendChild(retryBtn);
+    card.appendChild(ctrl);
+  }
+
+  container.appendChild(card);
+}
+
+function getAgentElapsed(start, end) {
+  try {
+    const s = new Date(start);
+    const e = end ? new Date(end) : new Date();
+    const diff = Math.floor((e - s) / 1000);
+    if (diff < 60) return diff + 's';
+    if (diff < 3600) return Math.floor(diff / 60) + 'm ' + (diff % 60) + 's';
+    return Math.floor(diff / 3600) + 'h ' + Math.floor((diff % 3600) / 60) + 'm';
+  } catch(e) { return ''; }
+}
+
+function updateAgentsBadge(count) {
+  const badge = document.getElementById('agentsBadge');
+  if (badge) {
+    badge.textContent = count;
+    badge.style.display = count > 0 ? 'flex' : 'none';
+  }
+}
+
+function agentCancel(taskId) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ action: 'agent_cancel', task_id: taskId }));
+  }
+}
+
+function agentSendUpdate(taskId) {
+  const msg = prompt('Message to agent:');
+  if (msg && ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ action: 'agent_update', task_id: taskId, message: msg }));
+  }
+}
+
+function agentRetry(agentId) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ action: 'agent_retry', task_id: agentId }));
+  }
+}
+
+async function loadDelegations() {
+  try {
+    const r = await fetch('/api/jarvis/delegations');
+    const data = await r.json();
+    const el = document.getElementById('agentsDelegations');
+    while (el.firstChild) el.removeChild(el.firstChild);
+    if (!data.length) {
+      const empty = document.createElement('div');
+      empty.className = 'agents-empty';
+      empty.textContent = 'No delegations';
+      el.appendChild(empty);
+      return;
+    }
+    data.forEach(function(d, i) {
+      const card = document.createElement('div');
+      card.className = 'delegation-card ' + (d.status === 'active' ? 'active' : 'completed');
+      const title = document.createElement('div');
+      title.style.cssText = 'font-size:0.8rem;color:var(--text-primary);';
+      title.textContent = (d.status === 'active' ? '\u23F3 ' : '\u2713 ') + d.task;
+      card.appendChild(title);
+      if (d.deadline) {
+        const dl = document.createElement('div');
+        dl.style.cssText = 'font-size:0.65rem;font-family:var(--font-mono);color:var(--text-secondary);margin-top:4px;';
+        dl.textContent = 'Deadline: ' + d.deadline;
+        card.appendChild(dl);
+      }
+      const meta = document.createElement('div');
+      meta.style.cssText = 'font-size:0.65rem;font-family:var(--font-mono);color:var(--text-muted);margin-top:4px;';
+      meta.textContent = 'Check every ' + (d.check_interval_hours || '?') + 'h \u00B7 ' + (d.updates || []).length + ' updates';
+      card.appendChild(meta);
+      if (d.status === 'active') {
+        const ctrl = document.createElement('div');
+        ctrl.className = 'agent-controls';
+        const btn = document.createElement('button');
+        btn.textContent = 'Mark Done';
+        btn.onclick = function() { completeDelegation(i); };
+        ctrl.appendChild(btn);
+        card.appendChild(ctrl);
+      }
+      el.appendChild(card);
+    });
+  } catch(e) { console.debug('Delegation load error:', e); }
+}
+
+function completeDelegation(index) {
+  fetch('/api/jarvis/delegations', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ index: index, status: 'completed', update: 'Marked complete from Agents UI' })
+  }).then(function() { loadDelegations(); });
+}
+
+// ============================================
 // Keyboard Shortcuts
 // ============================================
 
@@ -2801,9 +3585,18 @@ document.addEventListener('keydown', (e) => {
         showToast('System log cleared', 'info');
       }
       break;
+    case 'g':
+    case 'G':
+      if (!commandPaletteOpen && !e.ctrlKey) {
+        e.preventDefault();
+        toggleAgentsPanel();
+      }
+      break;
     case 'Escape':
       if (commandPaletteOpen) {
         toggleCommandPalette();
+      } else if (agentsPanelOpen) {
+        toggleAgentsPanel();
       } else if (document.getElementById('helpModal').classList.contains('open')) {
         toggleHelpModal();
       } else if (isListening) {

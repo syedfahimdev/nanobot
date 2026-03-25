@@ -49,6 +49,10 @@ def build_morning_prep(workspace: Path) -> dict:
     relationship reminders, habit reminders.
     Returns structured data the briefing system can format.
     """
+    from nanobot.hooks.builtin.feature_registry import get_setting
+    if not get_setting(workspace, "morningPrep", True):
+        return {"generated_at": "", "sections": []}
+
     prep = {
         "generated_at": datetime.now().isoformat(),
         "sections": [],
@@ -146,6 +150,10 @@ def get_meeting_prep(workspace: Path, event_title: str = "", attendees: list[str
     Searches HISTORY.md and LONG_TERM.md for mentions of the meeting
     topic and attendees.
     """
+    from nanobot.hooks.builtin.feature_registry import get_setting
+    if not get_setting(workspace, "meetingIntelligence", True):
+        return {"title": event_title, "context": [], "attendee_notes": {}}
+
     prep = {"title": event_title, "context": [], "attendee_notes": {}}
 
     # Search history for relevant context
@@ -255,7 +263,9 @@ def detect_correlations(workspace: Path) -> list[str]:
                     for fmt in ("%B %d, %Y", "%B %d %Y", "%Y-%m-%d"):
                         try:
                             d = datetime.strptime(date_match.group(1).replace(",", ""), fmt).date()
-                            if 0 <= (d - today).days <= 3:
+                            from nanobot.hooks.builtin.feature_registry import get_setting as _gs
+                            _lookahead = _gs(workspace, "correlationLookaheadDays", 3)
+                            if 0 <= (d - today).days <= _lookahead:
                                 alerts.append(f"Bill/payment due soon: {line.strip()[:80]}")
                                 break
                         except ValueError:
@@ -334,6 +344,9 @@ def get_relationship_reminders(workspace: Path) -> list[str]:
     data = _load_relationship_data(workspace)
     now = datetime.now()
 
+    from nanobot.hooks.builtin.feature_registry import get_setting
+    threshold_days = get_setting(workspace, "relationshipReminderDays", 14)
+
     for key, contact in data.get("contacts", {}).items():
         last = contact.get("last_contact", "")
         if not last:
@@ -343,9 +356,9 @@ def get_relationship_reminders(workspace: Path) -> list[str]:
             days_ago = (now - last_dt).days
             name = contact.get("name", key)
 
-            if days_ago >= 14:
+            if days_ago >= threshold_days:
                 reminders.append(f"Haven't contacted {name} in {days_ago} days")
-            elif days_ago >= 7:
+            elif days_ago >= threshold_days // 2:
                 reminders.append(f"It's been {days_ago} days since you talked to {name}")
         except Exception:
             continue
@@ -405,10 +418,15 @@ def get_financial_pulse(workspace: Path) -> dict:
 
     Checks: AI spending, mentioned bills, Zelle transactions, subscriptions.
     """
+    from nanobot.hooks.builtin.feature_registry import get_setting
+    if not get_setting(workspace, "financialPulse", True):
+        return {"ai_spending": "", "bills": [], "patterns": []}
+
     pulse = {
         "ai_spending": _get_spending_summary(workspace),
         "bills": _get_financial_alerts(workspace),
         "patterns": [],
+        "alerts": [],
     }
 
     # Analyze AI spending trends
@@ -425,8 +443,14 @@ def get_financial_pulse(workspace: Path) -> dict:
 
     if today_cost > avg * 2 and avg > 0:
         pulse["patterns"].append(f"AI spending today (${today_cost:.2f}) is {today_cost/avg:.1f}x your average")
+        pulse["alerts"].append(f"Spending spike: ${today_cost:.2f} today vs ${avg:.2f} daily avg ({today_cost/avg:.1f}x)")
     if sum(week_costs) > 0:
         pulse["patterns"].append(f"This week: ${sum(week_costs):.2f} on AI ({sum(week_costs)/7:.2f}/day avg)")
+
+    # Bill alerts
+    for bill in pulse["bills"]:
+        if "OVERDUE" in bill or "TODAY" in bill:
+            pulse["alerts"].append(bill)
 
     return pulse
 
@@ -525,6 +549,10 @@ def _projects_path(workspace: Path) -> Path:
 
 
 def get_projects(workspace: Path) -> list[dict]:
+    from nanobot.hooks.builtin.feature_registry import get_setting
+    if not get_setting(workspace, "projectTracker", True):
+        return []
+
     path = _projects_path(workspace)
     if not path.exists():
         return []
@@ -576,6 +604,10 @@ def update_project_progress(workspace: Path, name: str) -> dict | None:
 
 def build_daily_digest(workspace: Path) -> dict:
     """Build end-of-day digest from all available data. No LLM."""
+    from nanobot.hooks.builtin.feature_registry import get_setting
+    if not get_setting(workspace, "dailyDigest", True):
+        return {"date": date.today().isoformat(), "sections": []}
+
     today = date.today()
     digest = {"date": today.isoformat(), "sections": []}
 
@@ -657,8 +689,13 @@ _PRIORITY_KEYWORDS = {
 }
 
 
-def score_message_priority(text: str, sender: str = "") -> tuple[str, float]:
+def score_message_priority(text: str, sender: str = "", workspace: Path | None = None) -> tuple[str, float]:
     """Score a message's priority. Returns (level, score 0-1). No LLM."""
+    if workspace is not None:
+        from nanobot.hooks.builtin.feature_registry import get_setting
+        if not get_setting(workspace, "priorityInbox", True):
+            return ("normal", 0.5)
+
     text_lower = text.lower()
     score = 0.5  # Default medium
 
@@ -696,8 +733,11 @@ def get_delegations(workspace: Path) -> list[dict]:
         return []
 
 
-def add_delegation(workspace: Path, task: str, deadline: str = "", check_interval_hours: int = 24) -> None:
+def add_delegation(workspace: Path, task: str, deadline: str = "", check_interval_hours: int | None = None) -> None:
     """Add a delegated task that Mawa checks on periodically."""
+    if check_interval_hours is None:
+        from nanobot.hooks.builtin.feature_registry import get_setting
+        check_interval_hours = get_setting(workspace, "delegationCheckHours", 24)
     delegations = get_delegations(workspace)
     delegations.append({
         "task": task,
@@ -792,6 +832,10 @@ def _decisions_path(workspace: Path) -> Path:
 
 def record_decision(workspace: Path, decision: str, reason: str, context: str = "") -> None:
     """Record a decision with its reasoning for future reference."""
+    from nanobot.hooks.builtin.feature_registry import get_setting
+    if not get_setting(workspace, "decisionMemory", True):
+        return
+
     path = _decisions_path(workspace)
     decisions = json.loads(path.read_text()) if path.exists() else []
     decisions.append({
@@ -826,6 +870,10 @@ def find_related_decisions(workspace: Path, query: str) -> list[dict]:
 
 def get_people_prep(workspace: Path, name: str) -> dict:
     """Get everything Mawa knows about a person for call/meeting prep."""
+    from nanobot.hooks.builtin.feature_registry import get_setting
+    if not get_setting(workspace, "peoplePrepBeforeCalls", True):
+        return {"name": name, "interactions": [], "from_memory": [], "from_contacts": None}
+
     prep = {"name": name, "interactions": [], "from_memory": [], "from_contacts": None}
 
     # From relationship data
@@ -918,37 +966,70 @@ def get_life_dashboard(workspace: Path) -> dict:
 # Proactive Hook — runs on heartbeat to check for actionable items
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_LAST_NOTIFIED: dict[str, datetime] = {}
+
+
 def check_proactive_jarvis(workspace: Path) -> list[dict]:
     """Run all Jarvis proactive checks. Called by heartbeat.
 
     Returns list of notifications to send.
     """
+    from nanobot.hooks.builtin.feature_registry import get_setting
+
     notifications = []
 
     # Cross-signal correlations
-    correlations = detect_correlations(workspace)
-    for c in correlations:
-        notifications.append({"content": f"⚠️ {c}", "priority": "high"})
+    if get_setting(workspace, "crossSignalCorrelation", True):
+        correlations = detect_correlations(workspace)
+        for c in correlations:
+            notifications.append({"content": f"⚠️ {c}", "priority": "high"})
 
     # Relationship reminders (once per day)
-    reminders = get_relationship_reminders(workspace)
-    for r in reminders[:2]:
-        notifications.append({"content": f"👥 {r}", "priority": "normal"})
+    if get_setting(workspace, "relationshipTracker", True):
+        reminders = get_relationship_reminders(workspace)
+        for r in reminders[:2]:
+            notifications.append({"content": f"👥 {r}", "priority": "normal"})
 
     # Delegation check-ins
-    due_delegations = get_delegations_due_for_check(workspace)
-    for d in due_delegations:
-        notifications.append({
-            "content": f"📋 Delegation check: {d['task'][:60]}",
-            "priority": "normal",
-        })
+    if get_setting(workspace, "delegationQueue", True):
+        due_delegations = get_delegations_due_for_check(workspace)
+        for d in due_delegations:
+            notifications.append({
+                "content": f"📋 Delegation check: {d['task'][:60]}",
+                "priority": "normal",
+            })
 
     # Routine suggestions
-    routines = detect_routines(workspace)
-    for r in routines[:1]:
-        notifications.append({
-            "content": f"🔄 {r.get('suggestion', '')}",
-            "priority": "low",
-        })
+    if get_setting(workspace, "routineDetection", True):
+        routines = detect_routines(workspace)
+        for r in routines[:1]:
+            notifications.append({
+                "content": f"🔄 {r.get('suggestion', '')}",
+                "priority": "low",
+            })
+
+    # Daily digest — send once per day after 8pm
+    if get_setting(workspace, "dailyDigest", True):
+        now = datetime.now()
+        if now.hour >= 20:
+            digest_key = f"digest_{now.strftime('%Y-%m-%d')}"
+            if digest_key not in _LAST_NOTIFIED:
+                digest = build_daily_digest(workspace)
+                if digest:
+                    formatted = format_digest(digest)
+                    if formatted:
+                        _LAST_NOTIFIED[digest_key] = now
+                        notifications.append({"content": formatted, "metadata": {"_notification": True, "_proactive": True}})
+
+    # Financial spending spike alerts
+    if get_setting(workspace, "financialPulse", True):
+        now = datetime.now()
+        pulse = get_financial_pulse(workspace)
+        if pulse.get("alerts"):
+            for alert in pulse["alerts"][:2]:
+                alert_key = f"fin_{alert[:30]}_{now.strftime('%Y-%m-%d')}"
+                if alert_key not in _LAST_NOTIFIED:
+                    _LAST_NOTIFIED[alert_key] = now
+                    notifications.append({"content": f"💰 {alert}", "metadata": {"_notification": True, "_proactive": True, "_priority": "medium"}})
 
     return notifications

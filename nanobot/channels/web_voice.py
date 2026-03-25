@@ -203,22 +203,20 @@ _INTELLIGENCE_DEFAULTS = {
 
 
 def _load_intelligence_settings(workspace: Path) -> dict:
-    """Load intelligence settings from workspace/intelligence.json."""
-    path = workspace / "intelligence.json"
-    if path.exists():
-        try:
-            return {**_INTELLIGENCE_DEFAULTS, **json.loads(path.read_text())}
-        except Exception:
-            pass
-    return dict(_INTELLIGENCE_DEFAULTS)
+    """Load intelligence settings from unified settings."""
+    from nanobot.hooks.builtin.feature_registry import get_setting
+    return {
+        k: get_setting(workspace, k, v)
+        for k, v in _INTELLIGENCE_DEFAULTS.items()
+    }
 
 
 def _save_intelligence_settings(workspace: Path, settings: dict) -> None:
-    """Save intelligence settings to workspace/intelligence.json."""
-    path = workspace / "intelligence.json"
-    # Only save known keys
-    clean = {k: bool(v) for k, v in settings.items() if k in _INTELLIGENCE_DEFAULTS}
-    path.write_text(json.dumps(clean, indent=2))
+    """Save intelligence settings to unified settings."""
+    from nanobot.hooks.builtin.feature_registry import save_setting
+    for k, v in settings.items():
+        if k in _INTELLIGENCE_DEFAULTS:
+            save_setting(workspace, k, bool(v))
 
 
 class WebVoiceChannel(BaseChannel):
@@ -240,7 +238,7 @@ class WebVoiceChannel(BaseChannel):
         self._runner: web.AppRunner | None = None
         self._clients: dict[str, web.WebSocketResponse] = {}
         self._utterance_buffer: dict[str, list[str]] = {}
-        self._streamed_text: dict[str, str] = {}
+        self._streamed_text: dict[str, bool] = {}
         # Per-session TTS queue to preserve sentence order
         self._tts_queues: dict[str, asyncio.Queue] = {}
         self._tts_workers: dict[str, asyncio.Task] = {}
@@ -249,9 +247,10 @@ class WebVoiceChannel(BaseChannel):
         # Latency tracking per session
         self._activity_ts: dict[str, float] = {}  # last activity timestamp
         # Detected language from multi-language STT (auto-switches TTS)
-        self._detected_language: str | None = None
+        self._detected_language: dict[str, str | None] = {}
         # Track which sessions have active voice calls (only TTS for these)
         self._voice_active: set[str] = set()
+        self._speak_reasoning: dict[str, bool] = {}
 
     @staticmethod
     def _get_workspace():
@@ -355,6 +354,8 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/api/delegations", self._delegations_handler)
         self._app.router.add_post("/api/delegations", self._delegations_save_handler)
         self._app.router.add_get("/api/decisions", self._decisions_handler)
+        self._app.router.add_post("/api/jarvis/decisions", self._decisions_save_handler)
+        self._app.router.add_patch("/api/jarvis/delegations", self._delegations_update_handler)
         self._app.router.add_get("/api/people-prep", self._people_prep_handler)
         # Voice providers
         self._app.router.add_get("/api/voice/providers", self._voice_providers_handler)
@@ -368,13 +369,11 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_post("/api/budget", self._budget_save_handler)
         self._app.router.add_post("/api/behavior", self._behavior_save_handler)
         self._app.router.add_post("/api/maintenance/settings", self._maintenance_settings_handler)
-        self._app.router.add_get("/api/search", self._search_handler)
-        self._app.router.add_get("/api/sessions", self._sessions_list_handler)
         self._app.router.add_get("/api/sessions/{key:.+}/export", self._session_export_handler)
         self._app.router.add_get("/api/sessions/{key:.+}", self._session_detail_handler)
         self._app.router.add_delete("/api/sessions/{key:.+}", self._session_delete_handler)
         self._app.router.add_get("/api/budget", self._budget_handler)
-        self._app.router.add_post("/api/budget", self._budget_update_handler)
+        self._app.router.add_get("/api/agents", self._agents_list_handler)
         self._app.router.add_get("/api/favorites", self._favorites_handler)
         # Serve React build from /root/mawabot/dist (if exists), fallback to inline HTML
         _react_dist = Path("/root/mawabot/dist")
@@ -464,10 +463,14 @@ class WebVoiceChannel(BaseChannel):
         if meta.get("_tts_sentence"):
             await broadcast({"type": "response_chunk", "text": msg.content})
             # Only generate TTS audio when voice mode is active for ANY connected client
-            _any_voice_stream = bool(self._voice_active & set(cid for cid, _ in live_clients))
+            _client_ids = set(cid for cid, _ in live_clients)
+            _any_voice_stream = bool(self._voice_active & _client_ids)
+            logger.debug("TTS sentence check: voice_active={}, clients={}, match={}",
+                         self._voice_active, _client_ids, _any_voice_stream)
             if _any_voice_stream:
                 for cid, _ in live_clients:
-                    self._enqueue_tts(cid, msg.content)
+                    if cid in self._voice_active:
+                        self._enqueue_tts(cid, msg.content)
             # Mark that this session had streaming TTS so final response skips TTS
             self._streamed_text[session_id] = True
             return
@@ -529,6 +532,10 @@ class WebVoiceChannel(BaseChannel):
             delta_ms = round((now - prev) * 1000)
             self._activity_ts[session_id] = now
 
+            # Subagent progress — broadcast agent_progress event for frontend
+            if meta.get("_subagent_id"):
+                await broadcast({"type": "agent_progress", "task_id": meta["_subagent_id"], "text": msg.content})
+
             if is_tool_hint:
                 text = msg.content
                 if text.startswith("[") and "] \u2192 " in text:
@@ -551,10 +558,12 @@ class WebVoiceChannel(BaseChannel):
         is_subagent = meta.get("_subagent_result", False)
         _was_streamed = session_id in self._streamed_text  # Check BEFORE popping
         self._streamed_text.pop(session_id, None)
+        _tips = meta.get("_tips", [])
         await broadcast({
             "type": "response_text",
             "text": response_text,
             "subagent_result": is_subagent,
+            "tips": _tips,
         })
 
         # Send follow-up suggestions (LLM-generated or will be fetched by frontend via API)
@@ -582,13 +591,15 @@ class WebVoiceChannel(BaseChannel):
         # Check if ANY connected client has voice active (handles reconnects/multi-device)
         _any_voice = bool(self._voice_active & set(cid for cid, _ in live_clients))
         if _any_voice and not _was_streamed and not meta.get("_voice_final"):
-            _keep_reasoning = getattr(self, '_speak_reasoning', {}).get(session_id, False)
+            _keep_reasoning = self._speak_reasoning.get(session_id, False)
             clean = _strip_markdown(msg.content, keep_reasoning=_keep_reasoning)
             if clean:
                 sentences = _split_sentences(clean)
                 for sentence in sentences:
                     if len(sentence) >= 3:
-                        self._enqueue_tts(session_id, sentence)
+                        for cid, _ in live_clients:
+                            if cid in self._voice_active:
+                                self._enqueue_tts(cid, sentence)
 
     def _enqueue_tts(self, session_id: str, text: str) -> None:
         """Add a sentence to the ordered TTS queue for this session."""
@@ -599,25 +610,86 @@ class WebVoiceChannel(BaseChannel):
             self._tts_workers[session_id] = asyncio.create_task(self._tts_worker(session_id))
 
     async def _tts_worker(self, session_id: str) -> None:
-        """Process TTS queue sequentially to preserve sentence order."""
+        """Process TTS queue sequentially to preserve sentence order.
+
+        For ElevenLabs: streams audio chunks to client as they arrive (~200ms to first audio).
+        For Deepgram: sends full audio buffer (already fast due to PCM).
+        """
         q = self._tts_queues.get(session_id)
         if not q:
             return
+        logger.debug("TTS worker started for {}", session_id)
+
+        from nanobot.hooks.builtin.feature_registry import get_setting
+        _ws_path = self._get_workspace()
+        _provider = get_setting(_ws_path, "voiceTtsProvider", "deepgram")
+
         while True:
             try:
                 text = await asyncio.wait_for(q.get(), timeout=30.0)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 break
+            logger.debug("TTS worker generating for '{}' ({})", text[:40], session_id)
             ws = self._clients.get(session_id)
             if not ws or ws.closed:
                 break
-            audio = await self._generate_tts(text)
-            if audio and not ws.closed:
+
+            # ElevenLabs: use streaming API for lower latency
+            if _provider == "elevenlabs":
+                try:
+                    await self._stream_elevenlabs_to_client(text, session_id, ws)
+                except Exception as e:
+                    logger.error("ElevenLabs streaming failed: {}, falling back to buffered", e)
+                    # Fallback to buffered
+                    audio = await self._generate_tts(text, session_id=session_id)
+                    if audio and not ws.closed:
+                        await ws.send_json({
+                            "type": "tts_audio",
+                            "audio_b64": base64.b64encode(audio).decode(),
+                            "sample_rate": 24000,
+                        })
+            else:
+                # Deepgram / other: buffered (already fast for PCM)
+                audio = await self._generate_tts(text, session_id=session_id)
+                if audio and not ws.closed:
+                    try:
+                        await ws.send_json({
+                            "type": "tts_audio",
+                            "audio_b64": base64.b64encode(audio).decode(),
+                            "sample_rate": 24000,
+                        })
+                    except Exception as e:
+                        logger.error("TTS send failed: {}", e)
+                        break
+
+    async def _stream_elevenlabs_to_client(self, text: str, session_id: str, ws) -> None:
+        """Stream ElevenLabs TTS — accumulates on server, sends complete MP3 to client."""
+        from nanobot.hooks.builtin.voice_providers import stream_tts_elevenlabs, _get_elevenlabs_key
+        from nanobot.hooks.builtin.feature_registry import get_setting
+
+        _ws_path = self._get_workspace()
+        api_key = _get_elevenlabs_key()
+        if not api_key:
+            return
+        voice_id = get_setting(_ws_path, "elevenlabsVoiceId", "21m00Tcm4TlvDq8ikWAM")
+        model_id = get_setting(_ws_path, "elevenlabsModel", "eleven_flash_v2_5")
+        logger.debug("ElevenLabs TTS: model={}, voice={}", model_id, voice_id)
+
+        # Use streaming API for faster server-side reception, but send complete MP3 to client
+        audio = await stream_tts_elevenlabs(
+            text=text, api_key=api_key, voice_id=voice_id,
+            model_id=model_id, chunk_callback=None, workspace=_ws_path,
+        )
+        if audio and not ws.closed:
+            try:
                 await ws.send_json({
                     "type": "tts_audio",
                     "audio_b64": base64.b64encode(audio).decode(),
-                    "sample_rate": 24000,
+                    "sample_rate": 44100,
                 })
+                logger.debug("ElevenLabs streaming: sent {}KB for '{}'", len(audio) // 1024, text[:30])
+            except Exception as e:
+                logger.error("ElevenLabs send failed: {}", e)
 
     # ── Middleware ──────────────────────────────────────────────────
 
@@ -666,6 +738,15 @@ class WebVoiceChannel(BaseChannel):
             "status": "ok",
             "active_sessions": len(self._clients),
         })
+
+    async def _agents_list_handler(self, request: web.Request) -> web.Response:
+        """Return full agent list from agents.json."""
+        agents_file = self._get_workspace() / "agents.json"
+        try:
+            agents = json.loads(agents_file.read_text()) if agents_file.exists() else []
+        except Exception:
+            agents = []
+        return web.json_response(agents)
 
     async def _config_handler(self, request: web.Request) -> web.Response:
         """Return full safe config for the settings UI."""
@@ -923,16 +1004,17 @@ class WebVoiceChannel(BaseChannel):
         try:
             from nanobot.hooks.builtin.events import parse_event, format_event_as_message, validate_signature
 
-            body = await request.json()
+            raw = await request.read()
 
             # Optional HMAC signature verification
             sig = request.headers.get("X-Nanobot-Signature", "")
             if sig:
                 import os
                 secret = os.environ.get("NANOBOT_WEBHOOK_SECRET", "")
-                if secret and not validate_signature(await request.read(), sig, secret):
+                if secret and not validate_signature(raw, sig, secret):
                     return web.json_response({"error": "Invalid signature"}, status=401)
 
+            body = json.loads(raw)
             event = parse_event(body)
             if isinstance(event, str):
                 return web.json_response({"error": event}, status=400)
@@ -1881,6 +1963,37 @@ class WebVoiceChannel(BaseChannel):
         decisions = json.loads(path.read_text()) if path.exists() else []
         return web.json_response({"decisions": decisions[-20:]})
 
+    async def _decisions_save_handler(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        from nanobot.hooks.builtin.jarvis import record_decision
+        alternatives = body.get("alternatives", [])
+        context = body.get("context", "")
+        if alternatives:
+            context = f"{context}\nAlternatives: {', '.join(str(a) for a in alternatives)}" if context else f"Alternatives: {', '.join(str(a) for a in alternatives)}"
+        record_decision(self._get_workspace(), body.get("decision", ""), context)
+        return web.json_response({"ok": True})
+
+    async def _delegations_update_handler(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        from nanobot.hooks.builtin.jarvis import get_delegations, _delegation_path
+        workspace = self._get_workspace()
+        delegations = get_delegations(workspace)
+        task_id = body.get("index")
+        status = body.get("status", "")
+        update_note = body.get("update", "")
+        if task_id is not None and 0 <= task_id < len(delegations):
+            if status:
+                delegations[task_id]["status"] = status
+            if update_note:
+                delegations[task_id].setdefault("updates", []).append({
+                    "note": update_note,
+                    "ts": __import__("datetime").datetime.now().isoformat(),
+                })
+            delegations[task_id]["last_checked"] = __import__("datetime").datetime.now().isoformat()
+            _delegation_path(workspace).write_text(json.dumps(delegations, indent=2))
+            return web.json_response({"ok": True})
+        return web.json_response({"error": "invalid index"}, status=400)
+
     async def _people_prep_handler(self, request: web.Request) -> web.Response:
         from nanobot.hooks.builtin.jarvis import get_people_prep
         name = request.query.get("name", "")
@@ -2585,6 +2698,13 @@ copy();
                             self._clients.pop(old_id, None)
                             self._utterance_buffer.pop(old_id, None)
                             self._pending_count.pop(old_id, None)
+                            self._voice_active.discard(old_id)
+                            self._tts_queues.pop(old_id, None)
+                            if old_id in self._tts_workers:
+                                self._tts_workers.pop(old_id, None)
+                            self._streamed_text.pop(old_id, None)
+                            self._activity_ts.pop(old_id, None)
+                            self._detected_language.pop(old_id, None)
                             self._clients[session_id] = ws
                             self._utterance_buffer.setdefault(session_id, [])
                             self._pending_count.setdefault(session_id, 0)
@@ -2625,8 +2745,6 @@ copy();
                             recv_task = None
 
                         # Store voice preferences (per-session + workspace file for agent loop access)
-                        if not hasattr(self, '_speak_reasoning'):
-                            self._speak_reasoning = {}
                         self._speak_reasoning[session_id] = bool(data.get("speak_reasoning", False))
                         # Write to workspace so the agent loop can read it
                         try:
@@ -2655,7 +2773,7 @@ copy();
                             "encoding": client_encoding,
                             "sample_rate": client_sample_rate,
                             "channels": "1",
-                            "endpointing": "400",
+                            "endpointing": "800",
                             # Audio intelligence
                             "sentiment": "true",
                         }
@@ -2690,7 +2808,7 @@ copy();
                                                         # Extract detected language from multi-language STT
                                                         detected_lang = result.get("channel", {}).get("detected_language") or result.get("metadata", {}).get("detected_language")
                                                         if detected_lang and is_final:
-                                                            self._detected_language = detected_lang
+                                                            self._detected_language[session_id] = detected_lang
 
                                                         msg_out = {
                                                             "type": "transcript",
@@ -2733,7 +2851,7 @@ copy();
                                                         if prev and not prev.done():
                                                             prev.cancel()
                                                         async def _delayed_submit(sid=session_id, txt=full_text):
-                                                            await asyncio.sleep(1.5)
+                                                            await asyncio.sleep(2.5)
                                                             # Check if buffer was already submitted or got more text
                                                             cur_buf = self._utterance_buffer.get(sid, [])
                                                             if cur_buf:
@@ -2853,6 +2971,32 @@ copy();
                         media = data.get("media", [])  # List of base64 data URIs or file paths
                         if text or media:
                             self._enqueue_message(session_id, text or "(attachment)", media=media if media else None)
+
+                    elif action == "agent_cancel":
+                        task_id = data.get("task_id")
+                        if task_id:
+                            # Cancel via bus — send as user message so agent loop handles it
+                            self._enqueue_message(session_id, f"/cancel_subagent {task_id}")
+                            await ws.send_json({"type": "agent_cancelled", "task_id": task_id})
+
+                    elif action == "agent_update":
+                        task_id = data.get("task_id")
+                        message = data.get("message", "")
+                        if task_id and message:
+                            self._enqueue_message(session_id, f"/update_subagent {task_id} {message}")
+                            await ws.send_json({"type": "agent_update_sent", "task_id": task_id})
+
+                    elif action == "agent_retry":
+                        task_id = data.get("task_id")
+                        agents_file = self._get_workspace() / "agents.json"
+                        try:
+                            agents = json.loads(agents_file.read_text()) if agents_file.exists() else []
+                        except Exception:
+                            agents = []
+                        agent = next((a for a in agents if a.get("id") == task_id or a.get("task_id") == task_id), None)
+                        if agent:
+                            self._enqueue_message(session_id, agent["task"])
+                            await ws.send_json({"type": "agent_retried", "task_id": task_id})
 
                 elif msg.type == aiohttp.WSMsgType.BINARY:
                     if dg_ws:
@@ -3139,7 +3283,7 @@ copy();
 
     # ── Deepgram APIs ──────────────────────────────────────────────
 
-    async def _generate_tts(self, text: str) -> bytes | None:
+    async def _generate_tts(self, text: str, session_id: str | None = None) -> bytes | None:
         """Generate TTS using the configured provider (dispatches to Deepgram/MiMo/Coqui/MMS).
 
         If multi-language STT detected a non-English language and the provider
@@ -3150,7 +3294,7 @@ copy();
 
         ws = self._get_workspace()
         provider = get_setting(ws, "voiceTtsProvider", "deepgram")
-        detected = getattr(self, "_detected_language", None)
+        detected = self._detected_language.get(session_id) if session_id else None
 
         # Auto-switch TTS for non-English: if on Deepgram (English-only),
         # fall back to Coqui XTTS for multilingual support

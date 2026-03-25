@@ -1,6 +1,6 @@
-"""Claude-level capabilities ported to Mawa — all pure code, zero LLM tokens.
+"""Claude-level capabilities — task detection, delegation, and pre-LLM interceptors.
 
-1. Plan→Execute task decomposer
+1. Plan→Execute task decomposer (regex + LLM hybrid)
 2. Parallel tool dispatch
 3. Source citation tracker
 4. Smart output formatter
@@ -30,65 +30,231 @@ from loguru import logger
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 1. Plan→Execute Task Decomposer
+# 1. Plan→Execute Task Decomposer (Advanced)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Patterns that indicate multi-step tasks requiring decomposition
-_MULTI_STEP_PATTERNS = [
-    re.compile(r"\band\s+then\b", re.I),
-    re.compile(r"\bfirst\b.*\bthen\b", re.I),
-    re.compile(r"\balso\b.*\b(check|send|create|update)\b", re.I),
-    re.compile(r"\b(after|once)\s+(that|you|it)\b", re.I),
-    re.compile(r",\s*(then|and|also)\s+", re.I),
-    re.compile(r"\b\d+\)\s+", re.I),  # "1) do X 2) do Y"
+# Task verbs — categorized by weight (heavy = likely needs delegation)
+_HEAVY_VERBS = frozenset({
+    "research", "investigate", "analyze", "compare", "review", "summarize",
+    "find", "look", "search", "browse", "explore", "compile", "gather",
+    "write", "draft", "compose", "generate", "create", "build", "design",
+    "download", "fetch", "scrape", "crawl", "monitor", "book", "order",
+})
+
+_LIGHT_VERBS = frozenset({
+    "tell", "show", "check", "get", "list", "set", "update", "delete",
+    "add", "remove", "open", "send", "reply", "forward", "schedule",
+    "remind", "toggle", "enable", "disable", "run", "deploy",
+})
+
+_ALL_TASK_VERBS = _HEAVY_VERBS | _LIGHT_VERBS
+
+_TASK_VERBS = re.compile(
+    r"\b(" + "|".join(_ALL_TASK_VERBS) + r")\b", re.I,
+)
+
+# Connectors between tasks — ordered by strength
+_SPLITTERS = [
+    # Explicit sequence
+    re.compile(r"\b(?:and\s+then|then|after\s+that|next|afterwards|once\s+done)\b", re.I),
+    # Parallel/additive
+    re.compile(r"\b(?:also|and\s+also|plus|as\s+well\s+as|on\s+top\s+of\s+that)\b", re.I),
+    # Soft conjunction — "X and verb Y" (only split if both sides have verbs)
+    re.compile(r"\band\s+(?=" + "|".join(_ALL_TASK_VERBS) + r")", re.I),
+    # Comma + verb
+    re.compile(r",\s*(?=" + "|".join(_ALL_TASK_VERBS) + r")", re.I),
 ]
 
-# Task verb patterns for extracting individual steps
-_TASK_VERBS = re.compile(
-    r"\b(check|send|create|search|find|open|list|get|fetch|set|update|delete|add|remove|run|build|deploy|download|upload|generate|summarize|review)\b",
-    re.I,
-)
+# Numbered list patterns — matches both "1) X 2) Y" inline and newline-separated
+_NUMBERED_RE = re.compile(r"(?:^|\n|\s)\d+[.)]\s+", re.M)
+
+# Heuristic: messages this short are almost never multi-step
+_MIN_MULTI_STEP_LEN = 20
 
 
 def is_multi_step(text: str) -> bool:
-    """Detect if user message requires multiple steps."""
-    return any(p.search(text) for p in _MULTI_STEP_PATTERNS) and len(_TASK_VERBS.findall(text)) >= 2
+    """Detect if user message requires multiple independent steps.
+
+    Uses verb counting + connector detection. Avoids false positives on
+    single-task messages like "search and compare hotels" (one task, two verbs).
+    """
+    if len(text) < _MIN_MULTI_STEP_LEN:
+        return False
+    verbs = _TASK_VERBS.findall(text.lower())
+    if len(verbs) < 2:
+        return False
+    # Need at least one connector between verbs, or numbered items
+    if _NUMBERED_RE.search(text):
+        return True
+    return any(s.search(text) for s in _SPLITTERS)
 
 
 def decompose_task(text: str) -> list[str]:
     """Break a complex request into ordered steps. Pure regex — no LLM.
 
-    Returns list of step descriptions, or empty list if single-step.
+    Tries progressively weaker split strategies. Returns list of step
+    descriptions, or empty list if single-step.
     """
     if not is_multi_step(text):
         return []
 
-    steps = []
-
-    # Strategy 1: Split on "then", "and then", "also", "after that"
-    parts = re.split(r"\b(?:then|and then|after that|also|next)\b", text, flags=re.I)
-    if len(parts) >= 2:
-        for part in parts:
-            part = part.strip().strip(",").strip()
-            if len(part) > 5 and _TASK_VERBS.search(part):
-                steps.append(part)
-        if steps:
-            return steps
-
-    # Strategy 2: Split on numbered items "1) ... 2) ..."
-    numbered = re.split(r"\d+\)\s*", text)
+    # Strategy 1: Numbered items "1) do X  2) do Y"
+    numbered = _NUMBERED_RE.split(text)
     numbered = [p.strip() for p in numbered if p.strip() and len(p.strip()) > 5]
     if len(numbered) >= 2:
         return numbered
 
-    # Strategy 3: Split on commas with task verbs
-    parts = text.split(",")
-    for part in parts:
-        part = part.strip()
-        if _TASK_VERBS.search(part) and len(part) > 8:
-            steps.append(part)
+    # Strategy 2: Try each splitter pattern in order of strength
+    for splitter in _SPLITTERS:
+        parts = splitter.split(text)
+        steps = []
+        for part in parts:
+            part = part.strip().strip(",").strip()
+            # Each step needs a verb AND enough context (not just "search" alone)
+            if len(part) > 10 and _TASK_VERBS.search(part):
+                steps.append(part)
+        if len(steps) >= 2:
+            # Reject splits where all steps share the same core object
+            # e.g., "search and compare hotels" → same object "hotels"
+            nouns = []
+            for s in steps:
+                # Extract non-verb content words as a rough "object" fingerprint
+                words = set(re.findall(r"\b[a-z]{4,}\b", s.lower())) - _ALL_TASK_VERBS
+                nouns.append(words)
+            if len(nouns) >= 2 and nouns[0] == nouns[1] and len(nouns[0]) <= 2:
+                continue  # Same object — likely one task, try next splitter
+            return steps
 
-    return steps if len(steps) >= 2 else []
+    return []
+
+
+def classify_step(step: str) -> str:
+    """Classify a decomposed step as 'heavy' (delegate) or 'light' (inline).
+
+    Heavy steps involve research, generation, or multi-tool operations.
+    Light steps are quick lookups, status checks, or simple actions.
+    """
+    text_lower = step.lower()
+    heavy_count = sum(1 for v in _HEAVY_VERBS if re.search(r"\b" + v + r"\b", text_lower))
+    light_count = sum(1 for v in _LIGHT_VERBS if re.search(r"\b" + v + r"\b", text_lower))
+
+    # Explicit time/effort indicators boost weight
+    if re.search(r"\b(best|top|detailed|thorough|comprehensive|all|every|complete)\b", text_lower):
+        heavy_count += 1
+
+    # Short steps with simple verbs are light
+    if len(step) < 30 and light_count > 0 and heavy_count == 0:
+        return "light"
+
+    return "heavy" if heavy_count > 0 else "light"
+
+
+# Patterns that signal an explicit research/background request
+_STANDALONE_HEAVY_SIGNALS = re.compile(
+    r"^\s*("
+    r"research\b|look\s+up\b|look\s+into\b|find\s+(me\s+)?(the\s+)?(best|top|good|cheap)"
+    r"|compare\b.*\b(vs|versus|or|and)\b"
+    r"|investigate\b|analyze\b|compile\b|gather\b|survey\b"
+    r"|write\s+(me\s+)?(a|an|the)\b|draft\s+(a|an|the)\b"
+    r"|summarize\b.*\b(article|page|doc|report|thread)"
+    r")",
+    re.I,
+)
+
+# Short queries that should NEVER be delegated even if they match heavy verbs
+_NEVER_DELEGATE = re.compile(
+    r"^\s*(what|who|when|where|why|how|is|are|do|does|did|can|will|should|tell me|show me|check)\b",
+    re.I,
+)
+
+
+def is_standalone_heavy(text: str) -> bool:
+    """Regex fallback for standalone heavy detection. Used when LLM classifier is unavailable."""
+    text = text.strip()
+    if len(text) < 25:
+        return False
+    if _NEVER_DELEGATE.match(text):
+        return False
+    if _STANDALONE_HEAVY_SIGNALS.search(text):
+        return True
+    return classify_step(text) == "heavy" and len(text) > 50
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LLM Intent Classifier — fast model classifies task intent
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_INTENT_CLASSIFY_PROMPT = """Classify this user message into ONE category. Reply with ONLY the category name, nothing else.
+
+Categories:
+- RESEARCH: needs web search, comparison, investigation, finding options (3+ tool calls likely)
+- GENERATE: needs writing, drafting, composing, creating content
+- QUICK: simple lookup, status check, time, weather, email check, setting change
+- CHAT: greeting, follow-up, conversation, thank you, clarification
+- MULTI: contains 2+ independent tasks that could run in parallel
+
+Message: {message}
+
+Category:"""
+
+
+async def classify_intent_llm(text: str, provider, model: str) -> dict:
+    """Classify user intent using a fast LLM call (~50 tokens, <500ms).
+
+    Returns dict with:
+        category: RESEARCH | GENERATE | QUICK | CHAT | MULTI
+        delegate: bool — should this be auto-delegated to a subagent
+        steps: list[str] — decomposed steps if MULTI
+    """
+    from loguru import logger
+
+    # Regex pre-filter: skip LLM for obvious cases
+    text_stripped = text.strip()
+    if len(text_stripped) < 15:
+        return {"category": "CHAT", "delegate": False, "steps": []}
+    if _NEVER_DELEGATE.match(text_stripped) and len(text_stripped) < 60:
+        return {"category": "QUICK", "delegate": False, "steps": []}
+
+    try:
+        prompt = _INTENT_CLASSIFY_PROMPT.format(message=text_stripped[:200])
+        response = await provider.chat_with_retry(
+            messages=[{"role": "user", "content": prompt}],
+            tools=[],
+            model=model,
+        )
+
+        raw = (response.content or "").strip().upper()
+        # Extract category from response (handle verbose models)
+        category = "QUICK"
+        for cat in ("RESEARCH", "GENERATE", "MULTI", "CHAT", "QUICK"):
+            if cat in raw:
+                category = cat
+                break
+
+        delegate = category in ("RESEARCH", "GENERATE")
+
+        # For MULTI, decompose into steps
+        steps = []
+        if category == "MULTI":
+            steps = decompose_task(text_stripped)
+            # If decomposition fails, fall back to single task classification
+            if not steps:
+                delegate = is_standalone_heavy(text_stripped)
+                category = "RESEARCH" if delegate else "QUICK"
+
+        logger.debug("LLM intent: '{}' → {} (delegate={})", text_stripped[:50], category, delegate)
+        return {"category": category, "delegate": delegate, "steps": steps}
+
+    except Exception as e:
+        logger.debug("LLM intent classification failed ({}), falling back to regex", e)
+        # Fallback to regex
+        if is_multi_step(text_stripped):
+            steps = decompose_task(text_stripped)
+            if steps:
+                return {"category": "MULTI", "delegate": True, "steps": steps}
+        if is_standalone_heavy(text_stripped):
+            return {"category": "RESEARCH", "delegate": True, "steps": []}
+        return {"category": "QUICK", "delegate": False, "steps": []}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -766,6 +932,10 @@ def try_code_answer(text: str, workspace: Path) -> str | None:
 
     If this returns a value, we can skip the LLM call entirely — zero tokens.
     """
+    # Skip code answers for long messages — they're likely pasted content, not questions
+    if len(text) > 300:
+        return None
+
     # Math
     math_expr = detect_math(text)
     if math_expr:

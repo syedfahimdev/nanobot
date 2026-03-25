@@ -19,24 +19,22 @@ _DEFAULTS = {
 
 
 def load_budget(workspace: Path) -> dict:
-    """Read budget config, filling in defaults for missing keys."""
-    path = workspace / "usage" / "budget.json"
-    budget = dict(_DEFAULTS)
-    if path.exists():
-        try:
-            stored = json.loads(path.read_text())
-            budget.update(stored)
-        except (json.JSONDecodeError, OSError):
-            pass
-    return budget
+    """Read budget config from unified settings, filling in defaults."""
+    from nanobot.hooks.builtin.feature_registry import get_setting
+    return {
+        "daily_limit": get_setting(workspace, "budget_daily_limit", _DEFAULTS["daily_limit"]),
+        "weekly_limit": get_setting(workspace, "budget_weekly_limit", _DEFAULTS["weekly_limit"]),
+        "auto_switch_model": get_setting(workspace, "budget_auto_switch_model", _DEFAULTS["auto_switch_model"]),
+        "alert_threshold": get_setting(workspace, "budget_alert_threshold", _DEFAULTS["alert_threshold"]),
+    }
 
 
 def save_budget(workspace: Path, budget: dict) -> None:
-    """Write budget config to disk."""
-    usage_dir = workspace / "usage"
-    usage_dir.mkdir(parents=True, exist_ok=True)
-    path = usage_dir / "budget.json"
-    path.write_text(json.dumps(budget, indent=2))
+    """Write budget config to unified settings."""
+    from nanobot.hooks.builtin.feature_registry import save_setting
+    for key in _DEFAULTS:
+        if key in budget:
+            save_setting(workspace, f"budget_{key}", budget[key])
 
 
 def check_budget(workspace: Path) -> dict:

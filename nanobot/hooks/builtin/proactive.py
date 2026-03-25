@@ -70,7 +70,7 @@ def _check_financial_alerts(workspace: Path) -> list[str]:
             for d in dates:
                 try:
                     parsed = None
-                    for fmt in ("%B %d, %Y", "%B %d %Y", "%Y-%m-%d"):
+                    for fmt in ("%B %d, %Y", "%B %d %Y", "%b %d %Y", "%Y-%m-%d"):
                         try:
                             parsed = datetime.strptime(d.replace(",", ""), fmt).date()
                             break

@@ -51,10 +51,10 @@ def _validate_url(url: str) -> tuple[bool, str]:
         return False, str(e)
 
 
-def _validate_url_safe(url: str) -> tuple[bool, str]:
+async def _validate_url_safe(url: str) -> tuple[bool, str]:
     """Validate URL with SSRF protection: scheme, domain, and resolved IP check."""
-    from nanobot.security.network import validate_url_target
-    return validate_url_target(url)
+    from nanobot.security.network import async_validate_url_target
+    return await async_validate_url_target(url)
 
 
 def _format_results(query: str, items: list[dict[str, Any]], n: int) -> str:
@@ -233,7 +233,7 @@ class WebFetchTool(Tool):
 
     async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> str:
         max_chars = maxChars or self.max_chars
-        is_valid, error_msg = _validate_url_safe(url)
+        is_valid, error_msg = await _validate_url_safe(url)
         if not is_valid:
             return json.dumps({"error": f"URL validation failed: {error_msg}", "url": url}, ensure_ascii=False)
 
@@ -283,19 +283,23 @@ class WebFetchTool(Tool):
         from readability import Document
 
         try:
+            from nanobot.security.network import async_validate_resolved_url
+
             async with httpx.AsyncClient(
-                follow_redirects=True,
-                max_redirects=MAX_REDIRECTS,
+                follow_redirects=False,
                 timeout=30.0,
                 proxy=self.proxy,
             ) as client:
                 r = await client.get(url, headers={"User-Agent": USER_AGENT})
+                for _ in range(MAX_REDIRECTS):
+                    if not r.is_redirect:
+                        break
+                    next_url = str(r.next_request.url) if r.next_request else r.headers.get("location", "")
+                    redir_ok, redir_err = await async_validate_resolved_url(next_url)
+                    if not redir_ok:
+                        return json.dumps({"error": f"Redirect blocked: {redir_err}", "url": url}, ensure_ascii=False)
+                    r = await client.get(next_url, headers={"User-Agent": USER_AGENT})
                 r.raise_for_status()
-
-            from nanobot.security.network import validate_resolved_url
-            redir_ok, redir_err = validate_resolved_url(str(r.url))
-            if not redir_ok:
-                return json.dumps({"error": f"Redirect blocked: {redir_err}", "url": url}, ensure_ascii=False)
 
             ctype = r.headers.get("content-type", "")
 

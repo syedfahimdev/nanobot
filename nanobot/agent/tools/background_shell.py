@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +26,25 @@ from typing import Any
 from loguru import logger
 
 from nanobot.agent.tools.base import Tool
+
+_DENY_PATTERNS = [
+    r"\brm\s+-[rf]{1,2}\b",
+    r"\bdel\s+/[fq]\b",
+    r"\brmdir\s+/s\b",
+    r"(?:^|[;&|]\s*)format\b",
+    r"\b(mkfs|diskpart)\b",
+    r"\bdd\s+if=",
+    r">\s*/dev/sd",
+    r"\b(shutdown|reboot|poweroff)\b",
+    r"\bpkill\b",
+    r"\bkillall\b",
+    r"\bkill\s+-(?:9|SIGKILL)\b",
+    r":\(\)\s*\{.*\};\s*:",
+    r"\.env\b",
+    r"\bprintenv\b",
+    r"\b(env|set)\s*$",
+    r"/etc/(shadow|passwd)",
+]
 
 
 @dataclass
@@ -155,6 +175,11 @@ class BackgroundShellTool(Tool):
         if action == "run":
             if not command:
                 return "Error: 'command' is required for 'run' action"
+
+            lower = command.strip().lower()
+            for pattern in _DENY_PATTERNS:
+                if re.search(pattern, lower):
+                    return "Error: Command blocked by safety guard (dangerous pattern detected)"
 
             running = [j for j in _jobs.values() if j.is_running]
             if len(running) >= _MAX_JOBS:

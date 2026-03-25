@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import re
 import socket
@@ -62,8 +63,27 @@ def validate_url_target(url: str) -> tuple[bool, str]:
     return True, ""
 
 
+async def async_validate_url_target(url: str) -> tuple[bool, str]:
+    """Async version of validate_url_target — runs DNS resolution in a thread pool."""
+    return await asyncio.to_thread(validate_url_target, url)
+
+
+async def async_validate_resolved_url(url: str) -> tuple[bool, str]:
+    """Async version of validate_resolved_url — runs DNS resolution in a thread pool."""
+    return await asyncio.to_thread(_validate_resolved_url_sync, url)
+
+
 def validate_resolved_url(url: str) -> tuple[bool, str]:
-    """Validate an already-fetched URL (e.g. after redirect). Only checks the IP, skips DNS."""
+    """Validate an already-fetched URL (e.g. after redirect). Only checks the IP, skips DNS.
+
+    WARNING: This calls socket.getaddrinfo synchronously. Use async_validate_resolved_url
+    in async contexts to avoid blocking the event loop.
+    """
+    return _validate_resolved_url_sync(url)
+
+
+def _validate_resolved_url_sync(url: str) -> tuple[bool, str]:
+    """Internal sync implementation."""
     try:
         p = urlparse(url)
     except Exception:

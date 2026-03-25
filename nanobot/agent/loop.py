@@ -236,8 +236,10 @@ class AgentLoop:
         from nanobot.agent.tools.settings_tool import SettingsTool
         self.tools.register(SettingsTool(self.workspace))
         # Image generation
-        from nanobot.agent.tools.image_gen import ImageGenTool
-        self.tools.register(ImageGenTool(self.workspace))
+        from nanobot.hooks.builtin.feature_registry import get_setting
+        if get_setting(self.workspace, "imageGenEnabled", True):
+            from nanobot.agent.tools.image_gen import ImageGenTool
+            self.tools.register(ImageGenTool(self.workspace))
         # Phone calls via Twilio
         from nanobot.agent.tools.phone_call import PhoneCallTool
         self.tools.register(PhoneCallTool(self.workspace))
@@ -393,8 +395,14 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        effective_model: str | None = None,
+        max_iters: int | None = None,
+        filtered_tool_names: list[str] | None = None,
     ) -> tuple[str | None, list[str], list[dict], dict]:
         """Run the agent iteration loop. Returns (content, tools, messages, usage)."""
+        effective_model = effective_model or self.model
+        max_iters = max_iters if max_iters is not None else self.max_iterations
+        _filtered_set = set(filtered_tool_names if filtered_tool_names is not None else self.tools.tool_names)
         messages = initial_messages
         iteration = 0
         final_content = None
@@ -409,13 +417,15 @@ class AgentLoop:
                 _user_message = m.get("content", "") if isinstance(m.get("content"), str) else ""
                 break
 
-        while iteration < self.max_iterations:
+        while iteration < max_iters:
             iteration += 1
 
-            tool_defs = [d for d in self.tools.get_definitions() if d["function"]["name"] in getattr(self, '_filtered_tools', self.tools.tool_names)]
+            # Include any tools dynamically registered by search_tools
+            _filtered_set.update(t for t in self.tools.tool_names if t not in _filtered_set and t.startswith("mcp_"))
+            tool_defs = [d for d in self.tools.get_definitions() if d["function"]["name"] in _filtered_set]
 
             # Use fast routing model for first iteration if configured
-            current_model = self.routing_model if (iteration == 1 and self.routing_model) else self.model
+            current_model = self.routing_model if (iteration == 1 and self.routing_model) else effective_model
 
             response = await self.provider.chat_with_retry(
                 messages=messages,
@@ -447,10 +457,32 @@ class AgentLoop:
                 )
 
                 # [#3] Compute dynamic budget based on remaining context window
-                prompt_tokens = total_usage.get("prompt_tokens", 0)
+                prompt_tokens = response.usage.get("prompt_tokens", 0)
                 budget = compute_tool_result_budget(
                     self.context_window_tokens, prompt_tokens, len(response.tool_calls),
                 )
+
+                # Detect repeated identical calls (infinite loop protection)
+                call_sig = "|".join(sorted(
+                    f"{tc.name}:{json.dumps(tc.arguments, ensure_ascii=False, sort_keys=True)}"
+                    for tc in response.tool_calls
+                ))
+                if call_sig == _last_call_sig:
+                    _repeat_count += 1
+                    if _repeat_count >= 2:
+                        logger.warning("Breaking repeated tool call loop ({}x)", _repeat_count + 1)
+                        for tc in response.tool_calls:
+                            messages = self.context.add_tool_result(
+                                messages, tc.id, tc.name,
+                                f"ERROR: You have called {tc.name} with the same arguments "
+                                f"{_repeat_count + 1} times. STOP retrying. "
+                                f"Either provide different arguments or tell the user you cannot "
+                                f"complete this action.",
+                            )
+                        continue
+                else:
+                    _last_call_sig = call_sig
+                    _repeat_count = 0
 
                 # Execute tool calls — with parallel safety partitioning
                 if len(response.tool_calls) > 1:
@@ -495,31 +527,10 @@ class AgentLoop:
                             messages, tc.id, tc.name, result
                         )
                 else:
-                    # Single tool call — sequential with retry detection
                     tool_call = response.tool_calls[0]
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False, sort_keys=True)
-                    call_sig = f"{tool_call.name}|{args_str}"
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
-
-                    # Detect repeated identical calls (infinite loop protection)
-                    if call_sig == _last_call_sig:
-                        _repeat_count += 1
-                        if _repeat_count >= 2:
-                            logger.warning("Breaking repeated tool call loop: {} ({}x)", tool_call.name, _repeat_count + 1)
-                            result = (
-                                f"ERROR: You have called {tool_call.name} with the same arguments "
-                                f"{_repeat_count + 1} times. STOP retrying. "
-                                f"Either provide different arguments or tell the user you cannot "
-                                f"complete this action."
-                            )
-                            messages = self.context.add_tool_result(
-                                messages, tool_call.id, tool_call.name, result
-                            )
-                            continue
-                    else:
-                        _last_call_sig = call_sig
-                        _repeat_count = 0
 
                     result = await self._execute_tool_with_enhancements(tool_call, budget, on_progress)
                     if on_progress:
@@ -562,10 +573,10 @@ class AgentLoop:
                 final_content = clean
                 break
 
-        if final_content is None and iteration >= self.max_iterations:
-            logger.warning("Max iterations ({}) reached", self.max_iterations)
+        if final_content is None and iteration >= max_iters:
+            logger.warning("Max iterations ({}) reached", max_iters)
             final_content = (
-                f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
+                f"I reached the maximum number of tool call iterations ({max_iters}) "
                 "without completing the task. You can try breaking the task into smaller steps."
             )
 
@@ -576,6 +587,9 @@ class AgentLoop:
         initial_messages: list[dict],
         on_sentence: Callable[[str], Awaitable[None]] | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        effective_model: str | None = None,
+        max_iters: int | None = None,
+        filtered_tool_names: list[str] | None = None,
     ) -> tuple[str | None, list[str], list[dict], dict]:
         """Streaming variant of agent loop — fires on_sentence as sentences complete.
 
@@ -583,6 +597,9 @@ class AgentLoop:
         as soon as it's accumulated from the token stream, rather than waiting for
         the full response.
         """
+        effective_model = effective_model or self.model
+        max_iters = max_iters if max_iters is not None else self.max_iterations
+        _filtered_set = set(filtered_tool_names if filtered_tool_names is not None else self.tools.tool_names)
         messages = initial_messages
         iteration = 0
         final_content = None
@@ -591,11 +608,18 @@ class AgentLoop:
         _last_call_sig: str | None = None
         _repeat_count = 0
         _stream_retries = 0  # [#7] Track stream failures to avoid infinite fallback
+        _user_message = ""  # Track original user message for quality gate
+        for m in reversed(initial_messages):
+            if m.get("role") == "user":
+                _user_message = m.get("content", "") if isinstance(m.get("content"), str) else ""
+                break
 
-        while iteration < self.max_iterations:
+        while iteration < max_iters:
             iteration += 1
-            tool_defs = [d for d in self.tools.get_definitions() if d["function"]["name"] in getattr(self, '_filtered_tools', self.tools.tool_names)]
-            current_model = self.routing_model if (iteration == 1 and self.routing_model) else self.model
+            # Include any tools dynamically registered by search_tools
+            _filtered_set.update(t for t in self.tools.tool_names if t not in _filtered_set and t.startswith("mcp_"))
+            tool_defs = [d for d in self.tools.get_definitions() if d["function"]["name"] in _filtered_set]
+            current_model = self.routing_model if (iteration == 1 and self.routing_model) else effective_model
 
             # Stream tokens from the LLM
             accumulated_content = ""
@@ -656,7 +680,7 @@ class AgentLoop:
                     break
                 _stream_retries += 1
                 if _stream_retries >= 2:
-                    return await self._run_agent_loop(messages, on_progress)
+                    return await self._run_agent_loop(messages, on_progress, effective_model=effective_model, max_iters=max_iters, filtered_tool_names=filtered_tool_names)
                 continue
 
             except Exception as e:
@@ -666,7 +690,7 @@ class AgentLoop:
                 # and use current messages (not initial) to preserve progress
                 if _stream_retries >= 2:
                     logger.warning("Streaming failed {}x, falling back to non-streaming (preserving progress)", _stream_retries)
-                    return await self._run_agent_loop(messages, on_progress)
+                    return await self._run_agent_loop(messages, on_progress, effective_model=effective_model, max_iters=max_iters, filtered_tool_names=filtered_tool_names)
                 # First failure: retry streaming on next iteration
                 continue
 
@@ -684,7 +708,7 @@ class AgentLoop:
                 break
 
             # [#3] Compute dynamic budget for tool results
-            prompt_tokens = total_usage.get("prompt_tokens", 0)
+            prompt_tokens = (usage or {}).get("prompt_tokens", 0)
 
             if all_tool_calls:
                 budget = compute_tool_result_budget(
@@ -707,6 +731,28 @@ class AgentLoop:
                 )
 
                 # Execute tools with enhancements
+                # Detect repeated identical calls (infinite loop protection)
+                call_sig = "|".join(sorted(
+                    f"{tc.name}:{json.dumps(tc.arguments, ensure_ascii=False, sort_keys=True)}"
+                    for tc in all_tool_calls
+                ))
+                if call_sig == _last_call_sig:
+                    _repeat_count += 1
+                    if _repeat_count >= 2:
+                        logger.warning("Breaking repeated tool call loop ({}x)", _repeat_count + 1)
+                        for tc in all_tool_calls:
+                            messages = self.context.add_tool_result(
+                                messages, tc.id, tc.name,
+                                f"ERROR: You have called {tc.name} with the same arguments "
+                                f"{_repeat_count + 1} times. STOP retrying. "
+                                f"Either provide different arguments or tell the user you cannot "
+                                f"complete this action.",
+                            )
+                        continue
+                else:
+                    _last_call_sig = call_sig
+                    _repeat_count = 0
+
                 if len(all_tool_calls) > 1:
                     # [#5] Partition into parallel-safe and serial groups
                     parallel_batch, serial_batch = partition_tool_calls(all_tool_calls)
@@ -741,22 +787,7 @@ class AgentLoop:
                     tool_call = all_tool_calls[0]
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False, sort_keys=True)
-                    call_sig = f"{tool_call.name}|{args_str}"
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
-
-                    if call_sig == _last_call_sig:
-                        _repeat_count += 1
-                        if _repeat_count >= 2:
-                            logger.warning("Breaking repeated tool call loop: {}", tool_call.name)
-                            result = (
-                                f"ERROR: You have called {tool_call.name} with the same arguments "
-                                f"{_repeat_count + 1} times. STOP retrying."
-                            )
-                            messages = self.context.add_tool_result(messages, tool_call.id, tool_call.name, result)
-                            continue
-                    else:
-                        _last_call_sig = call_sig
-                        _repeat_count = 0
 
                     result = await self._execute_tool_with_enhancements(tool_call, budget, on_progress)
                     if on_progress:
@@ -766,15 +797,34 @@ class AgentLoop:
             else:
                 # Final text response
                 clean = self._strip_think(accumulated_content)
+
+                # [#6] Response quality gate — check if response addresses the question
+                _qg_settings = self._get_intelligence_settings()
+                is_ok, issue = True, ""
+                if _qg_settings.get("responseQualityGate", True):
+                    is_ok, issue = check_response_quality(_user_message, clean, tools_used)
+                if not is_ok and iteration < 3:
+                    # Retry once with a nudge to actually attempt the task
+                    logger.warning("Quality gate failed (iter {}): {}", iteration, issue)
+                    messages = self.context.add_assistant_message(messages, clean)
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"[System: Your response was inadequate — {issue} "
+                            "Please try again using available tools to actually complete the task.]"
+                        ),
+                    })
+                    continue
+
                 messages = self.context.add_assistant_message(
                     messages, clean, reasoning_content=reasoning_content,
                 )
                 final_content = clean
                 break
 
-        if final_content is None and iteration >= self.max_iterations:
+        if final_content is None and iteration >= max_iters:
             final_content = (
-                f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
+                f"I reached the maximum number of tool call iterations ({max_iters}) "
                 "without completing the task."
             )
 
@@ -868,8 +918,8 @@ class AgentLoop:
     def _is_conversational(self, text: str) -> bool:
         """Check if message is conversational (not a task worth spawning)."""
         stripped = text.strip()
-        # Short messages matching common conversational patterns
-        if len(stripped) < 15 and self._CONVERSATIONAL_SKIP_PATTERNS.match(stripped):
+        # Messages starting with conversational words — skip LLM classifier
+        if self._CONVERSATIONAL_SKIP_PATTERNS.match(stripped):
             return True
         # Single/two word acknowledgments
         normalized = stripped.lower().rstrip(".!?,")
@@ -1194,7 +1244,7 @@ class AgentLoop:
         """Schedule a coroutine as a tracked background task (drained on shutdown)."""
         task = asyncio.create_task(coro)
         self._background_tasks.append(task)
-        task.add_done_callback(self._background_tasks.remove)
+        task.add_done_callback(lambda t: t in self._background_tasks and self._background_tasks.remove(t))
 
     def stop(self) -> None:
         """Stop the agent loop."""
@@ -1346,10 +1396,8 @@ class AgentLoop:
 
         # [#9] Auto-model downgrade when budget is high
         from nanobot.hooks.builtin.code_features import get_downgrade_model
-        _original_model = self.model
         downgrade = get_downgrade_model(self.model, self.workspace)
-        if downgrade:
-            self.model = downgrade
+        _effective_model = downgrade if downgrade else self.model
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
         if message_tool := self.tools.get("message"):
@@ -1378,7 +1426,6 @@ class AgentLoop:
 
         # [#11] Message dedup — skip if same message sent within 30s
         if _get_feat(_ws, "messageDedup", True) and is_duplicate(key, msg.content):
-            self.model = _original_model
             return None  # Silently drop duplicate
 
         # Helper: send a pre-LLM answer with TTS support for voice channels
@@ -1387,7 +1434,6 @@ class AgentLoop:
             session.add_message("assistant", answer)
             self.sessions.save(session)
             logger.info("{} answer (zero tokens): {}", label, answer[:60])
-            self.model = _original_model
             if _is_voice:
                 # Voice: send TTS sentence + display text, return None to skip the duplicate voice path
                 from nanobot.channels.web_voice import _strip_markdown
@@ -1423,10 +1469,81 @@ class AgentLoop:
             if code_answer:
                 return await _send_quick_answer(code_answer, "Code answer")
 
+        # [Auto-delegate] Use LLM intent classifier (fast model) with regex fallback
+        from nanobot.hooks.builtin.claude_capabilities import classify_intent_llm, classify_step, is_multi_step, decompose_task, is_standalone_heavy
+        _auto_delegated = False
+        _routing = self.routing_model or _effective_model
+
+        # Skip LLM intent classification for voice (latency-critical), short, or conversational messages
+        # Voice mode uses regex-only classification for speed
+        _skip_llm_intent = _is_voice or len(msg.content.strip()) <= 15 or self._is_conversational(msg.content)
+        if not _skip_llm_intent:
+            try:
+                _intent = await classify_intent_llm(msg.content, self.provider, _routing)
+            except Exception:
+                # Regex fallback
+                _intent = {"category": "QUICK", "delegate": False, "steps": []}
+                if is_multi_step(msg.content):
+                    _steps = decompose_task(msg.content)
+                    if _steps:
+                        _intent = {"category": "MULTI", "delegate": True, "steps": _steps}
+                elif is_standalone_heavy(msg.content):
+                    _intent = {"category": "RESEARCH", "delegate": True, "steps": []}
+        else:
+            # Regex-only fallback (voice mode, short messages, conversational)
+            _intent = {"category": "QUICK", "delegate": False, "steps": []}
+            if is_multi_step(msg.content):
+                _steps = decompose_task(msg.content)
+                if _steps:
+                    _intent = {"category": "MULTI", "delegate": True, "steps": _steps}
+            elif is_standalone_heavy(msg.content):
+                _intent = {"category": "RESEARCH", "delegate": True, "steps": []}
+
+            # Case 1: MULTI — split into heavy (delegate) + light (inline)
+            if _intent["category"] == "MULTI" and len(_intent["steps"]) >= 2:
+                _heavy = [(s, classify_step(s)) for s in _intent["steps"]]
+                _delegate = [s for s, c in _heavy if c == "heavy"]
+                _inline = [s for s, c in _heavy if c == "light"]
+                if _delegate and _inline:
+                    for _ds in _delegate:
+                        await self.subagents.spawn(
+                            task=_ds, label=_ds[:30],
+                            origin_channel=msg.channel, origin_chat_id=msg.chat_id,
+                            session_key=key,
+                        )
+                        logger.info("Auto-delegated heavy task to subagent: {}", _ds[:60])
+                    msg = InboundMessage(
+                        channel=msg.channel, chat_id=msg.chat_id,
+                        content=" and ".join(_inline),
+                        sender_id=msg.sender_id, metadata=msg.metadata, media=msg.media,
+                    )
+                    logger.info("Rewrote message to light tasks: {}", msg.content[:60])
+                    _auto_delegated = True
+
+            # Case 2: RESEARCH/GENERATE — auto-spawn single subagent
+            elif _intent["delegate"] and not _auto_delegated:
+                await self.subagents.spawn(
+                    task=msg.content, label=msg.content[:30],
+                    origin_channel=msg.channel, origin_chat_id=msg.chat_id,
+                    session_key=key,
+                )
+                logger.info("Auto-delegated {} task to subagent: {}", _intent["category"], msg.content[:60])
+                return await _send_quick_answer(
+                    f"On it — I'm working on that in the background. I'll send you the results when done. "
+                    f"You can check progress in the Agents panel.",
+                    "Auto-delegate",
+                )
+
         # [#2] Priority detection — log urgency level
         priority = detect_priority(msg.content)
         if priority == "high":
             logger.info("HIGH PRIORITY message from {}: {}", key, msg.content[:60])
+
+        # Jarvis priority inbox scoring
+        _jarvis_priority = None
+        if _get_feat(_ws, "priorityInbox", True):
+            from nanobot.hooks.builtin.jarvis import score_message_priority
+            _jarvis_priority, _ = score_message_priority(msg.content)
 
         # [#10] Frustration detection — adjust response tone
         if _get_feat(_ws, "frustrationDetection", True):
@@ -1465,20 +1582,26 @@ class AgentLoop:
         if _frustration_preamble:
             enriched_content = f"{enriched_content}\n\n[User seems frustrated. Start your response with: {_frustration_preamble}]"
 
+        # Jarvis priority inbox — flag high priority messages
+        if _jarvis_priority == "high":
+            enriched_content = f"{enriched_content}\n\n[PRIORITY: This message was scored HIGH priority by the priority inbox system.]"
+
         # Multi-language detection — respond in user's language (text only, not voice)
-        from nanobot.hooks.builtin.maintenance import detect_language
-        user_lang = detect_language(msg.content)
-        if user_lang != "english":
-            if _is_voice:
-                # Voice mode: TTS only supports English — respond in English but acknowledge their language
-                enriched_content = f"{enriched_content}\n\n[User is writing in {user_lang}. You understand it, but respond in English because voice TTS only supports English.]"
-            else:
-                enriched_content = f"{enriched_content}\n\n[User is writing in {user_lang}. Respond in {user_lang}.]"
+        if _get_feat(_ws, "languageDetection", True):
+            from nanobot.hooks.builtin.maintenance import detect_language
+            user_lang = detect_language(msg.content)
+            if user_lang != "english":
+                if _is_voice:
+                    # Voice mode: TTS only supports English — respond in English but acknowledge their language
+                    enriched_content = f"{enriched_content}\n\n[User is writing in {user_lang}. You understand it, but respond in English because voice TTS only supports English.]"
+                else:
+                    enriched_content = f"{enriched_content}\n\n[User is writing in {user_lang}. Respond in {user_lang}.]"
 
         # Destructive action warning
-        from nanobot.hooks.builtin.maintenance import is_destructive_message
-        if is_destructive_message(msg.content):
-            enriched_content = f"{enriched_content}\n\n[WARNING: User requested a destructive action. Ask for confirmation BEFORE executing. Do NOT proceed without explicit 'yes'.]"
+        if _get_feat(_ws, "destructiveConfirmation", True):
+            from nanobot.hooks.builtin.maintenance import is_destructive_message
+            if is_destructive_message(msg.content):
+                enriched_content = f"{enriched_content}\n\n[WARNING: User requested a destructive action. Ask for confirmation BEFORE executing. Do NOT proceed without explicit 'yes'.]"
 
         # [#14] Retry context — inject previous failure info
         retry_ctx = get_retry_context(key)
@@ -1519,6 +1642,10 @@ class AgentLoop:
                 lines.append(f"- id={t['id']} label=\"{t['label']}\" task=\"{t['task'][:80]}\"")
             enriched_content = f"{enriched_content}\n\n" + "\n".join(lines)
 
+        # [Opt 3] History compression — compress old turns to save tokens
+        from nanobot.hooks.builtin.pipeline_optimizer import compress_history
+        history = compress_history(history)
+
         initial_messages = self.context.build_messages(
             history=history,
             current_message=enriched_content,
@@ -1526,13 +1653,9 @@ class AgentLoop:
             channel=msg.channel, chat_id=msg.chat_id,
         )
 
-        # [Opt 3] History compression — compress old turns to save tokens
-        from nanobot.hooks.builtin.pipeline_optimizer import compress_history
-        history = compress_history(history)
-
         # [Opt 1] Intent-based tool filtering — only send relevant tool defs
         from nanobot.hooks.builtin.pipeline_optimizer import filter_tools_by_intent
-        self._filtered_tools = filter_tools_by_intent(msg.content, self.tools.tool_names)
+        _filtered_tools = filter_tools_by_intent(msg.content, self.tools.tool_names)
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             meta = dict(msg.metadata or {})
@@ -1567,20 +1690,19 @@ class AgentLoop:
                     ))
 
             # Voice mode: cap iterations at 10 (vs 40 for text) to prevent long hangs
-            _saved_max = self.max_iterations
-            if _is_voice:
-                self.max_iterations = min(self.max_iterations, 10)
+            _max_iters = min(self.max_iterations, 10) if _is_voice else self.max_iterations
 
             final_content, _, all_msgs, turn_usage = await self._run_agent_loop_streaming(
                 initial_messages, on_sentence=_on_sentence,
                 on_progress=on_progress or _bus_progress,
+                effective_model=_effective_model, max_iters=_max_iters,
+                filtered_tool_names=_filtered_tools,
             )
-
-            if _is_voice:
-                self.max_iterations = _saved_max
         else:
             final_content, _, all_msgs, turn_usage = await self._run_agent_loop(
                 initial_messages, on_progress=on_progress or _bus_progress,
+                effective_model=_effective_model, max_iters=self.max_iterations,
+                filtered_tool_names=_filtered_tools,
             )
 
         if final_content is None:
@@ -1597,6 +1719,14 @@ class AgentLoop:
         if detect_loop(key, final_content):
             # Inject loop breaker for next turn
             session.add_message("user", get_loop_breaker())
+
+        # [Capability tips] Detect relevant feature tips based on user message
+        _tips = []
+        try:
+            from nanobot.hooks.builtin.capability_tips import detect_tips
+            _tips = detect_tips(self.workspace, msg.content, trigger_type="message")
+        except Exception:
+            pass
 
         # [#1] Cache the response for future identical questions
         cache_response(msg.content, final_content)
@@ -1619,10 +1749,20 @@ class AgentLoop:
         self.sessions.save(session)
         self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
 
+        # Auto-record relationship interactions
+        if _get_feat(_ws, "relationshipTracker", True):
+            try:
+                from nanobot.hooks.builtin.jarvis import record_interaction, extract_people_from_text
+                people = extract_people_from_text(msg.content, _ws)
+                for person in people[:3]:
+                    record_interaction(_ws, person, "message")
+            except Exception:
+                pass
+
         # Broadcast token usage as activity entry
         if turn_usage and turn_usage.get("total_tokens", 0) > 0:
             from nanobot.hooks.builtin.usage_tracker import record_usage, estimate_cost
-            cost = estimate_cost(turn_usage, self.model)
+            cost = estimate_cost(turn_usage, _effective_model)
             cost_str = f" · ${cost:.4f}" if cost > 0 else ""
             await self.bus.publish_outbound(OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id,
@@ -1630,7 +1770,7 @@ class AgentLoop:
                 metadata={"_token_usage": True, "_usage_data": {**turn_usage, "cost": cost}},
             ))
             # Persist to daily usage file
-            self._schedule_background(record_usage(self.workspace, turn_usage, msg.channel, self.model))
+            self._schedule_background(record_usage(self.workspace, turn_usage, msg.channel, _effective_model))
 
         # Emit turn_completed for lifecycle tracking
         _turn_elapsed = (__import__("time").monotonic() - _turn_t0) * 1000
@@ -1640,9 +1780,6 @@ class AgentLoop:
             tools_used=[], iterations=0, duration_ms=_turn_elapsed,
             channel=msg.channel, chat_id=msg.chat_id,
         ))
-
-        # [#9] Restore original model after downgraded turn
-        self.model = _original_model
 
         # [#2] Update intent tracker with this turn's content
         intent_tracker.update(msg.content, final_content)
@@ -1656,20 +1793,27 @@ class AgentLoop:
         # Voice channel: send final text for display.
         # TTS is already handled by the streaming _on_sentence path.
         # We just need to send response_text so the frontend has the final complete text.
+        # Attach capability tips to the response metadata
+        _resp_meta: dict[str, Any] = {}
+        if _tips:
+            _resp_meta["_tips"] = _tips
+
         if _is_voice_channel:
             preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
             logger.info("Voice response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+            _voice_meta = {"_voice_final": True, **_resp_meta}
             await self.bus.publish_outbound(OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content=final_content,
-                metadata={"_voice_final": True},  # Flag so outbound handler skips TTS
+                metadata=_voice_meta,
             ))
             return None
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+        _out_meta = {**(msg.metadata or {}), **_resp_meta}
         return OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=final_content,
-            metadata=msg.metadata or {},
+            metadata=_out_meta,
         )
 
     def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
@@ -1683,11 +1827,32 @@ class AgentLoop:
             if role == "tool" and isinstance(content, str) and len(content) > self._TOOL_RESULT_MAX_CHARS:
                 entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
             elif role == "user":
-                if isinstance(content, str) and content.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
-                    # Strip the runtime-context prefix, keep only the user text.
-                    parts = content.split("\n\n", 1)
-                    if len(parts) > 1 and parts[1].strip():
-                        entry["content"] = parts[1]
+                if isinstance(content, str) and ContextBuilder._RUNTIME_CONTEXT_TAG in content:
+                    # Strip all runtime-context metadata, keep only the user text.
+                    # Format: tag + metadata blocks + "\n\n" + user_content
+                    tag_pos = content.index(ContextBuilder._RUNTIME_CONTEXT_TAG)
+                    after_tag = content[tag_pos + len(ContextBuilder._RUNTIME_CONTEXT_TAG):]
+                    paragraphs = after_tag.split("\n\n")
+                    user_parts = []
+                    found_user_text = False
+                    for p in paragraphs:
+                        stripped = p.strip()
+                        if not stripped:
+                            continue
+                        if not found_user_text:
+                            # Skip metadata blocks (time, channel, recap, capabilities, task plan, paste hints)
+                            if (stripped.startswith("[") or stripped.startswith("Current Time:")
+                                    or stripped.startswith("Channel:") or stripped.startswith("Chat ID:")
+                                    or stripped.startswith("- ")):
+                                continue
+                            found_user_text = True
+                        user_parts.append(p)
+                    user_text = "\n\n".join(user_parts).strip()
+                    prefix = content[:tag_pos].strip()
+                    if prefix and user_text:
+                        entry["content"] = prefix + "\n\n" + user_text
+                    elif user_text:
+                        entry["content"] = user_text
                     else:
                         continue
                 if isinstance(content, list):

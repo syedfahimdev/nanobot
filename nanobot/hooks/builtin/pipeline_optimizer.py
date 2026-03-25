@@ -34,6 +34,7 @@ _INTENT_TOOL_MAP: dict[str, list[str]] = {
 
     # Web
     "search": ["web_search", "web_fetch"],
+    "weather": ["web_search"],
     "browse": ["browser", "web_fetch"],
     "website": ["browser", "web_fetch"],
     "open": ["browser", "web_fetch"],
@@ -132,11 +133,8 @@ def filter_tools_by_intent(message: str, all_tool_names: list[str]) -> list[str]
                     matched_tools.add(tool)
 
     if not intent_found:
-        # No clear intent — send core tools + search_tools for discovery
-        # Don't send all 30+ tools — the LLM can search_tools() on demand
-        matched_tools.add("search_tools")
-        matched_tools.add("spawn")
-        matched_tools.add("web_fetch")
+        # No clear intent — send all tools (safety fallback)
+        return all_tool_names
 
     # Filter to only tools that exist in the registry
     filtered = [t for t in all_tool_names if t in matched_tools]
@@ -153,13 +151,19 @@ def filter_tools_by_intent(message: str, all_tool_names: list[str]) -> list[str]
 
 
 def _get_mcp_keywords(tool_name: str) -> list[str]:
-    """Extract search keywords from MCP tool names."""
+    """Extract search keywords from MCP tool names.
+
+    Strips plurals so 'emails' matches 'email' in the user message.
+    """
     keywords = []
     # mcp_composio_GMAIL_FETCH_EMAILS → ["gmail", "email", "fetch"]
     parts = tool_name.lower().replace("mcp_", "").split("_")
     for p in parts:
         if len(p) > 2 and p not in ("composio", "playwright", "browseruse"):
             keywords.append(p)
+            # Add singular form so "emails" matches "email" in user message
+            if p.endswith("s") and len(p) > 4:
+                keywords.append(p[:-1])
     return keywords
 
 
@@ -213,7 +217,7 @@ def _is_count_question(text: str) -> bool:
 
 
 def _is_list_request(text: str) -> bool:
-    return bool(re.search(r"\b(list|show me|what are|give me all|enumerate)\b", text))
+    return bool(re.search(r"\b(list|show me all|show me my|show me the list|what are|give me all|enumerate)\b", text))
 
 
 def _is_comparison(text: str) -> bool:

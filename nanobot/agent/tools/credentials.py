@@ -22,7 +22,7 @@ from typing import Any
 from loguru import logger
 
 from nanobot.agent.tools.base import Tool
-from nanobot.setup.vault import load_vault, save_to_vault
+from nanobot.setup.vault import load_vault, replace_vault, save_to_vault
 
 
 class CredentialsTool(Tool):
@@ -147,7 +147,7 @@ class CredentialsTool(Tool):
 
         del vault[key]
         vault.pop(f"cred.{name}.username", None)
-        save_to_vault(vault)
+        replace_vault(vault)
         return f"Credential '{name}' deleted from vault."
 
 

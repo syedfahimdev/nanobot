@@ -49,8 +49,13 @@ def cache_key(message: str) -> str:
     return hashlib.md5(normalized.encode()).hexdigest()
 
 
+_TIME_SENSITIVE_WORDS = re.compile(r"\b(today|now|current|latest|tonight|yesterday|tomorrow)\b", re.I)
+
+
 def get_cached_response(message: str) -> str | None:
     """Get cached response for identical question. Returns None if miss."""
+    if _TIME_SENSITIVE_WORDS.search(message):
+        return None
     key = cache_key(message)
     if key in _response_cache:
         response, ts = _response_cache[key]
@@ -87,7 +92,6 @@ _URGENT_PATTERNS = [
     (re.compile(r"\b(urgent|emergency|asap|immediately|critical|broken|down|crashed)\b", re.I), "high"),
     (re.compile(r"\b(important|priority|deadline|soon|quickly|hurry)\b", re.I), "medium"),
     (re.compile(r"!!+"), "high"),  # Multiple exclamation marks
-    (re.compile(r"\bALL CAPS\b"), "medium"),  # Check for caps in original
 ]
 
 
@@ -112,7 +116,7 @@ def detect_priority(text: str) -> str:
 
 _ENTITY_PATTERNS = {
     "email": re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"),
-    "phone": re.compile(r"(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}"),
+    "phone": re.compile(r"(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}"),
     "money": re.compile(r"\$[\d,]+\.?\d{0,2}"),
     "date": re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{1,2},?\s*\d{4}\b", re.I),
     "time": re.compile(r"\b\d{1,2}:\d{2}\s*(?:am|pm|AM|PM)?\b"),

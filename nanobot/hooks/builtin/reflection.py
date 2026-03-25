@@ -211,8 +211,10 @@ Call save_learning with the rule. If this isn't actually a correction (just a no
         # Dedup: skip if a very similar rule exists
         rule_lower = rule.lower()
         for ex in existing:
+            # Strip metadata (timestamps, context) — compare just the rule text
+            ex_text = re.sub(r"\s*[_\[].*$", "", ex.lstrip("- ")).strip()
             # Simple overlap check — if 60%+ of words match, skip
-            ex_words = set(ex.lower().split())
+            ex_words = set(ex_text.lower().split())
             rule_words = set(rule_lower.split())
             if rule_words and len(rule_words & ex_words) / len(rule_words) > 0.6:
                 logger.debug("Reflection: skipping duplicate learning")

@@ -20,8 +20,8 @@ from loguru import logger
 # ── Unified settings file ───────────────────────────────────────────────────
 
 _SETTINGS_FILE = "mawa_settings.json"
-_cache: dict[str, Any] = {}
-_cache_mtime: float = 0.0
+_cache: dict[str, dict[str, Any]] = {}
+_cache_mtime: dict[str, float] = {}
 
 
 def _settings_path(workspace: Path) -> Path:
@@ -32,13 +32,14 @@ def load_settings(workspace: Path) -> dict[str, Any]:
     """Load all settings from the unified file. Cached by mtime."""
     global _cache, _cache_mtime
     path = _settings_path(workspace)
+    key = str(path)
     try:
         if path.exists():
             mtime = path.stat().st_mtime
-            if mtime != _cache_mtime:
-                _cache = json.loads(path.read_text())
-                _cache_mtime = mtime
-            return _cache
+            if mtime != _cache_mtime.get(key, 0.0):
+                _cache[key] = json.loads(path.read_text())
+                _cache_mtime[key] = mtime
+            return _cache.get(key, {})
     except Exception:
         pass
     return {}
@@ -56,8 +57,8 @@ def save_setting(workspace: Path, key: str, value: Any) -> None:
             pass
     data[key] = value
     path.write_text(json.dumps(data, indent=2))
-    _cache = data
-    _cache_mtime = path.stat().st_mtime
+    _cache[str(path)] = data
+    _cache_mtime[str(path)] = path.stat().st_mtime
 
 
 def save_settings_bulk(workspace: Path, updates: dict[str, Any]) -> None:
@@ -72,8 +73,8 @@ def save_settings_bulk(workspace: Path, updates: dict[str, Any]) -> None:
             pass
     data.update(updates)
     path.write_text(json.dumps(data, indent=2))
-    _cache = data
-    _cache_mtime = path.stat().st_mtime
+    _cache[str(path)] = data
+    _cache_mtime[str(path)] = path.stat().st_mtime
 
 
 def get_setting(workspace: Path, key: str, default: Any = None) -> Any:
@@ -224,6 +225,10 @@ _FEATURE_DEFS: list[dict[str, Any]] = [
     {"key": "voiceTtsLanguage", "label": "TTS Language (respond)", "desc": "What language Mawa speaks back. en=English, bn=Bengali, hi=Hindi. Independent from STT language.", "category": "media", "type": "string", "default": "en", "placeholder": "en, bn, hi, zh, ur, ar, es, fr"},
     {"key": "elevenlabsVoiceId", "label": "ElevenLabs Voice", "desc": "Voice ID for ElevenLabs TTS. Use premade or custom cloned voice.", "category": "media", "type": "string", "default": "EXAVITQu4vr4xnSDxMaL", "placeholder": "voice ID"},
     {"key": "elevenlabsModel", "label": "ElevenLabs Model", "desc": "Flash (~75ms, fast) or Multilingual v2 (29 langs, best quality).", "category": "media", "type": "string", "default": "eleven_flash_v2_5", "placeholder": "eleven_flash_v2_5, eleven_multilingual_v2, eleven_turbo_v2_5"},
+    {"key": "elevenlabsStability", "label": "Voice Stability", "desc": "0.0=very expressive/emotional, 0.5=balanced, 1.0=monotone/stable. Lower = more emotion.", "category": "media", "type": "number", "default": 0.3, "min": 0.0, "max": 1.0},
+    {"key": "elevenlabsSimilarity", "label": "Voice Similarity", "desc": "How closely to match the original voice. Higher = more accurate but less expressive.", "category": "media", "type": "number", "default": 0.7, "min": 0.0, "max": 1.0},
+    {"key": "elevenlabsStyle", "label": "Voice Style", "desc": "Style exaggeration. 0.0=neutral, 0.5=expressive, 1.0=very dramatic. Only works with v2 models.", "category": "media", "type": "number", "default": 0.4, "min": 0.0, "max": 1.0},
+    {"key": "elevenlabsSpeakerBoost", "label": "Speaker Boost", "desc": "Boost speaker clarity. Recommended for low-quality audio playback.", "category": "media", "type": "boolean", "default": True},
 
     # Phone calls
     {"key": "phoneCallEnabled", "label": "Phone Calls", "desc": "Allow Mawa to make outbound phone calls via Twilio.", "category": "media", "type": "boolean", "default": True},

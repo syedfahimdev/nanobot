@@ -68,10 +68,12 @@ def save_to_vault(secrets: dict[str, str]) -> bool:
     f = _get_fernet()
     if f is None:
         # Fallback: save as chmod 600 JSON (no encryption, but protected)
+        existing = load_vault()
+        existing.update(secrets)
         _VAULT_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _VAULT_FILE.write_text(json.dumps(secrets, indent=2))
+        _VAULT_FILE.write_text(json.dumps(existing, indent=2))
         _VAULT_FILE.chmod(0o600)
-        logger.info("Vault: saved {} secrets (unencrypted, chmod 600 — install cryptography for encryption)", len(secrets))
+        logger.info("Vault: saved {} secrets (unencrypted, chmod 600 — install cryptography for encryption)", len(existing))
         return True
 
     # Merge with existing

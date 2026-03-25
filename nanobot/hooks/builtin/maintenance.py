@@ -295,18 +295,19 @@ _QUIET_HOURS_DEFAULT = {"start": 22, "end": 7, "enabled": True}
 
 
 def load_quiet_hours(workspace: Path) -> dict:
-    path = workspace / "quiet_hours.json"
-    if path.exists():
-        try:
-            return {**_QUIET_HOURS_DEFAULT, **json.loads(path.read_text())}
-        except Exception:
-            pass
-    return dict(_QUIET_HOURS_DEFAULT)
+    from nanobot.hooks.builtin.feature_registry import get_setting
+    return {
+        "enabled": get_setting(workspace, "quietHoursEnabled", _QUIET_HOURS_DEFAULT["enabled"]),
+        "start": get_setting(workspace, "quietHoursStart", _QUIET_HOURS_DEFAULT["start"]),
+        "end": get_setting(workspace, "quietHoursEnd", _QUIET_HOURS_DEFAULT["end"]),
+    }
 
 
 def save_quiet_hours(workspace: Path, settings: dict) -> None:
-    path = workspace / "quiet_hours.json"
-    path.write_text(json.dumps(settings, indent=2))
+    from nanobot.hooks.builtin.feature_registry import save_setting
+    save_setting(workspace, "quietHoursEnabled", settings.get("enabled", _QUIET_HOURS_DEFAULT["enabled"]))
+    save_setting(workspace, "quietHoursStart", settings.get("start", _QUIET_HOURS_DEFAULT["start"]))
+    save_setting(workspace, "quietHoursEnd", settings.get("end", _QUIET_HOURS_DEFAULT["end"]))
 
 
 def is_quiet_time(workspace: Path) -> bool:
@@ -454,15 +455,20 @@ def detect_language(text: str) -> str:
 
 def run_maintenance(workspace: Path) -> dict:
     """Run all maintenance tasks. Called by heartbeat every 30 min."""
+    from nanobot.hooks.builtin.feature_registry import get_setting
+
     results = {}
 
     # Archive bloated history
-    results["history"] = archive_history(workspace)
+    if get_setting(workspace, "historyAutoArchive", True):
+        results["history"] = archive_history(workspace)
 
     # Clean old sessions
-    results["sessions"] = cleanup_old_sessions(workspace)
+    if get_setting(workspace, "sessionAutoCleanup", True):
+        results["sessions"] = cleanup_old_sessions(workspace)
 
     # Extract contacts from memory
-    results["contacts_extracted"] = extract_contacts_from_memory(workspace)
+    if get_setting(workspace, "contactAutoExtract", True):
+        results["contacts_extracted"] = extract_contacts_from_memory(workspace)
 
     return results

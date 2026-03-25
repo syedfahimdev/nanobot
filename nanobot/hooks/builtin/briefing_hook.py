@@ -30,6 +30,10 @@ def make_briefing_hook(
     engine = BriefingEngine(workspace, provider, model)
 
     async def on_turn_completed(event: TurnCompleted) -> None:
+        from nanobot.hooks.builtin.feature_registry import get_setting
+        if not get_setting(workspace, "morningPrep", True):
+            return
+
         result = await engine.maybe_generate()
         if result is None:
             return
