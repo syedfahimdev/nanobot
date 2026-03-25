@@ -339,16 +339,27 @@ def get_time_greeting(name: str = "") -> str:
         return f"Hey{name_part}, you're up late"
 
 
+_GREETING_QUESTIONS = re.compile(
+    r"^(hey[,.]?\s*what'?s\s*up|what'?s\s*up|sup|how'?s\s*it\s*going|how\s*are\s*you"
+    r"|what'?s\s*good|how\s*you\s*doing|what'?s\s*happening|yo\s*what'?s\s*up"
+    r"|how\s*do\s*you\s*do|how'?s\s*everything|what'?s\s*new)\s*[?.!]*$",
+    re.I,
+)
+
+
 def is_greeting(text: str) -> bool:
     """Detect if the message is ONLY a greeting — not a greeting followed by a question.
 
-    'Hey' → True, 'Hey Mawa' → True, 'Hey, what's the bitcoin price?' → False
+    'Hey' → True, 'Hey Mawa' → True, 'Hey, what's up?' → True
+    'Hey, what's the bitcoin price?' → False
     """
     stripped = text.strip()
-    # If it has a question mark, it's a question not just a greeting
+    # Greeting phrases that look like questions but are just greetings
+    if _GREETING_QUESTIONS.match(stripped):
+        return True
+    # Real questions — not greetings
     if "?" in stripped:
         return False
-    # If it's longer than 5 words, it probably has a real request after the greeting
     if len(stripped.split()) > 5:
         return False
     return bool(re.match(r"^(hi|hello|hey|yo|sup|good morning|good evening|good afternoon|howdy|greetings)\b", stripped, re.I))
@@ -377,9 +388,18 @@ def get_greeting_response(text: str, workspace: Path) -> str | None:
         if pending > 0:
             extras.append(f"You have {pending} pending goal{'s' if pending > 1 else ''}")
 
+    import random
+    _casual = [
+        "What's on your mind?",
+        "What can I do for you?",
+        "What's going on?",
+        "Need anything?",
+        "How can I help?",
+    ]
+    closer = random.choice(_casual)
     if extras:
-        return f"{greeting}! {'. '.join(extras)}. How can I help?"
-    return f"{greeting}! How can I help?"
+        return f"{greeting}! {'. '.join(extras)}. {closer}"
+    return f"{greeting}! {closer}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
