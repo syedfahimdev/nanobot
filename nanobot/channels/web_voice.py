@@ -654,10 +654,9 @@ class WebVoiceChannel(BaseChannel):
                 if not ws or ws.closed:
                     break
 
+                # Keep echo suppression on during entire TTS sequence
+                self._tts_playing.add(session_id)
                 try:
-                    # Suppress echo ONLY during generation + short cooldown
-                    self._tts_playing.add(session_id)
-
                     if _provider == "elevenlabs":
                         await self._stream_elevenlabs_to_client(text, session_id, ws)
                     elif _provider == "deepgram" and _use_streaming:
@@ -671,17 +670,15 @@ class WebVoiceChannel(BaseChannel):
                                 "sample_rate": 24000,
                             })
                             logger.debug("TTS sent {}KB WAV for '{}'", len(audio) // 1024, text[:30])
-
-                    # Brief cooldown then clear echo suppression
-                    await asyncio.sleep(self._ECHO_COOLDOWN_SECS)
                 except Exception as e:
                     logger.error("TTS generation/send failed for '{}': {}", text[:30], e)
-                finally:
-                    self._tts_playing.discard(session_id)
         finally:
             # ALWAYS clear playing flag — even on crash, timeout, or exception
             self._tts_playing.discard(session_id)
-            logger.debug("TTS worker done for {} — echo suppression cleared", session_id)
+            # Echo cooldown AFTER all sentences are spoken — not between each one
+            await asyncio.sleep(self._ECHO_COOLDOWN_SECS)
+            self._tts_playing.discard(session_id)
+            logger.debug("TTS worker done for {} — echo suppression cleared after {}s cooldown", session_id, self._ECHO_COOLDOWN_SECS)
             # Clean up Deepgram streaming connection
             stream = self._dg_tts_stream.pop(session_id, None)
             if stream:
