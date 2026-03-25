@@ -347,7 +347,7 @@ async def _tts_deepgram(text: str, api_key: str | None, model: str) -> bytes | N
             resp = await client.post(
                 "https://api.deepgram.com/v1/speak",
                 headers={"Authorization": f"Token {api_key}", "Content-Type": "application/json"},
-                params={"model": model, "encoding": "linear16", "sample_rate": "24000", "container": "none"},
+                params={"model": model, "encoding": "linear16", "sample_rate": "24000", "container": "wav"},
                 json={"text": text},
             )
             resp.raise_for_status()

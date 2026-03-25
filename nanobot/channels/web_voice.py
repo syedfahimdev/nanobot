@@ -645,6 +645,9 @@ class WebVoiceChannel(BaseChannel):
                 text = await asyncio.wait_for(q.get(), timeout=30.0)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 break
+            # Format text for natural TTS output (all providers)
+            if _provider == "deepgram":
+                text = format_text_for_aura2(text)
             logger.debug("TTS worker generating for '{}' ({})", text[:40], session_id)
             ws = self._clients.get(session_id)
             if not ws or ws.closed:
@@ -775,6 +778,7 @@ class WebVoiceChannel(BaseChannel):
 
         buf = self._dg_audio_buf.setdefault(session_id, bytearray())
         buf.extend(pcm_data)
+        logger.debug("DG audio chunk: {} bytes, buf={} bytes for {}", len(pcm_data), len(buf), session_id)
 
         if len(buf) >= self._DG_AUDIO_BUF_SIZE:
             await self._flush_dg_audio(session_id)
@@ -786,6 +790,7 @@ class WebVoiceChannel(BaseChannel):
         buf = self._dg_audio_buf.get(session_id)
         if not buf:
             return
+        logger.debug("DG flush: sending {} bytes PCM for {}", len(buf), session_id)
         pcm = bytes(buf)
         buf.clear()
 
@@ -3202,13 +3207,13 @@ copy();
         Interrupt patterns ('no', 'stop', 'wait') still cancel via /stop.
         media: list of base64 data URIs (images) or file paths.
         """
-        # Echo suppression: drop STT transcripts that arrived while TTS is playing.
-        # The mic picks up Mawa's own voice from the speaker and Deepgram transcribes it.
-        if session_id in self._tts_playing:
+        is_interrupt = bool(_INTERRUPT_PATTERNS.search(text.strip()))
+
+        # Echo suppression: drop STT transcripts while TTS is playing.
+        # Allow interrupt patterns ("stop", "wait", "no") through to cancel speech.
+        if session_id in self._tts_playing and not is_interrupt:
             logger.debug("Echo suppression: dropping '{}' (TTS playing for {})", text[:40], session_id)
             return
-
-        is_interrupt = bool(_INTERRUPT_PATTERNS.search(text.strip()))
 
         if is_interrupt:
             asyncio.create_task(self._send_stop(session_id))
