@@ -1006,46 +1006,70 @@ def get_life_dashboard(workspace: Path) -> dict:
 _LAST_NOTIFIED: dict[str, datetime] = {}
 
 
+def _load_notified(workspace: Path) -> set[str]:
+    """Load persisted notification keys — survives restarts."""
+    f = workspace / "notified_keys.json"
+    try:
+        return set(json.loads(f.read_text())) if f.exists() else set()
+    except Exception:
+        return set()
+
+
+def _save_notified(workspace: Path, key: str) -> None:
+    """Persist a notification key so it's never sent again."""
+    keys = _load_notified(workspace)
+    keys.add(key)
+    # Keep only last 200 keys to prevent unbounded growth
+    if len(keys) > 200:
+        keys = set(list(keys)[-200:])
+    try:
+        (workspace / "notified_keys.json").write_text(json.dumps(list(keys)))
+    except Exception:
+        pass
+
+
 def check_proactive_jarvis(workspace: Path) -> list[dict]:
     """Run all Jarvis proactive checks. Called by heartbeat.
 
     Returns list of notifications to send.
+    All notifications are one-time — persisted to notified_keys.json so they
+    survive restarts and never fire twice for the same event.
     """
     from nanobot.hooks.builtin.feature_registry import get_setting
 
     notifications = []
+    _notified = _load_notified(workspace)
+    today = datetime.now().strftime("%Y-%m-%d")
 
-    # Cross-signal correlations
+    def _once(key: str, content: str, priority: str = "normal", **meta) -> None:
+        """Add notification only if this key hasn't been notified before."""
+        if key in _notified:
+            return
+        _save_notified(workspace, key)
+        _notified.add(key)
+        notifications.append({"content": content, "priority": priority, "metadata": meta})
+
+    # Cross-signal correlations (once per correlation per day)
     if get_setting(workspace, "crossSignalCorrelation", True):
-        correlations = detect_correlations(workspace)
-        for c in correlations:
-            notifications.append({"content": f"⚠️ {c}", "priority": "high"})
+        for c in detect_correlations(workspace):
+            _once(f"corr_{c[:30]}_{today}", f"⚠️ {c}", "high")
 
-    # Relationship reminders (once per day)
+    # Relationship reminders (once per person per day)
     if get_setting(workspace, "relationshipTracker", True):
-        reminders = get_relationship_reminders(workspace)
-        for r in reminders[:2]:
-            notifications.append({"content": f"👥 {r}", "priority": "normal"})
+        for r in get_relationship_reminders(workspace)[:2]:
+            _once(f"rel_{r[:30]}_{today}", f"👥 {r}")
 
-    # Delegation check-ins
+    # Delegation check-ins (once per delegation per day)
     if get_setting(workspace, "delegationQueue", True):
-        due_delegations = get_delegations_due_for_check(workspace)
-        for d in due_delegations:
-            notifications.append({
-                "content": f"📋 Delegation check: {d['task'][:60]}",
-                "priority": "normal",
-            })
+        for d in get_delegations_due_for_check(workspace):
+            _once(f"deleg_{d['task'][:30]}_{today}", f"📋 Delegation check: {d['task'][:60]}")
 
-    # Routine suggestions
+    # Routine suggestions (once per routine)
     if get_setting(workspace, "routineDetection", True):
-        routines = detect_routines(workspace)
-        for r in routines[:1]:
-            notifications.append({
-                "content": f"🔄 {r.get('suggestion', '')}",
-                "priority": "low",
-            })
+        for r in detect_routines(workspace)[:1]:
+            _once(f"routine_{r.get('suggestion','')[:30]}", f"🔄 {r.get('suggestion', '')}", "low")
 
-    # Meeting intelligence — alert for events starting in the next 15 min
+    # Meeting intelligence — alert for events starting in the next 15 min (one-time per event)
     if get_setting(workspace, "meetingIntelligence", True):
         upcoming = get_upcoming_meetings_from_memory(workspace)
         now = datetime.now()
@@ -1053,55 +1077,42 @@ def check_proactive_jarvis(workspace: Path) -> list[dict]:
             try:
                 event_date = event.get("date", "")
                 event_time = event.get("time", "")
-                if event_date and event_time:
-                    # Parse event datetime
-                    dt_str = f"{event_date} {event_time}"
-                    for fmt in ["%Y-%m-%d %I:%M %p", "%Y-%m-%d %I:%M%p", "%Y-%m-%d %H:%M"]:
-                        try:
-                            event_dt = datetime.strptime(dt_str.strip(), fmt)
-                            break
-                        except ValueError:
-                            continue
-                    else:
+                if not (event_date and event_time):
+                    continue
+                dt_str = f"{event_date} {event_time}"
+                event_dt = None
+                for fmt in ["%Y-%m-%d %I:%M %p", "%Y-%m-%d %I:%M%p", "%Y-%m-%d %H:%M"]:
+                    try:
+                        event_dt = datetime.strptime(dt_str.strip(), fmt)
+                        break
+                    except ValueError:
                         continue
-                    # Check if within 15 minutes
-                    delta = (event_dt - now).total_seconds()
-                    if 0 < delta <= 900:  # 0-15 minutes from now
-                        meeting_key = f"meeting_{event_date}_{event_time}"
-                        if meeting_key not in _LAST_NOTIFIED:
-                            _LAST_NOTIFIED[meeting_key] = now
-                            title = event.get("title", "Meeting")[:60]
-                            mins = int(delta / 60)
-                            notifications.append({
-                                "content": f"📅 Meeting in {mins} min: {title}",
-                                "priority": "high",
-                                "metadata": {"_notification": True, "_proactive": True, "_priority": "high"},
-                            })
+                if not event_dt:
+                    continue
+                delta = (event_dt - now).total_seconds()
+                if 0 < delta <= 900:
+                    title = event.get("title", "Meeting")[:60]
+                    mins = int(delta / 60)
+                    _once(f"meeting_{event_date}_{event_time}", f"📅 Meeting in {mins} min: {title}", "high",
+                          _notification=True, _proactive=True, _priority="high")
             except Exception:
                 continue
 
-    # Daily digest — send once per day after 8pm
+    # Daily digest — once per day after 8pm
     if get_setting(workspace, "dailyDigest", True):
-        now = datetime.now()
-        if now.hour >= 20:
-            digest_key = f"digest_{now.strftime('%Y-%m-%d')}"
-            if digest_key not in _LAST_NOTIFIED:
-                digest = build_daily_digest(workspace)
-                if digest:
-                    formatted = format_digest(digest)
-                    if formatted:
-                        _LAST_NOTIFIED[digest_key] = now
-                        notifications.append({"content": formatted, "metadata": {"_notification": True, "_proactive": True}})
+        if datetime.now().hour >= 20:
+            digest = build_daily_digest(workspace)
+            if digest:
+                formatted = format_digest(digest)
+                if formatted:
+                    _once(f"digest_{today}", formatted, _notification=True, _proactive=True)
 
-    # Financial spending spike alerts
+    # Financial spending spike alerts (once per alert per day)
     if get_setting(workspace, "financialPulse", True):
-        now = datetime.now()
         pulse = get_financial_pulse(workspace)
         if pulse.get("alerts"):
             for alert in pulse["alerts"][:2]:
-                alert_key = f"fin_{alert[:30]}_{now.strftime('%Y-%m-%d')}"
-                if alert_key not in _LAST_NOTIFIED:
-                    _LAST_NOTIFIED[alert_key] = now
-                    notifications.append({"content": f"💰 {alert}", "metadata": {"_notification": True, "_proactive": True, "_priority": "medium"}})
+                _once(f"fin_{alert[:30]}_{today}", f"💰 {alert}", "medium",
+                      _notification=True, _proactive=True, _priority="medium")
 
     return notifications
