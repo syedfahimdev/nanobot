@@ -54,3 +54,31 @@ def register_builtin_hooks(
     from nanobot.hooks.builtin.tool_ui import make_tool_ui_hook
     hooks.on("tool_after", make_tool_ui_hook(bus))
 
+    # Calendar cache — when calendar tools return, cache events for proactive meeting alerts
+    async def _cache_calendar(event):
+        if "CALENDAR" not in (event.name or "").upper():
+            return
+        try:
+            import json as _json
+            result = event.result or ""
+            # Try to parse calendar events from the tool result
+            if "successfull" in result or "events" in result.lower():
+                data = _json.loads(result) if result.startswith("{") else {}
+                events = []
+                # Composio format: data.data.events or data.data.items
+                raw = data.get("data", {})
+                items = raw.get("events", raw.get("items", []))
+                if isinstance(items, list):
+                    for item in items:
+                        events.append({
+                            "title": item.get("summary", item.get("title", "")),
+                            "start": item.get("start", {}).get("dateTime", item.get("start", {}).get("date", "")),
+                            "end": item.get("end", {}).get("dateTime", ""),
+                        })
+                if events:
+                    from nanobot.hooks.builtin.jarvis import cache_calendar_events
+                    cache_calendar_events(workspace, events)
+        except Exception:
+            pass
+    hooks.on("tool_after", _cache_calendar)
+

@@ -190,25 +190,62 @@ def get_meeting_prep(workspace: Path, event_title: str = "", attendees: list[str
     return prep
 
 
-def get_upcoming_meetings_from_memory(workspace: Path) -> list[dict]:
-    """Extract upcoming events mentioned in SHORT_TERM or HISTORY.
+def cache_calendar_events(workspace: Path, events: list[dict]) -> None:
+    """Cache calendar events for proactive meeting notifications.
 
-    Scans for date+time patterns near event-like keywords.
+    Called by the agent loop after calendar tool calls return results.
+    Events format: [{"title": "...", "start": "2026-03-25T15:00:00", "end": "..."}]
+    """
+    cache_file = workspace / "calendar_cache.json"
+    try:
+        cache_file.write_text(json.dumps({"events": events, "fetched": datetime.now().isoformat()}, indent=2))
+    except Exception:
+        pass
+
+
+def get_upcoming_meetings_from_memory(workspace: Path) -> list[dict]:
+    """Get upcoming events from calendar cache + memory files.
+
+    1. Calendar cache (written by agent after Google Calendar API calls) — most reliable
+    2. Memory files (SHORT_TERM.md, HISTORY.md) — fallback for text-mentioned events
     """
     events = []
     today = date.today()
 
+    # Source 1: Calendar cache (from actual Google Calendar API calls)
+    cache_file = workspace / "calendar_cache.json"
+    if cache_file.exists():
+        try:
+            cache = json.loads(cache_file.read_text())
+            # Only use cache if fetched today
+            fetched = cache.get("fetched", "")
+            if fetched.startswith(today.isoformat()):
+                for ev in cache.get("events", []):
+                    start = ev.get("start", "")
+                    if not start:
+                        continue
+                    # Parse ISO datetime
+                    date_match = re.search(r"(\d{4}-\d{2}-\d{2})", start)
+                    time_match = re.search(r"T(\d{2}:\d{2})", start)
+                    if date_match and date_match.group(1) >= today.isoformat():
+                        events.append({
+                            "date": date_match.group(1),
+                            "time": time_match.group(1) if time_match else "",
+                            "title": ev.get("title", ev.get("summary", "Event"))[:100],
+                        })
+        except Exception:
+            pass
+
+    # Source 2: Memory files (text-mentioned events)
     for fname in ["SHORT_TERM.md", "HISTORY.md"]:
         f = workspace / "memory" / fname
         if not f.exists():
             continue
         content = f.read_text(encoding="utf-8")
 
-        # Look for calendar-like entries
         for line in content.split("\n"):
             line_lower = line.lower()
             if any(kw in line_lower for kw in ["meeting", "call", "appointment", "interview", "standup", "sync"]):
-                # Extract date
                 date_match = re.search(r"(\d{4}-\d{2}-\d{2})", line)
                 time_match = re.search(r"(\d{1,2}:\d{2}\s*(?:am|pm)?)", line, re.I)
                 if date_match:
@@ -1007,6 +1044,41 @@ def check_proactive_jarvis(workspace: Path) -> list[dict]:
                 "content": f"🔄 {r.get('suggestion', '')}",
                 "priority": "low",
             })
+
+    # Meeting intelligence — alert for events starting in the next 15 min
+    if get_setting(workspace, "meetingIntelligence", True):
+        upcoming = get_upcoming_meetings_from_memory(workspace)
+        now = datetime.now()
+        for event in upcoming:
+            try:
+                event_date = event.get("date", "")
+                event_time = event.get("time", "")
+                if event_date and event_time:
+                    # Parse event datetime
+                    dt_str = f"{event_date} {event_time}"
+                    for fmt in ["%Y-%m-%d %I:%M %p", "%Y-%m-%d %I:%M%p", "%Y-%m-%d %H:%M"]:
+                        try:
+                            event_dt = datetime.strptime(dt_str.strip(), fmt)
+                            break
+                        except ValueError:
+                            continue
+                    else:
+                        continue
+                    # Check if within 15 minutes
+                    delta = (event_dt - now).total_seconds()
+                    if 0 < delta <= 900:  # 0-15 minutes from now
+                        meeting_key = f"meeting_{event_date}_{event_time}"
+                        if meeting_key not in _LAST_NOTIFIED:
+                            _LAST_NOTIFIED[meeting_key] = now
+                            title = event.get("title", "Meeting")[:60]
+                            mins = int(delta / 60)
+                            notifications.append({
+                                "content": f"📅 Meeting in {mins} min: {title}",
+                                "priority": "high",
+                                "metadata": {"_notification": True, "_proactive": True, "_priority": "high"},
+                            })
+            except Exception:
+                continue
 
     # Daily digest — send once per day after 8pm
     if get_setting(workspace, "dailyDigest", True):
