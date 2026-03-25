@@ -658,22 +658,28 @@ class WebVoiceChannel(BaseChannel):
         _use_streaming = get_setting(_ws_path, "deepgramTtsStreaming", True)
 
         try:
+            _prefetch_task: asyncio.Task | None = None
+            _prefetch_text: str | None = None
+
             while True:
-                try:
-                    text = await asyncio.wait_for(q.get(), timeout=30.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError):
-                    break
-                # Format text for natural TTS output (all providers)
+                # Get current sentence (or use prefetched one)
+                if _prefetch_task and _prefetch_text:
+                    text = _prefetch_text
+                    _prefetch_text = None
+                else:
+                    try:
+                        text = await asyncio.wait_for(q.get(), timeout=30.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        break
+
                 if _provider == "deepgram":
                     text = format_text_for_aura2(text)
                 logger.debug("TTS worker generating for '{}' ({})", text[:40], session_id)
-                # Track what Mawa is saying for echo detection
                 self._recent_tts_text[session_id] = self._recent_tts_text.get(session_id, "") + " " + text
                 ws = self._clients.get(session_id)
                 if not ws or ws.closed:
                     break
 
-                # Keep echo suppression on during entire TTS sequence
                 self._tts_playing.add(session_id)
                 try:
                     if _provider == "elevenlabs":
@@ -681,6 +687,21 @@ class WebVoiceChannel(BaseChannel):
                     elif _provider == "deepgram" and _use_streaming:
                         await self._stream_deepgram_to_client(text, session_id, ws)
                     else:
+                        # Prefetch: start generating NEXT sentence while current one generates
+                        # Peek at queue for next sentence and start its TTS in parallel
+                        if not q.empty() and _prefetch_task is None:
+                            try:
+                                next_text = q.get_nowait()
+                                if _provider == "deepgram":
+                                    next_text = format_text_for_aura2(next_text)
+                                _prefetch_text = next_text
+                                _prefetch_task = asyncio.create_task(
+                                    self._generate_tts(next_text, session_id=session_id)
+                                )
+                            except Exception:
+                                pass
+
+                        # Generate current sentence
                         audio = await self._generate_tts(text, session_id=session_id)
                         if audio and not ws.closed:
                             await ws.send_json({
@@ -689,8 +710,24 @@ class WebVoiceChannel(BaseChannel):
                                 "sample_rate": 24000,
                             })
                             logger.debug("TTS sent {}KB WAV for '{}'", len(audio) // 1024, text[:30])
+
+                        # If prefetch is ready, use it for the next iteration
+                        if _prefetch_task and _prefetch_task.done():
+                            prefetched_audio = _prefetch_task.result()
+                            _prefetch_task = None
+                            if prefetched_audio and _prefetch_text and not ws.closed:
+                                self._recent_tts_text[session_id] = self._recent_tts_text.get(session_id, "") + " " + _prefetch_text
+                                await ws.send_json({
+                                    "type": "tts_audio",
+                                    "audio_b64": base64.b64encode(prefetched_audio).decode(),
+                                    "sample_rate": 24000,
+                                })
+                                logger.debug("TTS sent {}KB WAV (prefetched) for '{}'", len(prefetched_audio) // 1024, _prefetch_text[:30])
+                                _prefetch_text = None
                 except Exception as e:
                     logger.error("TTS generation/send failed for '{}': {}", text[:30], e)
+                    _prefetch_task = None
+                    _prefetch_text = None
         finally:
             # ALWAYS clear playing flag — even on crash, timeout, or exception
             self._tts_playing.discard(session_id)
