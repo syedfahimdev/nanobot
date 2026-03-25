@@ -612,7 +612,7 @@ class WebVoiceChannel(BaseChannel):
                             if cid in self._voice_active:
                                 self._enqueue_tts(cid, sentence)
 
-    _ECHO_COOLDOWN_SECS = 2.0  # Suppress STT for 2s after TTS audio is sent
+    _ECHO_COOLDOWN_SECS = 4.0  # Suppress STT for 4s after TTS audio plays (covers speaker playback + mic tail)
 
     def _enqueue_tts(self, session_id: str, text: str) -> None:
         """Add a sentence to the ordered TTS queue for this session."""
@@ -3194,6 +3194,12 @@ copy();
         Interrupt patterns ('no', 'stop', 'wait') still cancel via /stop.
         media: list of base64 data URIs (images) or file paths.
         """
+        # Drop STT noise — very short transcripts that are likely artifacts
+        _clean = text.strip().rstrip(".!?,")
+        if len(_clean.split()) < 2 and len(_clean) < 5 and _clean.lower() not in ("hi", "hey", "yo", "no", "stop", "yes"):
+            logger.debug("STT noise gate: dropping '{}' (too short)", text[:20])
+            return
+
         is_interrupt = bool(_INTERRUPT_PATTERNS.search(text.strip()))
 
         # Echo suppression: drop STT transcripts while TTS is playing.

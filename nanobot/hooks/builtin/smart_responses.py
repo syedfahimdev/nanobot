@@ -354,6 +354,12 @@ def is_greeting(text: str) -> bool:
     'Hey, what's the bitcoin price?' → False
     """
     stripped = text.strip()
+    # Strip leading STT artifacts (numbers, punctuation) — "518. Hey, WhatsApp." → "Hey, WhatsApp."
+    stripped = re.sub(r"^\d+[.,;:!?\s]+", "", stripped).strip()
+    # Common STT misrecognitions
+    _STT_FIXES = {"whatsapp": "what's up", "what's app": "what's up", "what up": "what's up"}
+    for wrong, right in _STT_FIXES.items():
+        stripped = re.sub(re.escape(wrong), right, stripped, flags=re.I)
     # Greeting phrases that look like questions but are just greetings
     if _GREETING_QUESTIONS.match(stripped):
         return True
