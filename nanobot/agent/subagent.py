@@ -85,9 +85,11 @@ class SubagentManager:
         self._agents_file.write_text(json.dumps(all_agents, indent=2, default=str))
 
     def get_all_agents(self) -> list[dict]:
-        """Return current + recent completed agents from disk."""
+        """Return current + recent completed agents from disk, newest first."""
         try:
-            return json.loads(self._agents_file.read_text()) if self._agents_file.exists() else []
+            agents = json.loads(self._agents_file.read_text()) if self._agents_file.exists() else []
+            agents.sort(key=lambda a: a.get("started_at", ""), reverse=True)
+            return agents
         except Exception:
             return []
 

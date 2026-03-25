@@ -1298,15 +1298,16 @@ class AgentLoop:
 
             final_content = final_content or "Background task completed."
             if _sys_is_voice:
-                # Already TTS'd via streaming — just send text for display (no _subagent_result to avoid double TTS)
                 logger.info("Voice response (system) to {}:{}: {}", channel, chat_id, final_content[:120])
                 await self.bus.publish_outbound(OutboundMessage(
                     channel=channel, chat_id=chat_id, content=final_content,
+                    metadata={"_subagent_result": True, "_voice_final": True},
                 ))
                 return None
 
             return OutboundMessage(channel=channel, chat_id=chat_id,
-                                  content=final_content)
+                                  content=final_content,
+                                  metadata={"_subagent_result": True})
 
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
