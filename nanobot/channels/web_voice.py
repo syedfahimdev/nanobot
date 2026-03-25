@@ -3277,11 +3277,25 @@ copy();
                 self._tts_playing.discard(session_id)
 
         if is_interrupt:
+            # During TTS: just clear the TTS queue silently — don't send to agent
+            if session_id in self._tts_playing:
+                q = self._tts_queues.get(session_id)
+                if q:
+                    while not q.empty():
+                        try: q.get_nowait()
+                        except: break
+                self._tts_playing.discard(session_id)
+                self._recent_tts_text.pop(session_id, None)
+                logger.debug("Interrupt during TTS: cleared queue for {}", session_id)
+                return  # Don't submit to agent — just stop speaking
+
+            # Not during TTS: cancel running task (if any)
             asyncio.create_task(self._send_stop(session_id))
             self._pending_count[session_id] = 0
             ws = self._clients.get(session_id)
             if ws and not ws.closed:
                 asyncio.create_task(ws.send_json({"type": "queue_status", "pending": 0}))
+            return  # Don't submit "stop" as a regular message
 
         # Fire directly to the agent — no channel-level queue
         asyncio.create_task(self._submit_to_agent(session_id, text, media=media))
