@@ -612,13 +612,13 @@ class WebVoiceChannel(BaseChannel):
                             if cid in self._voice_active:
                                 self._enqueue_tts(cid, sentence)
 
+    _ECHO_COOLDOWN_SECS = 2.0  # Suppress STT for 2s after TTS audio is sent
+
     def _enqueue_tts(self, session_id: str, text: str) -> None:
         """Add a sentence to the ordered TTS queue for this session."""
         if session_id not in self._tts_queues:
             self._tts_queues[session_id] = asyncio.Queue()
         self._tts_queues[session_id].put_nowait(text)
-        # Mark session as playing TTS — suppress STT echo
-        self._tts_playing.add(session_id)
         if session_id not in self._tts_workers or self._tts_workers[session_id].done():
             self._tts_workers[session_id] = asyncio.create_task(self._tts_worker(session_id))
 
@@ -655,13 +655,14 @@ class WebVoiceChannel(BaseChannel):
                     break
 
                 try:
-                    # ElevenLabs: use streaming API for lower latency
+                    # Suppress echo ONLY during generation + short cooldown
+                    self._tts_playing.add(session_id)
+
                     if _provider == "elevenlabs":
                         await self._stream_elevenlabs_to_client(text, session_id, ws)
                     elif _provider == "deepgram" and _use_streaming:
                         await self._stream_deepgram_to_client(text, session_id, ws)
                     else:
-                        # Deepgram REST / other: buffered
                         audio = await self._generate_tts(text, session_id=session_id)
                         if audio and not ws.closed:
                             await ws.send_json({
@@ -670,8 +671,13 @@ class WebVoiceChannel(BaseChannel):
                                 "sample_rate": 24000,
                             })
                             logger.debug("TTS sent {}KB WAV for '{}'", len(audio) // 1024, text[:30])
+
+                    # Brief cooldown then clear echo suppression
+                    await asyncio.sleep(self._ECHO_COOLDOWN_SECS)
                 except Exception as e:
                     logger.error("TTS generation/send failed for '{}': {}", text[:30], e)
+                finally:
+                    self._tts_playing.discard(session_id)
         finally:
             # ALWAYS clear playing flag — even on crash, timeout, or exception
             self._tts_playing.discard(session_id)
