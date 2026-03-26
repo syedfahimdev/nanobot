@@ -384,6 +384,9 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/api/sessions/{key:.+}", self._session_detail_handler)
         self._app.router.add_delete("/api/sessions/{key:.+}", self._session_delete_handler)
         self._app.router.add_get("/api/budget", self._budget_handler)
+        self._app.router.add_get("/api/steering", self._steering_get_handler)
+        self._app.router.add_post("/api/steering", self._steering_post_handler)
+        self._app.router.add_delete("/api/steering", self._steering_delete_handler)
         self._app.router.add_get("/api/agents", self._agents_list_handler)
         self._app.router.add_get("/api/favorites", self._favorites_handler)
         # Serve React build from dist dir (if exists), fallback to inline HTML
@@ -937,6 +940,48 @@ class WebVoiceChannel(BaseChannel):
             "status": "ok",
             "active_sessions": len(self._clients),
         })
+
+    async def _steering_get_handler(self, request: web.Request) -> web.Response:
+        """GET /api/steering — return steering items."""
+        try:
+            from nanobot.agent.memory import MemoryStore
+            store = MemoryStore(self._get_workspace())
+            content = store.read_steering().strip()
+            items = [l.strip() for l in content.split("\n") if l.strip()] if content else []
+            return web.json_response({"items": items})
+        except Exception as e:
+            logger.warning("Steering GET error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _steering_post_handler(self, request: web.Request) -> web.Response:
+        """POST /api/steering — add a steering item."""
+        try:
+            data = await request.json()
+            item = data.get("item", "").strip()
+            if not item:
+                return web.json_response({"error": "item is required"}, status=400)
+            from nanobot.agent.memory import MemoryStore
+            store = MemoryStore(self._get_workspace())
+            store.add_steering(item)
+            return web.json_response({"ok": True})
+        except Exception as e:
+            logger.warning("Steering POST error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
+
+    async def _steering_delete_handler(self, request: web.Request) -> web.Response:
+        """DELETE /api/steering — remove a steering item by index."""
+        try:
+            data = await request.json()
+            index = data.get("index")
+            if index is None:
+                return web.json_response({"error": "index is required"}, status=400)
+            from nanobot.agent.memory import MemoryStore
+            store = MemoryStore(self._get_workspace())
+            store.clear_steering_item(int(index))
+            return web.json_response({"ok": True})
+        except Exception as e:
+            logger.warning("Steering DELETE error: {}", e)
+            return web.json_response({"error": "Internal error"}, status=500)
 
     async def _agents_list_handler(self, request: web.Request) -> web.Response:
         """Return full agent list from agents.json."""

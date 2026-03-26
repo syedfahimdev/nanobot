@@ -149,6 +149,32 @@ class MemoryStore:
             old_memory.rename(self.long_term_file)
             logger.info("Migrated MEMORY.md → LONG_TERM.md")
 
+    # -- Steering priority queue --
+
+    @property
+    def steering_file(self) -> Path:
+        return self.memory_dir / "STEERING.md"
+
+    def read_steering(self) -> str:
+        if self.steering_file.exists():
+            return self.steering_file.read_text(encoding="utf-8")
+        return ""
+
+    def add_steering(self, item: str) -> None:
+        """Prepend a timestamped steering item to the file."""
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        new_line = f"- [{ts}] {item.strip()}"
+        existing = self.read_steering()
+        self.steering_file.write_text(new_line + "\n" + existing, encoding="utf-8")
+
+    def clear_steering_item(self, index: int) -> None:
+        """Remove a specific steering item by 0-based index."""
+        content = self.read_steering()
+        lines = [l for l in content.split("\n") if l.strip()]
+        if 0 <= index < len(lines):
+            lines.pop(index)
+            self.steering_file.write_text("\n".join(lines) + "\n" if lines else "", encoding="utf-8")
+
     # -- Backward-compatible aliases for tests and external callers --
 
     @property
@@ -219,6 +245,24 @@ class MemoryStore:
         with open(self.history_file, "a", encoding="utf-8") as f:
             f.write(entry.rstrip() + "\n\n")
 
+    def append_task_log(self, task_id: str, description: str, status: str, result: str) -> None:
+        """Append a structured task completion entry to TASK_LOG.md."""
+        log_file = self.memory_dir / "TASK_LOG.md"
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        status_icon = {"done": "\u2713", "blocked": "\u2298", "failed": "\u2717", "needs_input": "?"}.get(status, "\u00b7")
+        entry = f"- [{ts}] {status_icon} [{task_id}] {description[:80]} \u2014 {result[:100]}"
+
+        existing = ""
+        if log_file.exists():
+            existing = log_file.read_text(encoding="utf-8")
+
+        lines = [l for l in existing.split("\n") if l.strip().startswith("- ")]
+        lines.insert(0, entry)  # Newest first
+        if len(lines) > 50:
+            lines = lines[:50]
+
+        log_file.write_text("# Task Completion Log\n\n" + "\n".join(lines) + "\n", encoding="utf-8")
+
     _MAX_SHORT_TERM_CHARS = 1500  # ~375 tokens — trim to save context
 
     def get_memory_context(self) -> str:
@@ -228,6 +272,10 @@ class MemoryStore:
         LONG_TERM is searched on demand via memory_search tool.
         """
         parts = []
+
+        steering = self.read_steering().strip()
+        if steering:
+            parts.insert(0, f"## CRITICAL — Do This First\n{steering}")
 
         short_term = self.read_short_term().strip()
         if short_term:
@@ -330,6 +378,14 @@ class MemoryStore:
                     hints.append(hint)
             except (OSError, TypeError):
                 pass
+
+        # Recent task completions — inject last 3 entries if log exists
+        task_log_file = self.memory_dir / "TASK_LOG.md"
+        if task_log_file.exists():
+            content = task_log_file.read_text(encoding="utf-8")
+            entries = [l for l in content.split("\n") if l.strip().startswith("- ")][:3]
+            if entries:
+                parts.append("## Recent Tasks\n" + "\n".join(entries))
 
         # Single on-demand hint line instead of injecting everything
         if hints:

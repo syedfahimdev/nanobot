@@ -201,6 +201,8 @@ class SubagentManager:
             # Goals — subagent can check/update goals
             from nanobot.agent.tools.goals import GoalsTool
             tools.register(GoalsTool(workspace=self.workspace))
+            from nanobot.agent.tools.task_manager import TaskManagerTool
+            tools.register(TaskManagerTool(workspace=self.workspace))
 
             system_prompt = self._build_subagent_prompt(session_key=session_key)
             messages: list[dict[str, Any]] = [
@@ -276,8 +278,30 @@ class SubagentManager:
                     final_result = response.content
                     break
 
+            # Parse structured status tags from subagent response
+            if final_result:
+                import re
+                blocked_match = re.search(r'\[?BLOCKED[:\]]\s*(.+?)(?:\]|$)', final_result, re.I)
+                needs_input_match = re.search(r'\[?NEEDS_INPUT[:\]]\s*(.+?)(?:\]|$)', final_result, re.I)
+                if blocked_match:
+                    if task_id in self._task_info:
+                        self._task_info[task_id]["status"] = "blocked"
+                        self._task_info[task_id]["error"] = blocked_match.group(1).strip()
+                elif needs_input_match:
+                    if task_id in self._task_info:
+                        self._task_info[task_id]["status"] = "needs_input"
+                        self._task_info[task_id]["error"] = needs_input_match.group(1).strip()
+
             if final_result is None:
                 final_result = "Task completed but no final response was generated."
+
+            # Completion verification — check that tools were actually used
+            _tools_used = self._task_info.get(task_id, {}).get("tools_used", [])
+            if not _tools_used and iteration <= 1:
+                # Subagent answered without using any tools — likely a refusal or hallucination
+                logger.warning("Subagent [{}] completed without using tools — may not have executed task", task_id)
+                if final_result and len(final_result) < 100:
+                    final_result = f"{final_result}\n\n[Warning: completed without executing any tools — result may be a text-only response rather than actual task execution]"
 
             # Quality gate — validate subagent result before announcing
             _quality_issues = self._validate_result(task, final_result)
@@ -342,7 +366,17 @@ class SubagentManager:
             ))
             return
 
-        status_text = "completed successfully" if status == "ok" else "failed"
+        # Include structured status info if available
+        info = self._task_info.get(task_id, {})
+        tag_status = info.get("status", "")
+        if tag_status == "blocked":
+            status_text = f"is BLOCKED: {info.get('error', 'unknown reason')}"
+        elif tag_status == "needs_input":
+            status_text = f"NEEDS INPUT: {info.get('error', 'unknown question')}"
+        elif status == "ok":
+            status_text = "completed successfully"
+        else:
+            status_text = "failed"
 
         announce_content = f"""[Subagent '{label}' {status_text}]
 

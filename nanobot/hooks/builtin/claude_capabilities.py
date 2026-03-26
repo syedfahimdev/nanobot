@@ -966,3 +966,33 @@ def try_code_answer(text: str, workspace: Path) -> str | None:
         return "\n".join(lines)
 
     return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 12. PRD-to-Tasks Pipeline (deterministic task breakdown)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def generate_task_breakdown(description: str) -> list[dict]:
+    """Generate a structured task breakdown from a project description.
+    Uses keyword-based decomposition — no LLM tokens required."""
+    tasks = []
+
+    # Split by common delimiters
+    parts = re.split(
+        r'(?:^|\n)\s*[-•*]\s+|\d+\.\s+|(?:and|then|also|next|after that|finally)\s+',
+        description,
+        flags=re.I,
+    )
+    parts = [p.strip() for p in parts if p.strip() and len(p.strip()) > 5]
+
+    if len(parts) <= 1:
+        # Single task — just return it
+        return [{"description": description.strip(), "priority": 1}]
+
+    for i, part in enumerate(parts):
+        tasks.append({
+            "description": part,
+            "priority": min(i + 1, 5),
+        })
+
+    return tasks
