@@ -751,7 +751,9 @@ class WebVoiceChannel(BaseChannel):
             # through speakers even though we finished sending bytes. If we clear the
             # flag now, echo suppression is bypassed and the mic picks up Mawa's own
             # voice, contaminating the next user command.
-            await asyncio.sleep(self._ECHO_COOLDOWN_SECS)
+            from nanobot.hooks.builtin.feature_registry import get_setting
+            _cooldown = get_setting(self._get_workspace(), "voiceEchoCooldownSecs", 2.0)
+            await asyncio.sleep(_cooldown)
             # NOW clear — browser should be done playing by now
             self._tts_playing.discard(session_id)
             # Flush any echo that leaked into the utterance buffer during playback
@@ -3333,18 +3335,18 @@ copy();
 
     # ── Session-end inactivity timer ─────────────────────────────
 
-    _SESSION_END_DELAY = 300  # 5 minutes
-
     def _start_session_end_timer(self, session_id: str) -> None:
-        """Start a 5-minute timer; if no reconnect, trigger session_end_consolidate."""
+        """Start an inactivity timer; if no reconnect, trigger session_end_consolidate."""
+        from nanobot.hooks.builtin.feature_registry import get_setting
+        _delay = float(get_setting(self._get_workspace(), "sessionEndDelaySecs", 300))
         self._cancel_session_end_timer(session_id)
         loop = asyncio.get_event_loop()
         handle = loop.call_later(
-            self._SESSION_END_DELAY,
+            _delay,
             lambda: asyncio.ensure_future(self._fire_session_end_consolidate(session_id)),
         )
         self._session_end_timers[session_id] = handle
-        logger.debug("Session-end timer started for {} ({}s)", session_id, self._SESSION_END_DELAY)
+        logger.debug("Session-end timer started for {} ({}s)", session_id, _delay)
 
     def _cancel_session_end_timer(self, session_id: str) -> None:
         """Cancel any pending session-end timer (e.g. on reconnect)."""

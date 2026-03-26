@@ -348,14 +348,16 @@ class AgentLoop:
             return validation_err
 
         # Execute with timeout to prevent hanging
+        from nanobot.hooks.builtin.feature_registry import get_setting
+        _timeout = int(get_setting(self.workspace, "toolTimeout", 45))
         try:
             result = await asyncio.wait_for(
                 self.tools.execute(tc.name, tc.arguments),
-                timeout=self._TOOL_TIMEOUT,
+                timeout=_timeout,
             )
         except asyncio.TimeoutError:
-            logger.warning("Tool {} timed out after {}s", tc.name, self._TOOL_TIMEOUT)
-            result = f"Error: Tool '{tc.name}' timed out after {self._TOOL_TIMEOUT}s. Try a simpler approach or break the task into smaller steps."
+            logger.warning("Tool {} timed out after {}s", tc.name, _timeout)
+            result = f"Error: Tool '{tc.name}' timed out after {_timeout}s. Try a simpler approach or break the task into smaller steps."
 
         # [#1] Classify errors with structured recovery hints + strategy rotation
         if settings.get("smartErrorRecovery", True):
@@ -375,8 +377,9 @@ class AgentLoop:
             result = truncate_tool_result(result, budget)
         else:
             # Fallback to fixed cap
-            if isinstance(result, str) and len(result) > self._TOOL_RESULT_MAX_CHARS:
-                result = result[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
+            _max_chars = int(get_setting(self.workspace, "toolResultMaxChars", 16000))
+            if isinstance(result, str) and len(result) > _max_chars:
+                result = result[:_max_chars] + "\n... (truncated)"
 
         # [#9] MCP reconnection tracking
         if settings.get("mcpAutoReconnect", True):
@@ -1528,7 +1531,7 @@ class AgentLoop:
         _ws = self.workspace
 
         # [#11] Message dedup — skip if same message sent within 30s
-        if _get_feat(_ws, "messageDedup", True) and is_duplicate(key, msg.content):
+        if _get_feat(_ws, "messageDedup", True) and is_duplicate(key, msg.content, workspace=_ws):
             return None  # Silently drop duplicate
 
         # Helper: send a pre-LLM answer with TTS support for voice channels
@@ -1555,7 +1558,7 @@ class AgentLoop:
 
         # [#1] Response cache — skip LLM for identical questions
         if _get_feat(_ws, "responseCaching", True):
-            cached = get_cached_response(msg.content)
+            cached = get_cached_response(msg.content, workspace=_ws)
             if cached:
                 return await _send_quick_answer(cached, "Cache hit")
 
@@ -1755,7 +1758,7 @@ class AgentLoop:
 
         # [Opt 3] History compression — compress old turns to save tokens
         from nanobot.hooks.builtin.pipeline_optimizer import compress_history
-        history = compress_history(history)
+        history = compress_history(history, workspace=self.workspace)
 
         initial_messages = self.context.build_messages(
             history=history,
@@ -1800,8 +1803,8 @@ class AgentLoop:
                         metadata={"_tts_sentence": True},
                     ))
 
-            # Voice mode: cap iterations at 10 (vs 40 for text) to prevent long hangs
-            _max_iters = min(self.max_iterations, 10) if _is_voice else self.max_iterations
+            # Voice mode: cap iterations (configurable via settings)
+            _max_iters = int(_get_feat(_ws, "voiceMaxIterations", 10)) if _is_voice else int(_get_feat(_ws, "maxIterations", 40))
 
             final_content, _, all_msgs, turn_usage = await self._run_agent_loop_streaming(
                 initial_messages, on_sentence=_on_sentence,
@@ -1812,7 +1815,7 @@ class AgentLoop:
         else:
             final_content, _, all_msgs, turn_usage = await self._run_agent_loop(
                 initial_messages, on_progress=on_progress or _bus_progress,
-                effective_model=_effective_model, max_iters=self.max_iterations,
+                effective_model=_effective_model, max_iters=int(_get_feat(_ws, "maxIterations", 40)),
                 filtered_tool_names=_filtered_tools,
             )
 
@@ -1939,8 +1942,10 @@ class AgentLoop:
             role, content = entry.get("role"), entry.get("content")
             if role == "assistant" and not content and not entry.get("tool_calls"):
                 continue  # skip empty assistant messages — they poison session context
-            if role == "tool" and isinstance(content, str) and len(content) > self._TOOL_RESULT_MAX_CHARS:
-                entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
+            from nanobot.hooks.builtin.feature_registry import get_setting as _gs_trunc
+            _trc_max = int(_gs_trunc(self.workspace, "toolResultMaxChars", 16000))
+            if role == "tool" and isinstance(content, str) and len(content) > _trc_max:
+                entry["content"] = content[:_trc_max] + "\n... (truncated)"
             elif role == "user":
                 if isinstance(content, str) and ContextBuilder._RUNTIME_CONTEXT_TAG in content:
                     # Strip all runtime-context metadata, keep only the user text.

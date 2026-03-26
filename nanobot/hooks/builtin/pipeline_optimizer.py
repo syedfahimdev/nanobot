@@ -240,18 +240,22 @@ _MAX_FULL_TURNS = 6  # Keep last 6 turns in full
 _COMPRESSED_PREFIX = "[earlier] "
 
 
-def compress_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def compress_history(history: list[dict[str, Any]], workspace: "Path | None" = None) -> list[dict[str, Any]]:
     """Compress old history turns to save tokens.
 
-    Keeps the last _MAX_FULL_TURNS messages in full.
+    Keeps the last N messages in full (configurable via historyFullTurns setting).
     Earlier messages get compressed to one-line summaries.
     Tool messages are dropped from old turns.
     """
-    if len(history) <= _MAX_FULL_TURNS * 2:
+    _full_turns = _MAX_FULL_TURNS
+    if workspace is not None:
+        from nanobot.hooks.builtin.feature_registry import get_setting
+        _full_turns = int(get_setting(workspace, "historyFullTurns", 6))
+    if len(history) <= _full_turns * 2:
         return history  # Small enough — no compression needed
 
     # Split into old and recent
-    cutoff = len(history) - (_MAX_FULL_TURNS * 2)
+    cutoff = len(history) - (_full_turns * 2)
     old = history[:cutoff]
     recent = history[cutoff:]
 

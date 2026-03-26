@@ -280,8 +280,10 @@ class MemoryStore:
         short_term = self.read_short_term().strip()
         if short_term:
             # Trim to keep tokens low — take last N chars (most recent context)
-            if len(short_term) > self._MAX_SHORT_TERM_CHARS:
-                short_term = "...\n" + short_term[-self._MAX_SHORT_TERM_CHARS:]
+            from nanobot.hooks.builtin.feature_registry import get_setting
+            _max_st = int(get_setting(Path(self.memory_dir).parent, "shortTermMaxChars", 1500))
+            if len(short_term) > _max_st:
+                short_term = "...\n" + short_term[-_max_st:]
             parts.append(f"## Today\n{short_term}")
 
         # Learnings from user corrections — these are HIGH PRIORITY, always inject
@@ -659,7 +661,7 @@ class MemoryConsolidator:
                 return True
         return True
 
-    _MSG_COUNT_THRESHOLD = 20  # Force consolidation after this many unconsolidated messages
+    _MSG_COUNT_THRESHOLD = 20  # Default; overridden by memoryConsolidationThreshold setting
 
     async def maybe_consolidate_by_tokens(self, session: Session) -> None:
         """Loop: archive old messages until prompt fits within half the context window.
@@ -671,6 +673,9 @@ class MemoryConsolidator:
         if not session.messages or self.context_window_tokens <= 0:
             return
 
+        from nanobot.hooks.builtin.feature_registry import get_setting
+        _threshold = int(get_setting(Path(self.memory_dir).parent, "memoryConsolidationThreshold", 20))
+
         lock = self.get_lock(session.key)
         async with lock:
             unconsolidated_count = len(session.messages) - session.last_consolidated
@@ -679,7 +684,7 @@ class MemoryConsolidator:
             if estimated <= 0:
                 return
 
-            force_by_count = unconsolidated_count >= self._MSG_COUNT_THRESHOLD
+            force_by_count = unconsolidated_count >= _threshold
             if estimated < self.context_window_tokens and not force_by_count:
                 logger.debug(
                     "Token consolidation idle {}: {}/{} via {} ({} unconsolidated msgs)",
@@ -698,7 +703,7 @@ class MemoryConsolidator:
                     unconsolidated_count,
                 )
                 # Force-consolidate the first batch of messages (bypass token check)
-                end_idx = session.last_consolidated + self._MSG_COUNT_THRESHOLD
+                end_idx = session.last_consolidated + _threshold
                 end_idx = min(end_idx, len(session.messages))
                 chunk = session.messages[session.last_consolidated:end_idx]
                 if chunk:

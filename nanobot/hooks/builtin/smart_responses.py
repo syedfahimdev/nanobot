@@ -52,14 +52,18 @@ def cache_key(message: str) -> str:
 _TIME_SENSITIVE_WORDS = re.compile(r"\b(today|now|current|latest|tonight|yesterday|tomorrow)\b", re.I)
 
 
-def get_cached_response(message: str) -> str | None:
+def get_cached_response(message: str, workspace: Path | None = None) -> str | None:
     """Get cached response for identical question. Returns None if miss."""
     if _TIME_SENSITIVE_WORDS.search(message):
         return None
     key = cache_key(message)
     if key in _response_cache:
         response, ts = _response_cache[key]
-        if time.time() - ts < _CACHE_TTL:
+        _ttl = _CACHE_TTL
+        if workspace is not None:
+            from nanobot.hooks.builtin.feature_registry import get_setting
+            _ttl = float(get_setting(workspace, "cacheTtlSecs", 300))
+        if time.time() - ts < _ttl:
             logger.info("Cache hit: {} (saved LLM call)", message[:40])
             return response
         del _response_cache[key]
@@ -469,14 +473,18 @@ _recent_messages: dict[str, list[tuple[str, float]]] = {}  # session → [(hash,
 _DEDUP_WINDOW = 30  # seconds
 
 
-def is_duplicate(session_key: str, message: str) -> bool:
+def is_duplicate(session_key: str, message: str, workspace: Path | None = None) -> bool:
     """Check if this message was already sent within the dedup window."""
     msg_hash = hashlib.md5(message.strip().lower().encode()).hexdigest()
     now = time.time()
 
+    _window = _DEDUP_WINDOW
+    if workspace is not None:
+        from nanobot.hooks.builtin.feature_registry import get_setting
+        _window = float(get_setting(workspace, "dedupWindowSecs", 30))
     history = _recent_messages.setdefault(session_key, [])
     # Clean old entries
-    history[:] = [(h, t) for h, t in history if now - t < _DEDUP_WINDOW]
+    history[:] = [(h, t) for h, t in history if now - t < _window]
 
     # Check for duplicate
     if any(h == msg_hash for h, _ in history):

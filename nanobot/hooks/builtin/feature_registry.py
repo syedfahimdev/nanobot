@@ -232,6 +232,20 @@ _FEATURE_DEFS: list[dict[str, Any]] = [
     {"key": "deepgramTtsModel", "label": "Deepgram TTS Voice", "desc": "Aura-2 voice for TTS. thalia=warm female, orion=warm male, luna=soft female, zeus=deep male.", "category": "media", "type": "string", "default": "aura-2-thalia-en", "placeholder": "aura-2-thalia-en, aura-2-orion-en, aura-2-luna-en, aura-2-zeus-en"},
     {"key": "deepgramTtsStreaming", "label": "Streaming TTS", "desc": "Use WebSocket streaming for ultra-low latency TTS. Faster than REST but uses a persistent connection.", "category": "media", "type": "boolean", "default": True},
 
+    # Tuning
+    {"key": "voiceEchoCooldownSecs", "label": "Echo Cooldown (seconds)", "desc": "How long to suppress mic after TTS finishes to avoid echo. Lower = faster conversation, higher = less echo.", "category": "tuning", "type": "number", "default": 2.0},
+    {"key": "toolTimeout", "label": "Tool Timeout (seconds)", "desc": "Max time a single tool call can run before being killed.", "category": "tuning", "type": "number", "default": 45},
+    {"key": "maxIterations", "label": "Max Iterations (text)", "desc": "Maximum agent loop iterations per message in text mode.", "category": "tuning", "type": "number", "default": 40},
+    {"key": "voiceMaxIterations", "label": "Max Iterations (voice)", "desc": "Maximum agent loop iterations per message in voice mode. Lower = faster responses.", "category": "tuning", "type": "number", "default": 10},
+    {"key": "subagentMaxIterations", "label": "Subagent Max Iterations", "desc": "Maximum iterations for background subagent tasks.", "category": "tuning", "type": "number", "default": 15},
+    {"key": "toolResultMaxChars", "label": "Tool Result Max Chars", "desc": "Maximum characters kept from tool results. Higher = more detail but more tokens.", "category": "tuning", "type": "number", "default": 16000},
+    {"key": "sessionEndDelaySecs", "label": "Session End Delay (seconds)", "desc": "Time after disconnect before session memory is consolidated.", "category": "tuning", "type": "number", "default": 300},
+    {"key": "shortTermMaxChars", "label": "Short-Term Memory Size", "desc": "Max characters of today's context injected into every message.", "category": "tuning", "type": "number", "default": 1500},
+    {"key": "cacheTtlSecs", "label": "Response Cache TTL (seconds)", "desc": "How long identical questions return cached responses.", "category": "tuning", "type": "number", "default": 300},
+    {"key": "dedupWindowSecs", "label": "Dedup Window (seconds)", "desc": "Window in which duplicate messages are dropped.", "category": "tuning", "type": "number", "default": 30},
+    {"key": "historyFullTurns", "label": "Full History Turns", "desc": "Number of recent conversation turns kept in full detail (older ones compressed).", "category": "tuning", "type": "number", "default": 6},
+    {"key": "memoryConsolidationThreshold", "label": "Memory Consolidation Threshold", "desc": "Number of unconsolidated messages before forcing memory consolidation.", "category": "tuning", "type": "number", "default": 20},
+
     # Phone calls
     {"key": "phoneCallEnabled", "label": "Phone Calls", "desc": "Allow Mawa to make outbound phone calls via Twilio.", "category": "media", "type": "boolean", "default": True},
     {"key": "phoneCallVoiceProvider", "label": "Call Voice Provider", "desc": "Voice provider for phone calls. deepgram = Twilio TTS.", "category": "media", "type": "string", "default": "deepgram", "placeholder": "deepgram"},
@@ -264,4 +278,5 @@ def get_feature_categories() -> list[dict[str, str]]:
         {"id": "notifications", "label": "Notifications", "icon": "bell"},
         {"id": "budget", "label": "Cost & Budget", "icon": "dollar-sign"},
         {"id": "maintenance", "label": "Maintenance", "icon": "wrench"},
+        {"id": "tuning", "label": "Tuning", "icon": "sliders"},
     ]

@@ -211,7 +211,8 @@ class SubagentManager:
             ]
 
             # Run agent loop (limited iterations)
-            max_iterations = 15
+            from nanobot.hooks.builtin.feature_registry import get_setting
+            max_iterations = int(get_setting(self.workspace, "subagentMaxIterations", 15))
             iteration = 0
             final_result: str | None = None
 
