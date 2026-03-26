@@ -369,7 +369,6 @@ class MemoryStore:
                 pending = [l for l in content.split("\n") if l.strip().startswith("- [ ] ")]
                 if pending:
                     from datetime import date
-                    import re
                     today = date.today().isoformat()
                     overdue = sum(1 for l in pending if (m := re.search(r"\(due:\s*(\d{4}-\d{2}-\d{2})\)", l)) and m.group(1) < today)
                     hint = f"{len(pending)} pending goals"
