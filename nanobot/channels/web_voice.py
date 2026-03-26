@@ -258,6 +258,8 @@ class WebVoiceChannel(BaseChannel):
         self._tts_playing: set[str] = set()
         # Track recent TTS text for smart echo detection (compare STT against what Mawa said)
         self._recent_tts_text: dict[str, str] = {}
+        # Session-end consolidation timers — fire after 5 min of inactivity
+        self._session_end_timers: dict[str, asyncio.TimerHandle] = {}
 
     @staticmethod
     def _get_workspace():
@@ -2911,6 +2913,8 @@ copy();
                             self._clients[session_id] = ws
                             self._utterance_buffer.setdefault(session_id, [])
                             self._pending_count.setdefault(session_id, 0)
+                            # Cancel session-end timer on reconnect
+                            self._cancel_session_end_timer(session_id)
                             logger.info("Web Voice client identified: {} (was {})", session_id, old_id)
 
                             # Deliver any pending notifications that were stored while offline
@@ -3274,10 +3278,61 @@ copy();
             except Exception as e:
                 logger.debug("Auto-consolidation on disconnect failed: {}", e)
 
+            # Start 5-minute inactivity timer for session-end consolidation
+            self._start_session_end_timer(session_id)
+
             self._voice_active.discard(session_id)
             logger.info("Web Voice client disconnected: {}", session_id)
 
         return ws
+
+    # ── Session-end inactivity timer ─────────────────────────────
+
+    _SESSION_END_DELAY = 300  # 5 minutes
+
+    def _start_session_end_timer(self, session_id: str) -> None:
+        """Start a 5-minute timer; if no reconnect, trigger session_end_consolidate."""
+        self._cancel_session_end_timer(session_id)
+        loop = asyncio.get_event_loop()
+        handle = loop.call_later(
+            self._SESSION_END_DELAY,
+            lambda: asyncio.ensure_future(self._fire_session_end_consolidate(session_id)),
+        )
+        self._session_end_timers[session_id] = handle
+        logger.debug("Session-end timer started for {} ({}s)", session_id, self._SESSION_END_DELAY)
+
+    def _cancel_session_end_timer(self, session_id: str) -> None:
+        """Cancel any pending session-end timer (e.g. on reconnect)."""
+        handle = self._session_end_timers.pop(session_id, None)
+        if handle is not None:
+            handle.cancel()
+            logger.debug("Session-end timer cancelled for {}", session_id)
+
+    async def _fire_session_end_consolidate(self, session_id: str) -> None:
+        """Triggered after inactivity timeout — force-consolidate the session."""
+        self._session_end_timers.pop(session_id, None)
+        # Only fire if client hasn't reconnected
+        if session_id in self._clients:
+            return
+        try:
+            workspace = self._get_workspace()
+            from nanobot.session.manager import SessionManager
+            from nanobot.agent.memory import MemoryStore
+            from nanobot.providers.litellm_provider import LiteLLMProvider
+            sessions = SessionManager(workspace)
+            session = sessions.get_or_create("web_voice:voice")
+            unconsolidated = session.messages[session.last_consolidated:]
+            if len(unconsolidated) >= 2:
+                store = MemoryStore(workspace)
+                provider = LiteLLMProvider()
+                model = provider.get_default_model()
+                result = await store.consolidate(unconsolidated, provider, model)
+                if result:
+                    session.last_consolidated = len(session.messages)
+                    sessions.save(session)
+                    logger.info("Session-end consolidation fired for {}: {} messages", session_id, len(unconsolidated))
+        except Exception as e:
+            logger.debug("Session-end consolidation failed for {}: {}", session_id, e)
 
     # ── Message queue (serialize per session) ──────────────────────
 

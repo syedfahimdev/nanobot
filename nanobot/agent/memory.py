@@ -11,7 +11,9 @@ Layers:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import re
 import weakref
 from datetime import datetime
 from pathlib import Path
@@ -63,6 +65,23 @@ _SAVE_MEMORY_TOOL = [
                         "pattern (e.g., 'user prefers concise summaries', 'user dislikes verbose responses', "
                         "'user always checks email first'), save it here. Only set if genuinely new insight.",
                     },
+                    "observation_type": {
+                        "type": "string",
+                        "description": "Category for the behavioral_insight (only set if behavioral_insight is set).",
+                        "enum": ["preference", "decision", "fact", "correction", "pattern", "workflow"],
+                    },
+                    "investigated": {
+                        "type": "string",
+                        "description": "What was explored/researched in this conversation chunk.",
+                    },
+                    "completed": {
+                        "type": "string",
+                        "description": "What was actually done/accomplished in this conversation chunk.",
+                    },
+                    "next_steps": {
+                        "type": "string",
+                        "description": "What should happen next — pending tasks, follow-ups, or continuations.",
+                    },
                 },
                 "required": ["history_entry", "long_term"],
             },
@@ -111,6 +130,8 @@ class MemoryStore:
 
     _MAX_FAILURES_BEFORE_RAW_ARCHIVE = 3
 
+    _MAX_RECENT_HASHES = 50
+
     def __init__(self, workspace: Path):
         self.memory_dir = ensure_dir(workspace / "memory")
         self.long_term_file = self.memory_dir / "LONG_TERM.md"
@@ -118,7 +139,9 @@ class MemoryStore:
         self.observations_file = self.memory_dir / "OBSERVATIONS.md"
         self.episodes_file = self.memory_dir / "EPISODES.md"
         self.history_file = self.memory_dir / "HISTORY.md"
+        self.next_steps_file = self.memory_dir / "NEXT_STEPS.md"
         self._consecutive_failures = 0
+        self._recent_hashes: list[str] = []
 
         # Backward compat: migrate MEMORY.md → LONG_TERM.md on first access
         old_memory = self.memory_dir / "MEMORY.md"
@@ -172,11 +195,27 @@ class MemoryStore:
             return self.episodes_file.read_text(encoding="utf-8")
         return ""
 
+    def _content_hash_exists(self, content: str) -> bool:
+        """Check if content (first 200 chars) hash already exists in recent hashes."""
+        h = hashlib.md5(content[:200].encode("utf-8")).hexdigest()
+        if h in self._recent_hashes:
+            return True
+        self._recent_hashes.append(h)
+        if len(self._recent_hashes) > self._MAX_RECENT_HASHES:
+            self._recent_hashes = self._recent_hashes[-self._MAX_RECENT_HASHES:]
+        return False
+
     def append_episode(self, entry: str) -> None:
+        if self._content_hash_exists(entry):
+            logger.debug("Skipping duplicate episode entry")
+            return
         with open(self.episodes_file, "a", encoding="utf-8") as f:
             f.write(entry.rstrip() + "\n\n")
 
     def append_history(self, entry: str) -> None:
+        if self._content_hash_exists(entry):
+            logger.debug("Skipping duplicate history entry")
+            return
         with open(self.history_file, "a", encoding="utf-8") as f:
             f.write(entry.rstrip() + "\n\n")
 
@@ -208,11 +247,52 @@ class MemoryStore:
                 top_rules = "\n".join(rules[-5:])
                 parts.append(f"## User Rules (MUST follow)\n{top_rules}")
 
+        # Inject NEXT_STEPS.md if it exists (#3 structured session summaries)
+        if self.next_steps_file.exists():
+            ns_content = self.next_steps_file.read_text(encoding="utf-8").strip()
+            if ns_content:
+                parts.append(f"## Next Steps\n{ns_content}")
+
+        # Tiered episode injection (#6) — last 2 full, 3 before that title-only
+        episodes_text = self.read_episodes().strip()
+        if episodes_text:
+            episode_blocks = [e.strip() for e in episodes_text.split("\n\n") if e.strip()]
+            ep_lines: list[str] = []
+            if len(episode_blocks) > 5:
+                episode_blocks = episode_blocks[-5:]
+            for idx, block in enumerate(episode_blocks):
+                if idx >= len(episode_blocks) - 2:
+                    ep_lines.append(block)
+                else:
+                    first_line = block.split("\n")[0]
+                    ep_lines.append(first_line)
+            if ep_lines:
+                parts.append("## Recent Episodes\n" + "\n".join(ep_lines))
+
+        # Grouped observations by type (#5)
+        obs_text = self.read_observations().strip()
+        if obs_text:
+            obs_lines = [l.strip() for l in obs_text.split("\n") if l.strip().startswith("- ")]
+            if obs_lines:
+                _type_re = re.compile(r"^\- \[(\w+)\]\s*")
+                grouped: dict[str, list[str]] = {}
+                ungrouped: list[str] = []
+                for line in obs_lines[-10:]:
+                    m = _type_re.match(line)
+                    if m:
+                        grouped.setdefault(m.group(1), []).append(line)
+                    else:
+                        ungrouped.append(line)
+                obs_parts: list[str] = []
+                for typ, items in grouped.items():
+                    obs_parts.extend(items)
+                obs_parts.extend(ungrouped)
+                if obs_parts:
+                    parts.append("## Observations\n" + "\n".join(obs_parts[-8:]))
+
         # Everything else is searchable on demand — don't inject
         # Patterns → memory_search, Tool warnings → memory_search, Goals → goals tool
         hints = []
-        if (self.memory_dir / "OBSERVATIONS.md").exists():
-            hints.append("patterns in OBSERVATIONS.md")
         if (self.memory_dir / "TOOL_LEARNINGS.md").exists():
             hints.append("tool warnings in TOOL_LEARNINGS.md")
 
@@ -298,6 +378,10 @@ Categorize information into layers:
 - short_term: what happened in this conversation (tasks, topics, current context) — brief
 - episode: only if something truly notable happened (decisions, milestones, emotional moments)
 - history_entry: timestamped summary for the searchable log
+- investigated: what was explored/researched (if applicable)
+- completed: what was actually accomplished (if applicable)
+- next_steps: pending tasks, follow-ups, or continuations (if applicable)
+- behavioral_insight + observation_type: if you noticed a user preference/pattern, categorize it
 
 ## Current Long-term Memory
 {current_memory or "(empty)"}
@@ -358,6 +442,21 @@ Categorize information into layers:
                 logger.warning("Memory consolidation: history_entry is empty after normalization")
                 return self._fail_or_raw_archive(messages)
 
+            # Append investigated/completed to history_entry (#3)
+            investigated = args.get("investigated")
+            completed = args.get("completed")
+            if investigated:
+                entry += f"\nInvestigated: {_ensure_text(investigated).strip()}"
+            if completed:
+                entry += f"\nCompleted: {_ensure_text(completed).strip()}"
+
+            # Save next_steps to NEXT_STEPS.md (overwritten each consolidation)
+            next_steps = args.get("next_steps")
+            if next_steps:
+                ns_text = _ensure_text(next_steps).strip()
+                if ns_text:
+                    self.next_steps_file.write_text(ns_text + "\n", encoding="utf-8")
+
             # Write to all layers
             self.append_history(entry)
 
@@ -379,6 +478,9 @@ Categorize information into layers:
             insight = args.get("behavioral_insight")
             if insight:
                 insight_text = _ensure_text(insight).strip()
+                obs_type = args.get("observation_type", "")
+                if obs_type and insight_text:
+                    insight_text = f"[{obs_type}] {insight_text}"
                 if insight_text and len(insight_text) > 10:
                     learnings_file = self.memory_dir / "LEARNINGS.md"
                     existing = ""
@@ -589,3 +691,24 @@ class MemoryConsolidator:
                 estimated, source = self.estimate_session_prompt_tokens(session)
                 if estimated <= 0:
                     return
+
+    async def session_end_consolidate(self, session: Session) -> bool:
+        """Force consolidation when a session goes inactive, regardless of thresholds."""
+        if not session.messages:
+            return True
+        lock = self.get_lock(session.key)
+        async with lock:
+            unconsolidated = session.messages[session.last_consolidated:]
+            if not unconsolidated:
+                return True
+            logger.info(
+                "Session-end consolidation for {}: {} unconsolidated messages",
+                session.key,
+                len(unconsolidated),
+            )
+            result = await self.archive_messages(unconsolidated)
+            if result:
+                session.last_consolidated = len(session.messages)
+                self.sessions.save(session)
+                logger.info("Session-end consolidation done for {}", session.key)
+            return result
