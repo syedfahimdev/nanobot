@@ -615,7 +615,7 @@ class WebVoiceChannel(BaseChannel):
                             if cid in self._voice_active:
                                 self._enqueue_tts(cid, sentence)
 
-    _ECHO_COOLDOWN_SECS = 4.0  # Suppress STT for 4s after TTS audio plays (covers speaker playback + mic tail)
+    _ECHO_COOLDOWN_SECS = 2.0  # Suppress STT for 2s after TTS audio finishes sending (reduced from 4s for multi-speaker responsiveness)
 
     @staticmethod
     def _is_echo(transcript: str, tts_text: str) -> bool:
@@ -3029,6 +3029,13 @@ copy();
                                                                     self._utterance_buffer[session_id].append(text)
                                                             else:
                                                                 self._utterance_buffer[session_id].append(text)
+                                                            # Cap buffer to prevent unbounded growth during rapid multi-speaker input
+                                                            buf = self._utterance_buffer.get(session_id, [])
+                                                            if len(buf) > 20:
+                                                                merged = " ".join(buf)
+                                                                self._utterance_buffer[session_id] = []
+                                                                logger.warning("Utterance buffer overflow ({}), force-submitting", len(buf))
+                                                                self._enqueue_message(session_id, merged)
 
                                             elif msg_type == "SpeechStarted":
                                                 await ws.send_json({"type": "speech_started"})
@@ -3043,16 +3050,16 @@ copy();
                                                         self._utterance_buffer[session_id] = []
                                                         self._enqueue_message(session_id, full_text)
                                                     else:
-                                                        # Sentence incomplete — wait 1.5s for more speech
+                                                        # Sentence incomplete — wait for more speech
                                                         logger.debug("Smart endpointing: incomplete '{}', waiting...", full_text[:50])
                                                         _pending_key = f"_pending_submit_{session_id}"
                                                         # Cancel any existing pending submit
                                                         prev = getattr(self, _pending_key, None)
                                                         if prev and not prev.done():
                                                             prev.cancel()
-                                                        async def _delayed_submit(sid=session_id, txt=full_text):
-                                                            await asyncio.sleep(2.5)
-                                                            # Check if buffer was already submitted or got more text
+                                                        async def _delayed_submit(sid=session_id):
+                                                            await asyncio.sleep(2.0)
+                                                            # Always read CURRENT buffer at submit time (not stale snapshot)
                                                             cur_buf = self._utterance_buffer.get(sid, [])
                                                             if cur_buf:
                                                                 merged = " ".join(cur_buf)
@@ -3202,8 +3209,14 @@ copy();
                     if dg_ws:
                         try:
                             await dg_ws.send(msg.data)
-                        except Exception:
-                            pass
+                        except Exception as _dg_err:
+                            logger.warning("Deepgram binary send failed: {} — triggering reconnect", _dg_err)
+                            # Mark connection as dead so forward_transcripts reconnects
+                            try:
+                                await dg_ws.close()
+                            except Exception:
+                                pass
+                            dg_ws = None
 
         except Exception as e:
             logger.error("Web Voice WebSocket error: {}", e)
@@ -3272,7 +3285,8 @@ copy();
         """
         # Drop STT noise — very short transcripts that are likely artifacts
         _clean = text.strip().rstrip(".!?,")
-        if len(_clean.split()) < 2 and len(_clean) < 5 and _clean.lower() not in ("hi", "hey", "yo", "no", "stop", "yes"):
+        _NOISE_WHITELIST = {"hi", "hey", "yo", "no", "stop", "yes", "ok", "go", "do", "hm", "ah", "so", "wait", "what", "sure", "yeah", "nah", "please", "thanks", "done", "next", "help", "haan", "nahi", "bol", "acha", "theek"}
+        if len(_clean.split()) < 2 and len(_clean) < 5 and _clean.lower() not in _NOISE_WHITELIST:
             logger.debug("STT noise gate: dropping '{}' (too short)", text[:20])
             return
 
