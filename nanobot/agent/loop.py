@@ -544,6 +544,13 @@ class AgentLoop:
                 # Don't persist error responses to session history — they can
                 # poison the context and cause permanent 400 loops (#1303).
                 if response.finish_reason == "error":
+                    _err = (clean or "").lower()
+                    # Auto-fix: orphaned tool_call_id — sanitize and retry once
+                    if "tool_call_id" in _err and "not found" in _err and iteration < max_iters:
+                        logger.warning("Orphaned tool_call_id in non-streaming — sanitizing and retrying")
+                        from nanobot.agent.context import ContextBuilder
+                        messages = ContextBuilder._sanitize_tool_references(messages)
+                        continue
                     logger.error("LLM returned error: {}", (clean or "")[:200])
                     final_content = clean or "Sorry, I encountered an error calling the AI model."
                     break
@@ -706,6 +713,21 @@ class AgentLoop:
 
             if finish_reason == "error":
                 _err_lower = (accumulated_content or "").lower()
+
+                # Auto-fix: orphaned tool_call_id references in message history
+                if "tool_call_id" in _err_lower and "not found" in _err_lower and _stream_retry_attempt < 1:
+                    _stream_retry_attempt += 1
+                    logger.warning("Orphaned tool_call_id detected — sanitizing messages and retrying")
+                    from nanobot.agent.context import ContextBuilder
+                    messages = ContextBuilder._sanitize_tool_references(messages)
+                    accumulated_content = ""
+                    sentence_buffer = ""
+                    all_tool_calls = []
+                    finish_reason = None
+                    usage = {}
+                    reasoning_content = None
+                    continue  # Retry with sanitized messages
+
                 _is_rate_limit = any(m in _err_lower for m in ("429", "rate limit", "rate_limit", "too many requests"))
                 if _is_rate_limit and _stream_retry_attempt < _STREAM_MAX_RETRIES:
                     _stream_retry_attempt += 1

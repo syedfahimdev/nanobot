@@ -342,11 +342,53 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         else:
             merged = [{"type": "text", "text": runtime_ctx}] + user_content
 
+        sanitized_history = self._sanitize_tool_references(history)
+
         return [
             {"role": "system", "content": self.build_system_prompt(skill_names, channel=channel)},
-            *history,
+            *sanitized_history,
             {"role": "user", "content": merged},
         ]
+
+    @staticmethod
+    def _sanitize_tool_references(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Remove orphaned tool results whose tool_call_id has no matching assistant tool_call.
+
+        Anthropic rejects messages where a tool result references a tool_call_id
+        that doesn't exist in any preceding assistant message. This happens when
+        history is compressed/trimmed and the assistant message with tool_calls is
+        removed but the tool results remain.
+        """
+        # Collect all valid tool_call_ids from assistant messages
+        valid_ids: set[str] = set()
+        for msg in history:
+            if msg.get("role") == "assistant":
+                for tc in msg.get("tool_calls", []):
+                    tc_id = tc.get("id") or (tc.get("function", {}) or {}).get("id")
+                    if tc_id:
+                        valid_ids.add(tc_id)
+
+        if not valid_ids:
+            # No tool calls in history — remove any orphaned tool results
+            return [m for m in history if m.get("role") != "tool"]
+
+        # Filter out tool results with invalid/missing tool_call_ids
+        result = []
+        removed = 0
+        for msg in history:
+            if msg.get("role") == "tool":
+                tc_id = msg.get("tool_call_id", "")
+                if not tc_id or tc_id not in valid_ids:
+                    removed += 1
+                    continue
+            result.append(msg)
+
+        if removed > 0:
+            import logging
+            logging.getLogger("nanobot.agent.context").warning(
+                "Sanitized history: removed %d orphaned tool result(s)", removed
+            )
+        return result
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
         """Build user message content with optional base64-encoded images."""
