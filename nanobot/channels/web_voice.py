@@ -276,6 +276,7 @@ class WebVoiceChannel(BaseChannel):
 
         self._app.router.add_get("/ws", self._ws_handler)
         self._app.router.add_get("/health", self._health_handler)
+        self._app.router.add_get("/api/health", self._health_handler)
         self._app.router.add_get("/api/profiles", self._profiles_handler)
         self._app.router.add_get("/api/config", self._config_handler)
         self._app.router.add_post("/api/config", self._config_update_handler)
