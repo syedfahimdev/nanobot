@@ -1119,6 +1119,7 @@ class AgentLoop:
                 await self.bus.publish_outbound(OutboundMessage(
                     channel=msg.channel, chat_id=msg.chat_id,
                     content="Sorry, I encountered an error.",
+                    metadata={"_skip_tts": True},
                 ))
             finally:
                 # [#8] Process queued messages — acknowledge and re-dispatch
@@ -1165,6 +1166,7 @@ class AgentLoop:
                             await self.bus.publish_outbound(OutboundMessage(
                                 channel=pending_msg.channel, chat_id=pending_msg.chat_id,
                                 content="Sorry, I encountered an error.",
+                                metadata={"_skip_tts": True},
                             ))
 
     async def close_mcp(self) -> None:
@@ -1812,7 +1814,11 @@ class AgentLoop:
         if _is_voice_channel:
             preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
             logger.info("Voice response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+            # Don't speak errors aloud — they contain technical text (API errors, provider names)
+            _is_error_resp = final_content.startswith(("Error", "Sorry, I encountered")) or "error" in final_content.lower()[:60]
             _voice_meta = {"_voice_final": True, **_resp_meta}
+            if _is_error_resp:
+                _voice_meta["_skip_tts"] = True
             await self.bus.publish_outbound(OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content=final_content,
                 metadata=_voice_meta,

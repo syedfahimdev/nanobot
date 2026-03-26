@@ -477,6 +477,13 @@ class WebVoiceChannel(BaseChannel):
         # Streaming TTS sentence — enqueue for TTS + send text chunk for live display
         if meta.get("_tts_sentence"):
             await broadcast({"type": "response_chunk", "text": msg.content})
+            # Don't speak error/technical text that leaked through streaming
+            _error_patterns = ("error", "api", "anthropic", "rate_limit", "429", "500", "503", "timeout", "exception")
+            _sentence_lower = msg.content.lower()
+            if any(p in _sentence_lower for p in _error_patterns) and len(msg.content) < 200:
+                logger.debug("TTS skip: error-like streaming sentence '{}'", msg.content[:40])
+                self._streamed_text[session_id] = True
+                return
             # Only generate TTS audio when voice mode is active for ANY connected client
             _client_ids = set(cid for cid, _ in live_clients)
             _any_voice_stream = bool(self._voice_active & _client_ids)
@@ -603,8 +610,12 @@ class WebVoiceChannel(BaseChannel):
 
         # TTS: ONLY when voice mode is active for this session.
         # Skip entirely in text-only chat mode — no GPU calls, no TTS generation.
+        # Skip if message is explicitly marked to not be spoken (errors, technical content)
         # Check if ANY connected client has voice active (handles reconnects/multi-device)
         _any_voice = bool(self._voice_active & set(cid for cid, _ in live_clients))
+        if meta.get("_skip_tts"):
+            logger.debug("TTS skipped (marked _skip_tts): '{}'", msg.content[:40])
+            _any_voice = False  # Force-skip TTS for this message
         if _any_voice and not _was_streamed and not meta.get("_voice_final"):
             _keep_reasoning = self._speak_reasoning.get(session_id, False)
             clean = _strip_markdown(msg.content, keep_reasoning=_keep_reasoning)
@@ -3045,29 +3056,25 @@ copy();
                                                 await ws.send_json({"type": "utterance_end"})
                                                 buf = self._utterance_buffer.get(session_id, [])
                                                 if buf:
+                                                    # Always use delayed submit — never submit immediately on UtteranceEnd.
+                                                    # Deepgram fires UtteranceEnd after ~1s of silence, which often falls
+                                                    # mid-sentence (e.g., "check my email [pause] and also tell me the weather").
+                                                    # The delay window lets the next speech fragment arrive and merge.
                                                     full_text = " ".join(buf)
-                                                    if _is_sentence_complete(full_text):
-                                                        # Sentence is complete — submit immediately
-                                                        self._utterance_buffer[session_id] = []
-                                                        self._enqueue_message(session_id, full_text)
-                                                    else:
-                                                        # Sentence incomplete — wait for more speech
-                                                        logger.debug("Smart endpointing: incomplete '{}', waiting...", full_text[:50])
-                                                        _pending_key = f"_pending_submit_{session_id}"
-                                                        # Cancel any existing pending submit
-                                                        prev = getattr(self, _pending_key, None)
-                                                        if prev and not prev.done():
-                                                            prev.cancel()
-                                                        async def _delayed_submit(sid=session_id):
-                                                            await asyncio.sleep(2.0)
-                                                            # Always read CURRENT buffer at submit time (not stale snapshot)
-                                                            cur_buf = self._utterance_buffer.get(sid, [])
-                                                            if cur_buf:
-                                                                merged = " ".join(cur_buf)
-                                                                self._utterance_buffer[sid] = []
-                                                                self._enqueue_message(sid, merged)
-                                                                logger.debug("Smart endpointing: submitted after wait '{}'", merged[:50])
-                                                        setattr(self, _pending_key, asyncio.create_task(_delayed_submit()))
+                                                    _pending_key = f"_pending_submit_{session_id}"
+                                                    prev = getattr(self, _pending_key, None)
+                                                    if prev and not prev.done():
+                                                        prev.cancel()
+                                                    async def _delayed_submit(sid=session_id):
+                                                        await asyncio.sleep(1.5)
+                                                        cur_buf = self._utterance_buffer.get(sid, [])
+                                                        if cur_buf:
+                                                            merged = " ".join(cur_buf)
+                                                            self._utterance_buffer[sid] = []
+                                                            self._enqueue_message(sid, merged)
+                                                            logger.debug("Endpointing: submitted '{}' after merge window", merged[:60])
+                                                    setattr(self, _pending_key, asyncio.create_task(_delayed_submit()))
+                                                    logger.debug("Endpointing: UtteranceEnd with '{}', waiting 1.5s for more speech...", full_text[:50])
 
                                             elif msg_type == "Error":
                                                 await ws.send_json({"type": "error", "message": str(result)})
