@@ -389,6 +389,48 @@ class AgentLoop:
             else:
                 self._mcp_reconnector.record_success(tc.name)
 
+        # [Verification] Post-execution check for write operations
+        if not (isinstance(result, str) and result.startswith("Error")):
+            result = self._verify_tool_result(tc.name, tc.arguments, result)
+
+        return result
+
+    @staticmethod
+    def _verify_tool_result(tool_name: str, args: dict, result: str) -> str:
+        """Post-execution verification for tool results.
+
+        Checks that write operations actually succeeded by looking for
+        confirmation signals in the result. Appends verification notes
+        if something looks off.
+        """
+        if not isinstance(result, str):
+            return result
+
+        result_lower = result.lower()
+
+        # write_file: verify the result confirms the write
+        if tool_name == "write_file":
+            path = args.get("path", "")
+            if "wrote" not in result_lower and "created" not in result_lower and "saved" not in result_lower:
+                if "error" not in result_lower and "permission" not in result_lower:
+                    return f"{result}\n[Verify: check that {path} was actually written]"
+
+        # exec: check for non-zero exit codes hidden in output
+        if tool_name == "exec":
+            if "exit code" in result_lower and "exit code 0" not in result_lower and "exit code: 0" not in result_lower:
+                return f"{result}\n[Verify: command exited with non-zero status — check for errors]"
+
+        # web_search: verify results were actually returned
+        if tool_name in ("web_search", "mcp_composio_BRAVE_SEARCH"):
+            if len(result.strip()) < 20 or "no results" in result_lower:
+                return f"{result}\n[Verify: search returned no useful results — try different keywords]"
+
+        # message/email: verify send confirmation
+        if "send" in tool_name.lower() or "email" in tool_name.lower() or "message" in tool_name.lower():
+            if "sent" not in result_lower and "delivered" not in result_lower and "success" not in result_lower and "created" not in result_lower:
+                if "error" not in result_lower:
+                    return f"{result}\n[Verify: no explicit send confirmation — check if message was actually delivered]"
+
         return result
 
     async def _run_agent_loop(
@@ -1566,6 +1608,13 @@ class AgentLoop:
             _delegate = [s for s, c in _heavy if c == "heavy"]
             _inline = [s for s, c in _heavy if c == "light"]
             if _delegate and _inline:
+                # Show plan before delegating
+                _plan_lines = []
+                for s, c in _heavy:
+                    _plan_lines.append(f"{'[background]' if c == 'heavy' else '[inline]'} {s}")
+                _plan_text = "Here's my plan:\n" + "\n".join(f"  {i+1}. {l}" for i, l in enumerate(_plan_lines))
+                _plan_text += "\n\nStarting background tasks now..."
+                await _send_quick_answer(_plan_text, "Task plan")
                 for _ds in _delegate:
                     await self.subagents.spawn(
                         task=_ds, label=_ds[:30],
@@ -1581,19 +1630,20 @@ class AgentLoop:
                 logger.info("Rewrote message to light tasks: {}", msg.content[:60])
                 _auto_delegated = True
 
-        # Case 2: RESEARCH/GENERATE — auto-spawn single subagent
+        # Case 2: RESEARCH/GENERATE — auto-spawn single subagent with plan
         if _intent["delegate"] and not _auto_delegated:
+            _steps = _intent.get("steps", [])
+            _plan_msg = f"I'll handle this in the background"
+            if _steps:
+                _plan_msg += ":\n" + "\n".join(f"  {i+1}. {s}" for i, s in enumerate(_steps))
+            _plan_msg += "\n\nYou can check progress in the Agents panel."
             await self.subagents.spawn(
                 task=msg.content, label=msg.content[:30],
                 origin_channel=msg.channel, origin_chat_id=msg.chat_id,
                 session_key=key,
             )
             logger.info("Auto-delegated {} task to subagent: {}", _intent["category"], msg.content[:60])
-            return await _send_quick_answer(
-                f"On it — I'm working on that in the background. I'll send you the results when done. "
-                f"You can check progress in the Agents panel.",
-                "Auto-delegate",
-            )
+            return await _send_quick_answer(_plan_msg, "Auto-delegate")
 
         # [#2] Priority detection — log urgency level
         priority = detect_priority(msg.content)

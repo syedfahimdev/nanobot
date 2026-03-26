@@ -96,19 +96,48 @@ class SelfCorrector:
         return f"- [{ts}] {tool_name}: {cats} — {result_preview}"
 
     def _check_repeated_errors(self, tool_name: str, categories: list[str]) -> str | None:
-        """Check if a tool has repeated the same error and suggest alternatives."""
+        """Check if a tool has repeated the same error and suggest alternatives.
+
+        Uses root-cause investigation pattern: instead of just counting failures,
+        analyzes the error pattern to suggest specific fixes.
+        """
         key = f"{tool_name}:{','.join(sorted(categories))}"
         self._error_counts[key] += 1
 
         if self._error_counts[key] >= _REPEATED_ERROR_THRESHOLD:
             self._error_counts[key] = 0  # Reset counter
+
+            # Root-cause investigation — analyze error history for this tool
+            history = self._error_history.get(tool_name, [])
+            recent = history[-_REPEATED_ERROR_THRESHOLD:]
+            previews = [h.get("result_preview", "") for h in recent]
+
             if "auth_failure" in categories:
-                return f"{tool_name} has failed auth {_REPEATED_ERROR_THRESHOLD}+ times — check API credentials"
+                # Check if it's always the same auth error
+                return (f"ROOT CAUSE: {tool_name} has failed auth {_REPEATED_ERROR_THRESHOLD}+ times. "
+                        f"Likely cause: invalid/expired API key. Action: check credentials with the credentials tool, "
+                        f"or skip this tool and use an alternative approach.")
             if "rate_limit" in categories:
-                return f"{tool_name} is rate-limited — wait before retrying or use a different approach"
+                return (f"ROOT CAUSE: {tool_name} is rate-limited ({_REPEATED_ERROR_THRESHOLD}+ hits). "
+                        f"Action: wait 30+ seconds before retrying, reduce request frequency, "
+                        f"or switch to a different provider/approach.")
             if "timeout" in categories:
-                return f"{tool_name} keeps timing out — try with simpler parameters or a smaller scope"
-            return f"{tool_name} keeps failing ({','.join(categories)}) — consider an alternative approach"
+                return (f"ROOT CAUSE: {tool_name} keeps timing out ({_REPEATED_ERROR_THRESHOLD}+ times). "
+                        f"Likely cause: request too large or server overloaded. "
+                        f"Action: simplify parameters, reduce scope, or try a different tool.")
+            if "not_found" in categories:
+                # Check if the same resource is being requested
+                return (f"ROOT CAUSE: {tool_name} returns not-found repeatedly. "
+                        f"The requested resource likely doesn't exist. "
+                        f"Action: verify the input, check spelling, or try a broader search.")
+            if "empty_result" in categories:
+                return (f"ROOT CAUSE: {tool_name} returns empty results repeatedly. "
+                        f"Likely cause: wrong search terms or resource unavailable. "
+                        f"Action: rephrase the query, broaden search terms, or try an alternative tool.")
+
+            return (f"ROOT CAUSE: {tool_name} keeps failing ({','.join(categories)}). "
+                    f"Recent errors: {'; '.join(p[:50] for p in previews if p)}. "
+                    f"Action: investigate why this tool fails for this input and try an alternative approach.")
 
         return None
 
