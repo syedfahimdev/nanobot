@@ -362,6 +362,7 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_post("/api/delegations", self._delegations_save_handler)
         self._app.router.add_get("/api/decisions", self._decisions_handler)
         self._app.router.add_post("/api/jarvis/decisions", self._decisions_save_handler)
+        self._app.router.add_get("/api/jarvis/delegations", self._delegations_handler)
         self._app.router.add_patch("/api/jarvis/delegations", self._delegations_update_handler)
         self._app.router.add_get("/api/people-prep", self._people_prep_handler)
         # Voice providers
@@ -382,8 +383,8 @@ class WebVoiceChannel(BaseChannel):
         self._app.router.add_get("/api/budget", self._budget_handler)
         self._app.router.add_get("/api/agents", self._agents_list_handler)
         self._app.router.add_get("/api/favorites", self._favorites_handler)
-        # Serve React build from /root/mawabot/dist (if exists), fallback to inline HTML
-        _react_dist = Path("/root/mawabot/dist")
+        # Serve React build from dist dir (if exists), fallback to inline HTML
+        _react_dist = Path(os.environ.get("MAWABOT_DIST_PATH", "/root/mawabot/dist"))
         if _react_dist.exists():
             self._app.router.add_static("/assets", _react_dist / "assets")
             self._app.router.add_get("/manifest.json", lambda r: web.FileResponse(_react_dist / "manifest.json") if (_react_dist / "manifest.json").exists() else self._pwa_asset_handler(r))
@@ -891,7 +892,7 @@ class WebVoiceChannel(BaseChannel):
 
     async def _spa_handler(self, request: web.Request) -> web.Response:
         """Serve React SPA — all routes get index.html (client-side routing)."""
-        dist = Path("/root/mawabot/dist")
+        dist = Path(os.environ.get("MAWABOT_DIST_PATH", "/root/mawabot/dist"))
         return web.FileResponse(
             dist / "index.html",
             headers={

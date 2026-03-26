@@ -1149,13 +1149,23 @@ class AgentLoop:
                         # Add a note to session so the LLM knows about queued messages
                         session.add_message("user", f"[While you were working, the user also said: {'; '.join(ack_texts)}]")
 
-                    # Task/context-dependent messages: re-dispatch to main agent
+                    self.sessions.save(session)
+
+                    # Task/context-dependent messages: process sequentially while still holding lock
                     for pending_msg in task_msgs:
                         logger.info("Re-dispatching queued request: '{}'",
                                     pending_msg.content[:60])
-                        asyncio.create_task(self._dispatch(pending_msg))
-
-                    self.sessions.save(session)
+                        try:
+                            response = await self._process_message(pending_msg)
+                            if response is not None:
+                                await self.bus.publish_outbound(response)
+                        except Exception:
+                            logger.exception("Error processing pending message: '{}'",
+                                             pending_msg.content[:60])
+                            await self.bus.publish_outbound(OutboundMessage(
+                                channel=pending_msg.channel, chat_id=pending_msg.chat_id,
+                                content="Sorry, I encountered an error.",
+                            ))
 
     async def close_mcp(self) -> None:
         """Drain pending background archives, then close MCP connections."""
@@ -1500,40 +1510,40 @@ class AgentLoop:
             elif is_standalone_heavy(msg.content):
                 _intent = {"category": "RESEARCH", "delegate": True, "steps": []}
 
-            # Case 1: MULTI — split into heavy (delegate) + light (inline)
-            if _intent["category"] == "MULTI" and len(_intent["steps"]) >= 2:
-                _heavy = [(s, classify_step(s)) for s in _intent["steps"]]
-                _delegate = [s for s, c in _heavy if c == "heavy"]
-                _inline = [s for s, c in _heavy if c == "light"]
-                if _delegate and _inline:
-                    for _ds in _delegate:
-                        await self.subagents.spawn(
-                            task=_ds, label=_ds[:30],
-                            origin_channel=msg.channel, origin_chat_id=msg.chat_id,
-                            session_key=key,
-                        )
-                        logger.info("Auto-delegated heavy task to subagent: {}", _ds[:60])
-                    msg = InboundMessage(
-                        channel=msg.channel, chat_id=msg.chat_id,
-                        content=" and ".join(_inline),
-                        sender_id=msg.sender_id, metadata=msg.metadata, media=msg.media,
+        # Case 1: MULTI — split into heavy (delegate) + light (inline)
+        if _intent["category"] == "MULTI" and len(_intent["steps"]) >= 2:
+            _heavy = [(s, classify_step(s)) for s in _intent["steps"]]
+            _delegate = [s for s, c in _heavy if c == "heavy"]
+            _inline = [s for s, c in _heavy if c == "light"]
+            if _delegate and _inline:
+                for _ds in _delegate:
+                    await self.subagents.spawn(
+                        task=_ds, label=_ds[:30],
+                        origin_channel=msg.channel, origin_chat_id=msg.chat_id,
+                        session_key=key,
                     )
-                    logger.info("Rewrote message to light tasks: {}", msg.content[:60])
-                    _auto_delegated = True
+                    logger.info("Auto-delegated heavy task to subagent: {}", _ds[:60])
+                msg = InboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content=" and ".join(_inline),
+                    sender_id=msg.sender_id, metadata=msg.metadata, media=msg.media,
+                )
+                logger.info("Rewrote message to light tasks: {}", msg.content[:60])
+                _auto_delegated = True
 
-            # Case 2: RESEARCH/GENERATE — auto-spawn single subagent
-            elif _intent["delegate"] and not _auto_delegated:
-                await self.subagents.spawn(
-                    task=msg.content, label=msg.content[:30],
-                    origin_channel=msg.channel, origin_chat_id=msg.chat_id,
-                    session_key=key,
-                )
-                logger.info("Auto-delegated {} task to subagent: {}", _intent["category"], msg.content[:60])
-                return await _send_quick_answer(
-                    f"On it — I'm working on that in the background. I'll send you the results when done. "
-                    f"You can check progress in the Agents panel.",
-                    "Auto-delegate",
-                )
+        # Case 2: RESEARCH/GENERATE — auto-spawn single subagent
+        if _intent["delegate"] and not _auto_delegated:
+            await self.subagents.spawn(
+                task=msg.content, label=msg.content[:30],
+                origin_channel=msg.channel, origin_chat_id=msg.chat_id,
+                session_key=key,
+            )
+            logger.info("Auto-delegated {} task to subagent: {}", _intent["category"], msg.content[:60])
+            return await _send_quick_answer(
+                f"On it — I'm working on that in the background. I'll send you the results when done. "
+                f"You can check progress in the Agents panel.",
+                "Auto-delegate",
+            )
 
         # [#2] Priority detection — log urgency level
         priority = detect_priority(msg.content)

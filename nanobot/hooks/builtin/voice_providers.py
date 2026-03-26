@@ -389,7 +389,11 @@ def _build_elevenlabs_voice_settings(workspace: Path | None = None, model_id: st
     contextual understanding of the text. v2 models use explicit style params.
     """
     from nanobot.hooks.builtin.feature_registry import get_setting
-    ws = workspace or Path("/root/.nanobot/workspace")
+    if workspace is None:
+        from nanobot.config.paths import get_workspace_path
+        ws = get_workspace_path()
+    else:
+        ws = workspace
     settings: dict = {
         "stability": get_setting(ws, "elevenlabsStability", 0.3),
         "similarity_boost": get_setting(ws, "elevenlabsSimilarity", 0.7),
