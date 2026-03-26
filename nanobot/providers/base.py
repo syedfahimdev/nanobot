@@ -86,7 +86,8 @@ class LLMProvider(ABC):
     while maintaining a consistent interface.
     """
 
-    _CHAT_RETRY_DELAYS = (1, 2, 4)
+    _CHAT_RETRY_DELAYS = (2, 5, 15)
+    _RATE_LIMIT_RETRY_DELAYS = (30, 45, 60)  # Longer waits specifically for 429/rate limits
     _TRANSIENT_ERROR_MARKERS = (
         "429",
         "rate limit",
@@ -101,6 +102,7 @@ class LLMProvider(ABC):
         "server error",
         "temporarily unavailable",
     )
+    _RATE_LIMIT_MARKERS = ("429", "rate limit", "rate_limit", "too many requests")
     _IMAGE_UNSUPPORTED_MARKERS = (
         "image_url is only supported",
         "does not support image",
@@ -210,6 +212,26 @@ class LLMProvider(ABC):
         return any(marker in err for marker in cls._TRANSIENT_ERROR_MARKERS)
 
     @classmethod
+    def _is_rate_limit_error(cls, content: str | None) -> bool:
+        err = (content or "").lower()
+        return any(marker in err for marker in cls._RATE_LIMIT_MARKERS)
+
+    @staticmethod
+    def _extract_retry_after(content: str | None) -> int | None:
+        """Try to extract a retry-after duration (seconds) from the error message."""
+        if not content:
+            return None
+        import re
+        # Match patterns like "retry after 30s", "retry in 30 seconds", "Retry-After: 30"
+        m = re.search(r"retry[\s-]*after[\s:]*(\d+)", content, re.I)
+        if m:
+            return min(int(m.group(1)), 120)  # Cap at 2 minutes
+        m = re.search(r"try again in (\d+)\s*s", content, re.I)
+        if m:
+            return min(int(m.group(1)), 120)
+        return None
+
+    @classmethod
     def _is_image_unsupported_error(cls, content: str | None) -> bool:
         err = (content or "").lower()
         return any(marker in err for marker in cls._IMAGE_UNSUPPORTED_MARKERS)
@@ -272,7 +294,8 @@ class LLMProvider(ABC):
             reasoning_effort=reasoning_effort, tool_choice=tool_choice,
         )
 
-        for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
+        max_attempts = max(len(self._CHAT_RETRY_DELAYS), len(self._RATE_LIMIT_RETRY_DELAYS))
+        for attempt in range(1, max_attempts + 1):
             response = await self._safe_chat(**kw)
 
             if response.finish_reason != "error":
@@ -286,11 +309,26 @@ class LLMProvider(ABC):
                         return await self._safe_chat(**{**kw, "messages": stripped})
                 return response
 
-            logger.warning(
-                "LLM transient error (attempt {}/{}), retrying in {}s: {}",
-                attempt, len(self._CHAT_RETRY_DELAYS), delay,
-                (response.content or "")[:120].lower(),
-            )
+            # Use longer delays for rate limits, shorter for other transient errors
+            is_rate_limit = self._is_rate_limit_error(response.content)
+            if is_rate_limit:
+                # Check if the error specifies a retry-after duration
+                retry_after = self._extract_retry_after(response.content)
+                delays = self._RATE_LIMIT_RETRY_DELAYS
+                delay = retry_after or (delays[min(attempt - 1, len(delays) - 1)])
+                logger.warning(
+                    "Rate limited (attempt {}/{}), retrying in {}s: {}",
+                    attempt, max_attempts, delay,
+                    (response.content or "")[:120].lower(),
+                )
+            else:
+                delays = self._CHAT_RETRY_DELAYS
+                delay = delays[min(attempt - 1, len(delays) - 1)]
+                logger.warning(
+                    "LLM transient error (attempt {}/{}), retrying in {}s: {}",
+                    attempt, max_attempts, delay,
+                    (response.content or "")[:120].lower(),
+                )
             await asyncio.sleep(delay)
 
         return await self._safe_chat(**kw)

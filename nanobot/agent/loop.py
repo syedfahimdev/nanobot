@@ -628,6 +628,8 @@ class AgentLoop:
             finish_reason = None
             usage = {}
             reasoning_content = None
+            _stream_retry_attempt = 0
+            _STREAM_MAX_RETRIES = 3
 
             try:
                 _STREAM_CHUNK_TIMEOUT = 60  # Max seconds to wait for a chunk
@@ -703,6 +705,30 @@ class AgentLoop:
                 await on_sentence(sentence_buffer.strip())
 
             if finish_reason == "error":
+                _err_lower = (accumulated_content or "").lower()
+                _is_rate_limit = any(m in _err_lower for m in ("429", "rate limit", "rate_limit", "too many requests"))
+                if _is_rate_limit and _stream_retry_attempt < _STREAM_MAX_RETRIES:
+                    _stream_retry_attempt += 1
+                    # Extract retry-after or use escalating defaults
+                    _retry_delay = self.provider._extract_retry_after(accumulated_content)
+                    if not _retry_delay:
+                        _retry_delay = (30, 45, 60)[min(_stream_retry_attempt - 1, 2)]
+                    logger.warning(
+                        "Stream rate limited (attempt {}/{}), retrying in {}s: {}",
+                        _stream_retry_attempt, _STREAM_MAX_RETRIES, _retry_delay,
+                        accumulated_content[:120],
+                    )
+                    if on_progress:
+                        await on_progress(f"Rate limited — retrying in {_retry_delay}s...")
+                    await asyncio.sleep(_retry_delay)
+                    # Reset state for retry
+                    accumulated_content = ""
+                    sentence_buffer = ""
+                    all_tool_calls = []
+                    finish_reason = None
+                    usage = {}
+                    reasoning_content = None
+                    continue  # Retry the iteration (stream_chat will be called again at top of loop)
                 logger.error("LLM stream error: {}", accumulated_content[:200])
                 final_content = accumulated_content or "Sorry, I encountered an error calling the AI model."
                 break
