@@ -729,11 +729,23 @@ class WebVoiceChannel(BaseChannel):
                     _prefetch_task = None
                     _prefetch_text = None
         finally:
-            # ALWAYS clear playing flag — even on crash, timeout, or exception
-            self._tts_playing.discard(session_id)
-            # Echo cooldown AFTER all sentences are spoken
+            # Keep _tts_playing SET during cooldown — browser is still playing audio
+            # through speakers even though we finished sending bytes. If we clear the
+            # flag now, echo suppression is bypassed and the mic picks up Mawa's own
+            # voice, contaminating the next user command.
             await asyncio.sleep(self._ECHO_COOLDOWN_SECS)
+            # NOW clear — browser should be done playing by now
             self._tts_playing.discard(session_id)
+            # Flush any echo that leaked into the utterance buffer during playback
+            # (must check BEFORE clearing _recent_tts_text)
+            echo_buf = self._utterance_buffer.get(session_id, [])
+            if echo_buf:
+                recent_tts = self._recent_tts_text.get(session_id, "") or ""
+                if recent_tts:
+                    joined = " ".join(echo_buf)
+                    if self._is_echo(joined, recent_tts):
+                        self._utterance_buffer[session_id] = []
+                        logger.debug("TTS cleanup: flushed echo from utterance buffer '{}'", joined[:40])
             self._recent_tts_text.pop(session_id, None)
             logger.debug("TTS worker done for {} — echo suppression cleared after {}s cooldown", session_id, self._ECHO_COOLDOWN_SECS)
             # Clean up Deepgram streaming connection
@@ -3006,7 +3018,16 @@ copy();
                                                                 except Exception:
                                                                     pass
                                                         if is_final and confidence > 0.5:
-                                                            self._utterance_buffer[session_id].append(text)
+                                                            # Block echo at the buffer level — don't let TTS playback
+                                                            # contaminate the utterance buffer with Mawa's own words
+                                                            if session_id in self._tts_playing:
+                                                                _recent = self._recent_tts_text.get(session_id, "")
+                                                                if _recent and self._is_echo(text, _recent):
+                                                                    logger.debug("Buffer echo gate: blocking '{}' from buffer", text[:30])
+                                                                else:
+                                                                    self._utterance_buffer[session_id].append(text)
+                                                            else:
+                                                                self._utterance_buffer[session_id].append(text)
 
                                             elif msg_type == "SpeechStarted":
                                                 await ws.send_json({"type": "speech_started"})
